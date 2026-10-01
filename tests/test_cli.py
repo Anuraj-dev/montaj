@@ -569,3 +569,48 @@ def test_music_group_names_itself_in_errors_and_has_help(capsys: pytest.CaptureF
     assert main(["music", "--help"]) == 0
     usage = capsys.readouterr().out
     assert "gen" in usage and "analyze" in usage
+
+
+def test_taste_prints_and_adds(tmp_path: Path, capsys, monkeypatch) -> None:
+    monkeypatch.setenv("MONTAJ_TASTE", str(tmp_path / "taste.md"))
+    code, out, _ = _run(["taste"], capsys)
+    assert code == 0 and "beat" in out and out.strip().splitlines()[-1].startswith("OK taste ")
+    code, out, _ = _run(["taste", "add", "never zoom faces"], capsys)
+    assert code == 0 and re.fullmatch(r"OK taste \d+ lines", out.strip())
+    assert "- never zoom faces (" in (tmp_path / "taste.md").read_text()
+    code, out, _ = _run(["taste", "add"], capsys)
+    assert code == 1 and out.startswith("ERR taste:")
+
+
+def test_review_summary_text_and_json(tmp_path: Path, capsys) -> None:
+    root = _project(tmp_path, "  - {photo: a, hold: 10f}\n  - {photo: b, hold: 10f}\n", ["a", "b"])
+    review = {
+        "version": 1, "spec_sha": "", "video": "", "updated": "",
+        "shots": [
+            {"index": 0, "start": 0.0, "end": 0.33, "label": "a", "status": None, "comments": []},
+            {"index": 1, "start": 0.33, "end": 0.67, "label": "b", "status": "rejected",
+             "comments": [{"id": 1, "t": 0.4, "text": "too dark"}]},
+        ],
+        "general": [],
+    }
+    (root / "review.json").write_text(json.dumps(review))
+    code, out, _ = _run(["-C", str(root), "review", "--summary"], capsys)
+    lines = out.strip().splitlines()
+    assert code == 0 and len(lines) == 2
+    assert lines[0].startswith("#1 ") and "REJECT" in lines[0] and '"too dark"' in lines[0]
+    assert lines[1] == "OK review 0 approved 1 rejected 1 comments"
+    code, out, _ = _run(["-C", str(root), "--json", "review", "--summary"], capsys)
+    data = json.loads(out)
+    assert code == 0 and data["status"] == "OK" and data["review"]["rejected"] == 1
+
+
+def test_review_port_in_use_is_one_err_line(tmp_path: Path, capsys) -> None:
+    import socket
+
+    root = _project(tmp_path, "  - {photo: a, hold: 10f}\n", ["a"])
+    with socket.socket() as busy:
+        busy.bind(("127.0.0.1", 0))
+        busy.listen()
+        port = busy.getsockname()[1]
+        code, out, _ = _run(["-C", str(root), "review", "--port", str(port)], capsys)
+    assert code == 1 and out.startswith("ERR review:") and len(out.strip().splitlines()) == 1

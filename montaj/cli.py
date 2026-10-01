@@ -20,10 +20,14 @@ from montaj.audio.music import parse_duration
 from montaj.doctor import doctor
 from montaj.encode import export, probe
 from montaj.ingest import ingest
+from montaj import taste
 from montaj.qa import BLACK_PIX_TH, check
+from montaj.review.server import serve as serve_review
+from montaj.review.summary import summary as review_summary
 from montaj.sheet import MAX_TILES, pick_times, sheet
 from montaj.spec import SpecError, _dur_frames, load_spec
 from montaj.timeline import Blank, Still, Wall, resolve, wall_static_spans
+from montaj.watch import watch
 
 RECIPES = Path(__file__).resolve().parents[1] / "recipes"
 
@@ -34,7 +38,10 @@ class _Usage(Exception):
         self.as_json = as_json
 
 
-_COMMANDS = ("doctor", "new", "ingest", "validate", "render", "sheet", "check", "export", "music")
+_COMMANDS = (
+    "doctor", "new", "ingest", "validate", "render", "sheet", "check", "export", "music",
+    "review", "watch", "taste",
+)
 
 
 class _Parser(argparse.ArgumentParser):
@@ -91,6 +98,18 @@ def _parser() -> argparse.ArgumentParser:
     ana.add_argument("--prompt", default=None)
     ana.add_argument("--bpm", type=float, default=None)
     ana.add_argument("--out", default=analyze_audio.DEFAULT_OUT)
+
+    rv = sub.add_parser("review")
+    rv.add_argument("--port", type=int, default=8765)
+    rv.add_argument("--video", default=None)
+    rv.add_argument("--summary", action="store_true")
+
+    wa = sub.add_parser("watch")
+    wa.add_argument("--final", action="store_true")
+
+    ta = sub.add_parser("taste")
+    ta.add_argument("action", nargs="?", choices=("add",))
+    ta.add_argument("line", nargs="?")
     return p
 
 
@@ -459,6 +478,29 @@ def _cmd_music_analyze(ns: argparse.Namespace, root: Path) -> list[str]:
     return [*analysis.lines, f"OK {_rel(root, analysis.path)} {analysis.n_words} words {analysis.n_beats} beats"]
 
 
+def _cmd_taste(ns: argparse.Namespace) -> list[str]:
+    if ns.action == "add":
+        if not (ns.line or "").strip():
+            return ['ERR taste: add needs a line, e.g. montaj taste add "never zoom faces"']
+        return [f"OK taste {taste.add(ns.line.strip())} lines"]
+    text = taste.read()
+    lines = text.splitlines()
+    return lines + [f"OK taste {sum(1 for l in lines if l.strip())} lines"]
+
+
+def _streaming(ns: argparse.Namespace, root: Path) -> bool:
+    """`review` (server) and `watch` run until Ctrl-C and print their own lines."""
+    if ns.cmd == "review" and not ns.summary:
+        video = _at(root, ns.video) if ns.video else None
+        serve_review(root, ns.port, video=video, log=root / "build" / "review.log")
+        return True
+    if ns.cmd == "watch":
+        # Flush per line: watch output is often piped or tailed from a file.
+        watch(root, mode="final" if ns.final else "preview", out=lambda line: print(line, flush=True))
+        return True
+    return False
+
+
 def _dispatch(ns: argparse.Namespace, root: Path) -> list[str]:
     if ns.cmd == "doctor":
         return _cmd_doctor()
@@ -478,6 +520,10 @@ def _dispatch(ns: argparse.Namespace, root: Path) -> list[str]:
         return _cmd_export(ns, root)
     if ns.cmd == "music":
         return _cmd_music_gen(ns, root) if ns.music_cmd == "gen" else _cmd_music_analyze(ns, root)
+    if ns.cmd == "review":
+        return review_summary(root)[0]
+    if ns.cmd == "taste":
+        return _cmd_taste(ns)
     raise _Usage(f"cli: unknown command {ns.cmd!r}")
 
 
@@ -499,6 +545,12 @@ def main(argv: list[str] | None = None) -> int:
         return _emit([f"ERR {_argv_cmd(rest)}: exit {exc.code}"], as_json)
     root = _root(chdir)
     try:
+        if _streaming(ns, root):
+            return 0
+        if as_json and ns.cmd == "review":
+            lines, digest = review_summary(root)
+            print(json.dumps({"status": _status(lines), "lines": lines, "review": digest}, ensure_ascii=False))
+            return 0 if _status(lines) != "ERR" else 1
         lines = _dispatch(ns, root)
     except SpecError as exc:
         lines = [f"ERR {err}" for err in exc.errors]
