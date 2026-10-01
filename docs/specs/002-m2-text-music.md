@@ -20,6 +20,8 @@ CSS semantics that matter (all in sRGB 0..1 values, the way Chromium composites)
 - Gradients interpolate premultiplied colours linearly between stops.
 
 ## Time
+- Easing: film.html `es` is **`sine(x) = .5 − .5·cos(πx)`** (new, added to `core.EASE`), not M1's
+  smoothstep `smooth`; `eo` = `outc`; `eio` = `cubic`. Use `sine` wherever film.html uses `es`.
 - A **time expression** is a duration from film start (`12.0s`, `360f`, `16b`) or `<marker>[±<duration>]`
   (`ch1`, `ch1+2.4s`, `pre2-6f`). Names match `[a-z][a-z0-9_]*`.
 - `parse_time(raw, markers, fps, bpm) -> float` returns **float frames, not rounded**. Text reveals need
@@ -73,7 +75,7 @@ fx:
 tracks:                   # slow global levels; keys are piecewise curves like wall camera keys
   dust:  [{t: 0s, v: .35}, {t: ch1-1s, v: .35}, {t: ch1, v: .85, ease: linear}]
   glow:  [{t: 0s, v: .25}, …]      # strength of the two drifting light leaks
-  bars:  [{t: 0s, v: 150}, {t: ch1+0.4s, v: 0}]   # letterbox height, design px; ease default smooth
+  bars:  [{t: 0s, v: 150}, {t: ch1+0.4s, v: 0}]   # letterbox height, design px; ease default sine
 ```
 Rules and fields:
 - `hold` xor `until`. `until` must lie after the shot's start (error otherwise, hint the start time).
@@ -82,7 +84,7 @@ Rules and fields:
   are mutually exclusive with `drift`'s framing rules below; `zoom` + `drift` is an error.
 - `in` on shot 0: only `fade` (from `video.background`). Other transitions on shot 0 stay an error.
 - `pulse`: `heartbeat` only (M2). Requires `video.bpm`.
-- `tracks.*[].t` is a time expression; `v` a number; `ease` as camera keys (default `smooth` for bars,
+- `tracks.*[].t` is a time expression; `v` a number; `ease` as camera keys plus the new `sine` (default `sine` for bars,
   `linear` for dust and glow). Before the first key: first value; after the last: last value.
 - Text line fields: `text` (required), `style` ∈ `serif | script | caps | deva` (default `serif`),
   `italic` (bool; default false, `serif` only), `gold` (bool), `color` (`cream | gold | ink | #rrggbb`,
@@ -127,10 +129,10 @@ Animation (film.html `Words`, 166–189), per unit i of a line, with `a_i = at +
 `k = outCubic(clamp((t − a_i)/dur))` (film.html `eo`); opacity k; blur σ = (1−k)·12; translateY (1−k)·rise.
 `reveal: pop` (film.html 289–291) is per line, not per unit: `pop = outCubic(clamp((t − at)·5/span))` where
 span = the block's window; scale lerp(1.25, 1, pop) about the line centre, opacity pop, blur (1−pop)·14.
-Block opacity `a = vis(t)` (film.html `vis`, 408–411: `min(fi>.02 ? smooth((t−from)/fi) : 1,
-fo>.02 ? smooth((to−t)/fo) : 1)`, 0 outside [from, to]); the composited block is blurred σ = (1−a)·blur
-then drawn with opacity a. Subs (film.html 431–432): opacity `min(smooth((t−(from−.2s))/.5s),
-smooth(((to+.3s)−t)/.5s))`, at most one sub visible (the first whose window contains t).
+Block opacity `a = vis(t)` (film.html `vis`, 408–411: `min(fi>.02 ? sine((t−from)/fi) : 1,
+fo>.02 ? sine((to−t)/fo) : 1)`, 0 outside [from, to]); the composited block is blurred σ = (1−a)·blur
+then drawn with opacity a. Subs (film.html 431–432): opacity `min(sine((t−(from−.2s))/.5s),
+sine(((to+.3s)−t)/.5s))`, at most one sub visible (the first whose window contains t).
 
 ## Shots (montaj/render/shots.py; film.html `fitCover`/`Photo`, 113–163)
 ```python
@@ -146,7 +148,7 @@ morph_mask(cv, x, center) -> (1,H,W)                   # r = inOutCubic(x)·1900
 pulse_heartbeat(phase) -> scale                        # 1 + .035·e^(−18b) + (b>.22 ? .02·e^(−18(b−.22)) : 0)
 css_blur(img, sigma_px) -> img                         # separable gaussian; downsample when σ > 8 device px
 ```
-Drift progress: `k = clamp((t − v0)/(v1 − v0))`, `z = lerp(z0, z1, smooth(k))`, pan `(pan·(k − .5))`.
+Drift progress: `k = clamp((t − v0)/(v1 − v0))`, `z = lerp(z0, z1, sine(k))`, pan `(pan·(k − .5))`.
 `fx, fy` = focus relative to the crop (`(focus − crop0)/crop_size`), default .5. `[v0, v1)` is the shot's
 **visible span**: from its start (or its whip start) to the end of the next shot's transition.
 Morph reuses the shot's framing for the second photo; `x = (t − (start + at))/dur`; morph centre is a screen
