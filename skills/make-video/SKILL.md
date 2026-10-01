@@ -14,7 +14,8 @@ check and review round after that is a `montaj` command that costs no tokens. Ru
 - Look only at Montaj contact sheets (`build/*.jpg`), at most 2 images per iteration. The photos stay on disk.
 - Read `~/Anuraj-dev/montaj/docs/SPEC-REFERENCE.md` (every spec field, one line each) and one recipe. Engine
   source is out of scope: on an engine bug, report the command and its `ERR` line to the user and stop.
-- Run `render` and `music gen` in the background and wait for the notification.
+- Films up to 60 s render in under a minute: run `render` and `check` in the foreground. Longer finals and
+  `music gen` take minutes: run them in the background and wait for the notification.
 
 ## Steps
 
@@ -26,7 +27,8 @@ check and review round after that is a `montaj` command that costs no tokens. Ru
    `<project>/build/ingest-sheet.jpg` once. Recipes (`~/Anuraj-dev/montaj/recipes/`):
    - `birthday-short` — 28 s photo montage: cuts, fades and swirls on a beat grid, a photo wall, warm-film.
    - `birthday-song-film` — 165 s lyric film: text cards, subtitles, song markers, Ken Burns, golden-film.
-   Done when you can name each photo stem's content in a few words.
+   `assets/assets.json` lists each stem's `w`, `h`: a landscape photo loses its sides in 9:16, so frame it with
+   `frame:` (polaroid card) or aim `focus` at the face. Done when you can name each stem's content in a few words.
 
 3. **Music** (skip for a silent film).
    - Their track: copy it into `<project>/music/`, then `montaj music analyze music/<file>.wav` →
@@ -39,7 +41,8 @@ check and review round after that is a `montaj` command that costs no tokens. Ru
    shots, text and markers.
    - Cuts land on the beat grid (`4b`, `8b`) or on markers (`until: v3`, `word:12`).
    - Order shots as an arc: calm open, build, peak, quiet end.
-   - Text is short and centred; one idea per card.
+   - Text is short and centred; one idea per card. Width budget on a 1080-wide frame: about 24 characters of
+     `script` at `size: 100`; scale `size` down in proportion for longer lines.
    - Framing: `focus: [x, y]` (source px) puts a face at the screen centre; `crop` trims.
    `montaj validate` and fix every `ERR` line. Done on `OK montaj.yaml …`.
 
@@ -53,5 +56,6 @@ check and review round after that is a `montaj` command that costs no tokens. Ru
    prints one line per noted shot; apply every note. A note that states a lasting preference becomes
    `montaj taste add "<preference>"`.
 
-7. **Final.** `montaj render --final`, then `montaj check`: done on `OK check`; a `WARN` line names what to
-   fix in the spec. For phone sharing add `montaj export --target whatsapp`. Report the output paths.
+7. **Final.** `montaj render --final`, then `montaj check`: done on `OK check`. A `WARN` line names a defect to
+   fix in the spec; `INFO` lines are informational. For phone sharing add `montaj export --target whatsapp`.
+   Report the output paths.
