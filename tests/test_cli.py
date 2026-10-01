@@ -427,7 +427,9 @@ def test_intended_freeze_skips_drift_morph_pulse_and_frame(tmp_path: Path) -> No
         "  - {photo: a, hold: 30f, pulse: heartbeat}\n"
         "  - {photo: a, hold: 30f, morph: {photo: b, at: 0f, dur: 10f}}\n"
         "  - {photo: a, hold: 30f, frame: {tilt: [0, 3]}}\n"
-        "  - {blank: true, hold: 30f}\n",
+        "  - {blank: true, hold: 30f}\n"
+        "  - {photo: a, hold: 30f, frame: {caption: hi}}\n"
+        "  - {photo: a, hold: 30f, drift: {zoom: [1.2, 1.2]}}\n",
         ["a", "b"],
     )
     spans = _intended_freeze(proj)
@@ -438,6 +440,8 @@ def test_intended_freeze_skips_drift_morph_pulse_and_frame(tmp_path: Path) -> No
     assert covers(0.0, 1.0)  # static still
     assert covers(1.0, 2.0)  # zoom + tone, no motion
     assert covers(6.0, 7.0)  # blank
+    assert covers(7.0, 8.0)  # untilted frame card
+    assert covers(8.0, 9.0)  # drift that does not move
     for lo in (2.0, 3.0, 4.0, 5.0):
         assert not any(max(a, lo + 0.05) < min(b, lo + 0.95) for a, b in spans)
 

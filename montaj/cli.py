@@ -297,8 +297,12 @@ def _cmd_sheet(ns: argparse.Namespace, root: Path) -> list[str]:
 
 
 def _static_still(spec) -> bool:
-    """A still with drift, morph, pulse, or a frame card is animated. Zoom and tone are not."""
-    return spec.drift is None and spec.morph is None and spec.pulse is None and spec.frame is None
+    """A still is animated only by a moving drift, a morph, a pulse, or a changing card tilt.
+    Zoom, tone and an untilted frame card hold still, so their freeze is intended."""
+    d, fr = spec.drift, spec.frame
+    drifts = d is not None and (d.zoom[0] != d.zoom[1] or any(d.pan))
+    tilts = fr is not None and fr.tilt is not None and fr.tilt[0] != fr.tilt[1]
+    return not drifts and not tilts and spec.morph is None and spec.pulse is None
 
 
 def _intended_freeze(root: Path) -> list[tuple[float, float]]:
