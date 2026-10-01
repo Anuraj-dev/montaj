@@ -137,3 +137,40 @@ At `W=1080, H=1920` every primitive must match film2.py within mean |Δ| < 1e-3 
   (`freezedetect`, ignoring spans the caller marks as intended), integrated loudness, A/V duration offset.
 - `doctor() -> list[str]`: CUDA + capability, NVENC, ffmpeg/ffprobe, chromium, free VRAM, plus the known traps.
 - All of them log to `build/*.log` and never print progress; the CLI prints the one result line.
+
+## Integration (wave 2): frame renderer, pipeline, CLI
+```python
+# montaj/render/frame.py
+Renderer(tl: Timeline, spec_dir: Path, cv: Canvas)   # loads Photo/WallScene lazily, cached per (stem, crop, card)
+Renderer.frame(f: int) -> Tensor (3,H,W) in 0..1     # motion blur: t = f + (k/(n-1) - .5) * .5, k < n; then finish
+```
+Scene evaluation at sub-frame `t`: `Still` -> `still(cv, photo, focus, zoom)`; `Wall` -> `wall_frame(cv, wall,
+*wall_camera(wall, camera, t - t0))`; `Trans` -> progress `x = (t - t0) / dur` into `fade|swirl|whip`; swirl's
+`center` (outgoing photo px, default its focus) maps to screen via the outgoing shot's focus and zoom.
+`motion_blur: 1` renders one sample at `t = f`.
+
+```python
+# montaj/pipeline.py
+render(spec_path: Path, mode: "preview" | "final") -> RenderResult(path, n_frames, seconds, size,
+                                                                   rendered: int, cached: int)
+```
+- preview = `video.size` halved (rounded down to even) and `motion_blur: min(2, n)`, applied to the spec
+  before `resolve`, so preview and final hash differently by construction.
+- Per segment: `segment_hash` -> `build/segments/<hash>.mp4`; hit = skip; miss = render its frames through
+  `Encoder` to a temp file, then atomic rename. Then `concat` -> `out/<mode>.mp4`. Progress -> `build/render.log`.
+- Engine version string = `montaj.__version__` + a `RENDER_REV` constant in pipeline.py (bump it whenever
+  rendering math changes).
+
+### CLI (montaj/cli.py; every command takes `-C DIR` (default cwd) and `--json`)
+| Command | Result line |
+|---|---|
+| `doctor` | the doctor lines, then `OK doctor` / `ERR doctor: <n> failed` |
+| `new DIR --recipe NAME --photos FOLDER` | copies `recipes/NAME.yaml` to `DIR/montaj.yaml`, ingests -> `OK DIR/montaj.yaml sheet=DIR/build/ingest-sheet.jpg` |
+| `ingest --photos FOLDER` | `OK <n> photos sheet=build/ingest-sheet.jpg` |
+| `validate` | `OK montaj.yaml 840f 28.00s 13 shots 13 segments` or one `ERR` line per spec error |
+| `render [--preview\|--final]` (default preview) | `OK out/preview.mp4 28.00s 540x960 4.1MB rendered 2/13 cached 11/13 in 31.2s` |
+| `sheet [--at 1.5,3,9] [--video PATH]` | `OK build/sheet.jpg 12 frames` (default video: newest of out/final.mp4, out/preview.mp4) |
+| `check [--video PATH]` | the QA lines, then `OK check` / `WARN check: <n> warnings` |
+| `export --target master\|whatsapp` | `OK out/<target>.mp4 <size>MB` |
+Exit code 0 on OK/WARN, 1 on ERR. `--json` prints one JSON object instead of the text lines.
+Every documented spec field gets one line in `docs/SPEC-REFERENCE.md`.
