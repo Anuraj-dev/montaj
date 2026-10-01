@@ -165,9 +165,10 @@ Framing: cover, centred (focus/crop/drift not supported on clips in M2).
 ```python
 Still(shot: int, span: tuple[int, int] | None = None)   # span = (v0, v1) for drift/pulse/morph shots, else None
 Clip(shot: int, t0: int)                                 # t0 = shot start
+Blank()                                                  # paints video.background; Trans.a of a shot-0 fade
 Trans(kind, a, b, t0, dur, axis="x", center=None, blur: float = 0.0)
 FramePlan(..., texts: tuple[int, ...] = (),             # text blocks whose [from, to] contains f (±1 frame for sub-frames)
-               subs: tuple[int, ...] = (),
+               subs: tuple[int, ...] = (),                    # window from−.2s … to+.3s, ±1 frame
                hits: tuple[tuple[float, float], ...] = (),    # (at, k) with −3 ≤ f − at < 36 (1.2 s at 30 fps)
                bursts: tuple[tuple[int, float, float, float, int], ...] = (),  # (index, at, x, y, n) with 0 ≤ f−at ≤ 3.4 s
                dust: float = 0.0, glow: float = 0.0, bars: float = 0.0,  # track values at f, rounded to 1e-6
