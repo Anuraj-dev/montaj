@@ -12,13 +12,13 @@
 
 ## Status
 - M1 engine (Vidyut parity, PSNR 49 dB vs film2). M2: text cards, subtitles, Ken Burns, frame cards, morph, clips,
-  golden-film look, markers, music gen/analyze, two-pass loudnorm. Arshiya port: PSNR vs film.html Chromium frames
+  golden-film look, markers, music gen/analyze (real gen: 30 s song in 105 s), two-pass loudnorm. Arshiya port: PSNR vs film.html Chromium frames
   mean 32.9 dB / min 22.5 (40 frames); real 165 s final in 646 s; `OK check` (−14.0 LUFS, A/V +0.00 s).
 - M3: `montaj review` (page on 127.0.0.1, review.json, `--summary`), `montaj watch`, `montaj taste`. Checked in
   real Chrome: seek, approve/reject, stamped comments, reload on re-render keeps the playhead.
 - M4: `skills/make-video/SKILL.md`, linked into `~/.claude/skills` and `~/.codex/skills`; `~/.local/bin/montaj`
   links to the repo venv.
-- Tests: `uv run pytest -q` 260 passed (GPU included).
+- Tests: `uv run pytest -q` 261 passed (GPU included).
 
 ## Architecture map
 - Contracts -> `docs/specs/001-m1-engine.md`, `002-m2-text-music.md`, `003-m3-review-loop.md`
