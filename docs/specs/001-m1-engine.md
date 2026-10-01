@@ -87,7 +87,7 @@ Timeline.segments: list[Segment]        # .index, .start, .end; split at every s
 Scene nodes (frozen dataclasses, JSON-serialisable via `dataclasses.asdict`):
 ```python
 Still(shot: int)
-Wall(shot: int, t0: int)                # wall local time = t - t0
+Wall(shot: int, t0: int)                # t0 = the wall shot's start (fade-in included); local time = t - t0
 Trans(kind: str, a: Scene, b: Scene, t0: float, dur: float, axis: str = "x", center: tuple[float, float] | None = None)
 FramePlan(f: int, scene: Scene,
           flashes: tuple[tuple[int, float], ...],          # (at, k) with 0 <= f - at < 6
