@@ -145,6 +145,17 @@ def test_birthday_song_film_resolves(tmp_path: Path) -> None:
     tl = resolve(spec, proj)
     assert tl.n_frames == 4950
     assert tl.n_frames == int(DUR * FPS)
+    blank = [s for s in tl.shots if s.kind == "blank"]
+    assert len(blank) == 1
+    assert blank[0].start == round_frame(161.8 * FPS)
+    assert blank[0].end == tl.n_frames
+    indents = [
+        line.indent
+        for block in tl.texts
+        for line in block.lines
+        if line.text == "ARSHIYA" and line.gold
+    ]
+    assert indents == [0.16, 0.18]
     starts = [s.start for s in tl.shots]
     for t in film_photo_cues():
         cue = round_frame(t * FPS)
@@ -176,4 +187,4 @@ def test_birthday_song_film_validate(tmp_path: Path, capsys) -> None:
     code = main(["-C", str(proj), "validate"])
     out = capsys.readouterr().out.strip()
     assert code == 0
-    assert out == "OK montaj.yaml 4950f 165.00s 55 shots 55 segments"
+    assert out == "OK montaj.yaml 4950f 165.00s 56 shots 56 segments"

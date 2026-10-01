@@ -69,6 +69,7 @@ class ResolvedLine:
     reveal: str
     sweep: tuple[float, float]
     shadow: bool
+    indent: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -122,7 +123,9 @@ class Segment:
     end: int
 
 
-def _base_scene(shot: ResolvedShot, span: tuple[int, int] | None = None) -> Still | Wall | Clip:
+def _base_scene(shot: ResolvedShot, span: tuple[int, int] | None = None) -> Still | Wall | Clip | Blank:
+    if shot.kind == "blank":
+        return Blank()
     if shot.kind == "wall":
         return Wall(shot=shot.index, t0=shot.start)
     if shot.kind == "clip":
@@ -259,7 +262,10 @@ class Timeline:
         burst_hi = 3.4 * self.fps
         bursts = tuple(b for b in self._bursts if 0 <= f - b[1] <= burst_hi)
         dust = _r6(_track_at(self._tracks.get("dust") or [], f))
-        glow = _r6(_track_at(self._tracks.get("glow") or [], f))
+        # film.html 427: leaks fade out over the film's last 2 s. Folded into the plan so the
+        # renderer never reads the film length and only the tail segments hash it.
+        tail = min(1.0, max(0.0, (f / self.fps - (self.n_frames / self.fps - 2.0)) / 2.0))
+        glow = _r6(_track_at(self._tracks.get("glow") or [], f) * (1 - tail))
         bars = _r6(_track_at(self._tracks.get("bars") or [], f))
         fade_out = self._fade_out if self._fade_out is not None and f >= self._fade_out[1] else None
         return FramePlan(
@@ -306,6 +312,8 @@ def _shot_with_frame_keys(sh: Shot, i: int, parsed: dict[str, int]) -> Shot:
 
 
 def _shot_kind(sh: Shot) -> str:
+    if sh.blank:
+        return "blank"
     if sh.wall is not None:
         return "wall"
     if sh.clip is not None:
@@ -377,6 +385,7 @@ def _resolve_texts(spec: Spec, times: dict[str, float], fps: int) -> list[Resolv
                     reveal=line.reveal,
                     sweep=sweep,
                     shadow=line.shadow,
+                    indent=line.indent,
                 )
             )
         out.append(ResolvedText(from_=frm, to=to, fade_in=fi, fade_out=fo, blur=block.blur, lines=tuple(lines)))

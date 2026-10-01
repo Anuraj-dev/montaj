@@ -20,10 +20,10 @@ from montaj.audio.music import parse_duration
 from montaj.doctor import doctor
 from montaj.encode import export, probe
 from montaj.ingest import ingest
-from montaj.qa import check
+from montaj.qa import BLACK_PIX_TH, check
 from montaj.sheet import MAX_TILES, pick_times, sheet
-from montaj.spec import SpecError, load_spec
-from montaj.timeline import Still, Wall, resolve, wall_static_spans
+from montaj.spec import SpecError, _dur_frames, load_spec
+from montaj.timeline import Blank, Still, Wall, resolve, wall_static_spans
 
 RECIPES = Path(__file__).resolve().parents[1] / "recipes"
 
@@ -254,9 +254,10 @@ def _cmd_render(ns: argparse.Namespace, root: Path) -> list[str]:
     rel = result.path.resolve().relative_to(root.resolve()).as_posix()
     n = result.rendered + result.cached
     w, h = result.size
+    audio = " audio" if result.audio else ""
     return [
         f"OK {rel} {result.seconds:.2f}s {w}x{h} {mb:.1f}MB "
-        f"rendered {result.rendered}/{n} cached {result.cached}/{n} in {dt:.1f}s"
+        f"rendered {result.rendered}/{n} cached {result.cached}/{n} in {dt:.1f}s{audio}"
     ]
 
 
@@ -276,11 +277,15 @@ def _cmd_sheet(ns: argparse.Namespace, root: Path) -> list[str]:
     return [f"OK build/sheet.jpg {shown} frames"]
 
 
+def _static_still(spec) -> bool:
+    """A still with drift, morph, pulse, or a frame card is animated. Zoom and tone are not."""
+    return spec.drift is None and spec.morph is None and spec.pulse is None and spec.frame is None
+
+
 def _intended_freeze(root: Path) -> list[tuple[float, float]]:
-    """Time spans whose picture is designed not to move: Still scenes, and wall
-    frames where both camera tracks hold (before the first key, after the last,
-    or between keys that resolve to the same spec identity). A freeze inside a
-    transition or a moving wall is still a defect."""
+    """Time spans whose picture is designed not to move: static stills, blank holds,
+    and wall frames where both camera tracks hold. A freeze of a drifting, morphing,
+    pulsing, or tilting shot is a defect, and so is a freeze inside a transition."""
     spec_file = root / "montaj.yaml"
     if not spec_file.is_file():
         return []
@@ -297,7 +302,13 @@ def _intended_freeze(root: Path) -> list[tuple[float, float]]:
     start: int | None = None
     for f in range(tl.n_frames):
         scene = tl.plan(f).scene
-        intended = isinstance(scene, Still) or (isinstance(scene, Wall) and wall_hold(f))
+        # A blank hold is the background colour on purpose (the ink tail). A fade into it is not.
+        if isinstance(scene, Still):
+            intended = _static_still(tl.shots[scene.shot].spec)
+        elif isinstance(scene, Blank):
+            intended = True
+        else:
+            intended = isinstance(scene, Wall) and wall_hold(f)
         if intended:
             if start is None:
                 start = f
@@ -309,8 +320,91 @@ def _intended_freeze(root: Path) -> list[tuple[float, float]]:
     return spans
 
 
+def _frames(spec, raw: str | None) -> float:
+    if not raw:
+        return 0.0
+    got = _dur_frames(raw, spec.video.fps, spec.video.bpm, "duration", [])
+    return 0.0 if got is None else float(got)
+
+
+def _is_dark(color: str) -> bool:
+    """True when a solid frame of `color` would trip blackdetect at `pix_th`."""
+    text = str(color).strip()
+    if len(text) != 7 or text[0] != "#":
+        return False
+    try:
+        n = int(text[1:], 16)
+    except ValueError:
+        return False
+    r = ((n >> 16) & 255) / 255.0
+    g = ((n >> 8) & 255) / 255.0
+    b = (n & 255) / 255.0
+    return (0.299 * r + 0.587 * g + 0.114 * b) < BLACK_PIX_TH
+
+
+def _intended_black(root: Path) -> list[tuple[float, float]]:
+    """Dark windows blackdetect should not call a defect.
+
+    Shot 0's fade from a dark `video.background`, a blank on that background
+    (hold plus its in/out transitions), and the outro fade to black.
+    """
+    spec_file = root / "montaj.yaml"
+    if not spec_file.is_file():
+        return []
+    tl = resolve(load_spec(spec_file), root)
+    spec = tl.spec
+    fps = float(tl.fps)
+    spans: list[tuple[float, float]] = []
+    dark = _is_dark(spec.video.background)
+    shots = tl.shots
+    if dark and shots:
+        first = shots[0]
+        tr = first.spec.in_
+        if not first.spec.blank and tr is not None and tr.type == "fade" and tr.dur:
+            dur = _frames(spec, tr.dur)
+            spans.append((first.start / fps, (first.start + dur) / fps))
+        for i, sh in enumerate(shots):
+            if not sh.spec.blank:
+                continue
+            before = 0.0
+            incoming = sh.spec.in_
+            if incoming is not None and incoming.type == "whip" and incoming.dur:
+                before = _frames(spec, incoming.dur) / 2.0
+            after = 0.0
+            if i + 1 < len(shots):
+                outgoing = shots[i + 1].spec.in_
+                if outgoing is not None and outgoing.dur and outgoing.type != "cut":
+                    nd = _frames(spec, outgoing.dur)
+                    if outgoing.type == "whip":
+                        after = nd / 2.0
+                    elif outgoing.type in ("fade", "swirl"):
+                        after = nd
+            spans.append((max(0.0, (sh.start - before) / fps), (sh.end + after) / fps))
+    if tl.n_frames:
+        fade = tl.plan(tl.n_frames - 1).fade_out
+        if fade is not None:
+            _dur, start = fade
+            spans.append((start / fps, tl.n_frames / fps))
+    return spans
+
+
+def _av_tol(root: Path) -> float | None:
+    """One frame at the film's fps when a soundtrack is set. Silent films keep qa's default."""
+    spec_file = root / "montaj.yaml"
+    if not spec_file.is_file():
+        return None
+    spec = load_spec(spec_file)
+    if spec.audio is None or spec.video.fps <= 0:
+        return None
+    return 1.0 / float(spec.video.fps)
+
+
 def _cmd_check(ns: argparse.Namespace, root: Path) -> list[str]:
-    lines = check(_video(root, ns.video), _intended_freeze(root), log=root / "build" / "qa.log")
+    lines = check(
+        _video(root, ns.video), _intended_freeze(root),
+        log=root / "build" / "qa.log", av_tol=_av_tol(root),
+        intended_black=_intended_black(root),
+    )
     warns = sum(line.startswith("WARN") for line in lines)
     lines.append(f"WARN check: {warns} warnings" if warns else "OK check")
     return lines

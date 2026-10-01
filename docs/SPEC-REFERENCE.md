@@ -13,7 +13,7 @@ Photo fields (`crop`, `focus`, swirl `center`, wall `at`) are source-image pixel
 - `video.outro` — mapping, default none — ending treatment. Starts at `n_frames - dur`.
 - `video.outro.type` — string, required with outro — `glow`: a bloom and warm rim that grow and then stay. `fade`: everything fades to black over the last `dur`.
 - `video.outro.dur` — duration, required with outro — how long the ending lasts.
-- `video.motion_blur` — integer, default `1` — sub-frames averaged into each frame. `1` is off. Preview uses at most 2.
+- `video.motion_blur` — integer, default `1` — sub-frames averaged into each frame. `1` is off. Preview uses at most 2. Text and subtitles are composited once at the integer frame, after that average.
 - `assets` — string, default `assets` — photo folder relative to the spec file. A photo is the file stem (`jpg`, `jpeg`, `png` or `webp`).
 - `shots` — list, required — played in order. Each shot starts when the previous one ends.
 - `shots[].photo` — string, photo or wall or clip — stem of the still. An integer in the YAML is read as a string. Mutually exclusive with `wall` and `clip`.
@@ -37,6 +37,7 @@ Photo fields (`crop`, `focus`, swirl `center`, wall `at`) are source-image pixel
 - `shots[].morph.dur` — duration, required with morph — how long the circle takes to open.
 - `shots[].morph.center` — `[x, y]`, default none — screen fraction where the circle is centred.
 - `shots[].pulse` — `heartbeat`, default none — beat-locked scale pulse on `video.bpm`, phased from the shot start. Needs `photo` and `video.bpm`.
+- `shots[].blank` — boolean, default false — show only `video.background`. Mutually exclusive with `photo`, `wall` and `clip`. Holds and fades like any other shot.
 - `shots[].crop` — `[x0, y0, x1, y1]`, default the full image — the part of the photo that is shown.
 - `shots[].focus` — `[x, y]`, default the crop centre — the photo point placed at the screen centre.
 - `shots[].zoom` — number, default cover — design pixels per photo pixel. Cover fits the crop with a hair of overscan.
@@ -110,6 +111,7 @@ Photo fields (`crop`, `focus`, swirl `center`, wall `at`) are source-image pixel
 - `text[].lines[].reveal` — `rise` or `pop`, default `rise`.
 - `text[].lines[].sweep` — `[from, to]` time expressions, default the block window — gold gradient travels 100%→0% across it.
 - `text[].lines[].shadow` — boolean, default true — false drops the text shadow (ink lines).
+- `text[].lines[].indent` — number, default `0` — extra `margin-left` in em, on top of the centred line.
 - `subs` — list, default none — lyric subtitles, one fixed style.
 - `subs[].from` — time expression, required — subtitle window start.
 - `subs[].to` — time expression, required — subtitle window end.

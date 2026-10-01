@@ -33,7 +33,7 @@ import torch.nn.functional as F
 from PIL import Image
 
 from montaj.doctor import chromium as find_chromium
-from montaj.render.core import outc
+from montaj.render.core import outc, sine
 
 # Stage sits at (OX, OY) so shadow padding stays inside the viewport and the
 # fidelity crop of that rect has the same subpixel phase as the rasters.
@@ -112,6 +112,7 @@ class TextLine:
     reveal: str = "rise"
     sweep: tuple[float, float] | None = None
     shadow: bool = True
+    indent: float = 0.0
 
     def __post_init__(self) -> None:
         if self.by not in ("word", "char"):
@@ -192,12 +193,6 @@ class RasterSet:
             object.__setattr__(self, "subs", tuple(self.subs))
 
 
-def sine(x: float) -> float:
-    """film.html:73 `es`. The spec omits the clamp; the film clamps."""
-    x = 0.0 if x < 0.0 else 1.0 if x > 1.0 else x
-    return 0.5 - 0.5 * math.cos(math.pi * x)
-
-
 def _num(v: float) -> str:
     return f"{float(v):.6g}"
 
@@ -234,6 +229,9 @@ def line_markup(line: TextLine, *, bp: str | None = None, idx: int = 0) -> str:
         style.append(f"line-height:{_num(line.line_height)}")
     if line.color:
         style.append(f"color:{_NAMED.get(line.color, line.color)}")
+    # film.html 243, 341: marginLeft on the gold ARSHIYA lines, in em.
+    if line.indent:
+        style.append(f"margin-left:{_num(line.indent)}em")
     if not line.shadow:
         style.append("text-shadow:none;filter:none")
     if bp is not None:

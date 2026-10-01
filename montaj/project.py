@@ -74,6 +74,17 @@ def _shot_photos(shot) -> list[str]:
     return ids
 
 
+def _lookup_sha(asset_sha: dict[str, str], stem: str, kind: str) -> str:
+    """`photo:` and `clip:` keys stay distinct when a still and a clip share a stem.
+
+    Callers that still pass a bare stem (one asset kind) keep resolving.
+    """
+    namespaced = f"{kind}:{stem}"
+    if namespaced in asset_sha:
+        return asset_sha[namespaced]
+    return asset_sha[stem]
+
+
 def _text_asset_shas() -> dict[str, str]:
     """sha of text.css (if present) and every file in montaj/fonts/."""
     pkg = Path(__file__).parent
@@ -114,9 +125,9 @@ def segment_hash(
     for i in sorted(referenced):
         shot = tl.shots[i].spec
         for pid in _shot_photos(shot):
-            photos[pid] = asset_sha[pid]
+            photos[pid] = _lookup_sha(asset_sha, pid, "photo")
         if shot.clip is not None:
-            clips[shot.clip] = asset_sha[shot.clip]
+            clips[shot.clip] = _lookup_sha(asset_sha, shot.clip, "clip")
     payload = {
         "engine_version": engine_version,
         "video": tl.spec.video.model_dump(mode="json"),
