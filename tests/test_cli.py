@@ -399,3 +399,19 @@ def test_sheet_at_caps_count_at_twelve(tmp_path: Path, capsys: pytest.CaptureFix
     code, out, err = _run(["-C", str(proj), "sheet", "--at", times], capsys)
     assert code == 0 and err == "", out
     assert out.strip() == "OK build/sheet.jpg 12 frames"
+
+
+def test_music_group_names_itself_in_errors_and_has_help(capsys: pytest.CaptureFixture[str]) -> None:
+    """`montaj music …` failures must say `music`, not `cli`: the agent acts on that word."""
+    code, out, err = _run(["music", "gen", "--caption", "x"], capsys)
+    assert code == 1 and err == "" and len(out.splitlines()) == 1
+    assert out.startswith("ERR music: ") and "--lyrics" in out
+
+    code, out, err = _run(["--json", "music", "analyze", "song.wav", "--bpm", "fast"], capsys)
+    assert code == 1 and err == ""
+    payload = json.loads(out)
+    assert payload["status"] == "ERR" and payload["lines"][0].startswith("ERR music:")
+
+    assert main(["music", "--help"]) == 0
+    usage = capsys.readouterr().out
+    assert "gen" in usage and "analyze" in usage

@@ -26,6 +26,11 @@ X264_CRF = 16
 X264_PRESET = "slow"
 AUDIO_ARGS = ("-c:a", "aac", "-ar", "48000")
 LOUDNORM = "loudnorm=I=-14:TP=-1.5:LRA=11"
+# The film is rendered in sRGB/bt709 and must say so, or players guess. ffmpeg's h264 encoders in
+# this build drop -color_primaries/-color_trc (only -colorspace survives to the container), so the
+# VUI goes in through the bitstream filter — which is also what a stream copy needs to carry it.
+BT709_ARGS = ("-colorspace", "bt709", "-color_primaries", "bt709", "-color_trc", "bt709")
+BT709_BSF = ("-bsf:v", "h264_metadata=colour_primaries=1:transfer_characteristics=1:matrix_coefficients=1")
 NVENC_PROBE_SIZE = "320x240"  # NVENC rejects frames below ~145 px a side
 
 _MOV_EXTS = {".mp4", ".m4v", ".mov"}
@@ -253,7 +258,7 @@ class Encoder:
             "-f", "rawvideo", "-pix_fmt", "rgb24", "-s", f"{self.W}x{self.H}",
             "-r", f"{self.fps:g}", "-i", "-",
             *vcodec_args(self.codec, cq=cq, crf=crf, preset=preset),
-            "-pix_fmt", "yuv420p",
+            "-pix_fmt", "yuv420p", *BT709_ARGS, *BT709_BSF,
         ]
         if self.path.suffix.lower() in _MOV_EXTS:
             cmd += ["-movflags", "+faststart"]
@@ -374,6 +379,7 @@ def mux(
     audio: Path | str,
     out: Path | str,
     loudnorm: bool = True,
+    fade_out: float = 0.0,
     *,
     log: Path | str | None = None,
 ) -> Path:
@@ -382,6 +388,9 @@ def mux(
     The film's length wins: short audio is padded (apad), long audio is cut, so adding music
     never truncates the picture. Padding goes *after* loudnorm — normalising an endless apad
     stream makes loudnorm's single-pass analysis see a different signal.
+
+    `fade_out` seconds fade out over the *film's* last seconds (`audio.fade_out` in a spec), so
+    the music lands on the picture's end rather than the track's.
     """
     for src in (video, audio):
         if not Path(src).exists():
@@ -389,12 +398,19 @@ def mux(
     info = probe(video, log=log)
     if info.duration <= 0:
         raise EncodeError(f"mux: unknown video duration for {video}")
+    if fade_out < 0:
+        raise EncodeError(f"mux: fade_out must not be negative, got {fade_out}")
     out = Path(out)
     out.parent.mkdir(parents=True, exist_ok=True)
-    chain = f"{LOUDNORM},apad" if loudnorm else "apad"
+    chain = [LOUDNORM] if loudnorm else []
+    if fade_out > 0:
+        start = max(0.0, info.duration - fade_out)
+        duration = min(fade_out, info.duration)
+        chain.append(f"afade=t=out:st={start:.6f}:d={duration:.6f}")
+    chain.append("apad")
     cmd = [
         FFMPEG, "-y", "-hide_banner", "-loglevel", "error", "-i", str(video), "-i", str(audio),
-        "-filter_complex", f"[1:a]{chain}[a]", "-map", "0:v", "-map", "[a]",
+        "-filter_complex", f"[1:a]{','.join(chain)}[a]", "-map", "0:v", "-map", "[a]",
         "-c:v", "copy", *AUDIO_ARGS, "-b:a", "256k", "-t", f"{info.duration:.6f}",
         "-movflags", "+faststart", str(out),
     ]
@@ -420,9 +436,11 @@ def export(
     target = Path(target)
     target.parent.mkdir(parents=True, exist_ok=True)
     codec = (
-        ["-c", "copy"] if preset == "master"
+        # A master copy stays bit-identical, so it only gets the container tags; the bitstream
+        # filter would rewrite the SPS and break "copy" into a re-mux.
+        ["-c", "copy", *BT709_ARGS] if preset == "master"
         else [*vcodec_args(prefer_encoder(), cq=27, crf=24), "-vf", "scale=720:-2",
-              "-c:a", "aac", "-b:a", "160k"]
+              "-c:a", "aac", "-b:a", "160k", *BT709_ARGS, *BT709_BSF]
     )
     cmd = [FFMPEG, "-y", "-hide_banner", "-loglevel", "error", "-i", str(src), *codec,
            "-movflags", "+faststart", str(target)]
