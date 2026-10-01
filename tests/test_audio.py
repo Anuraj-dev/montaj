@@ -555,3 +555,11 @@ def test_music_commands_hold_the_lock(tmp_path: Path, capsys: pytest.CaptureFixt
     assert code == 0, lines
     assert "gpu lock" in (proj / "build" / "music.log").read_text()
     assert lock.is_file()
+
+def test_default_prompt_comes_from_lyrics_beside_the_wav(tmp_path: Path) -> None:
+    from montaj.audio.analyze import default_prompt
+
+    wav = tmp_path / "cand-1.wav"
+    assert default_prompt(wav) == ""  # no lyrics: no hint, never another film's names
+    (tmp_path / "lyrics.txt").write_text("[verse]\nhappy birthday Arshiya\n\n[chorus]\njanamdin mubarak\n")
+    assert default_prompt(wav) == "happy birthday Arshiya, janamdin mubarak"

@@ -1,7 +1,7 @@
 """`montaj music analyze`: word timings, a beat grid and a loudness envelope -> `music/markers.json`.
 
 Port of `claude-test/bday-video/music/analyze.py` — same model (large-v3-turbo, cuda float16,
-`word_timestamps=True`, `vad_filter=False`, beam 5), same initial prompt (line 14), same 0.5 s-hop
+`word_timestamps=True`, `vad_filter=False`, beam 5), an initial prompt built from `lyrics.txt`, same 0.5 s-hop
 RMS (lines 20-21). Added on top, per 002 §Audio: a beat grid (the worker tracks it from an onset
 envelope, since that venv has numpy and not librosa) and the `first_word`/`last_word` word indices
 the `word:<i>` markers resolve against.
@@ -19,7 +19,20 @@ from montaj.gpulock import hold
 
 WORKER = Path(__file__).with_name("_whisper_worker.py")
 DEFAULT_LANG = "hi"
-DEFAULT_PROMPT = "Arshiya, Samar, Jaipur, Jama Masjid, janamdin mubarak, chaar saal, baaees baras"
+PROMPT_CHARS = 240  # whisper's initial prompt is a short hint, not a transcript
+
+
+def default_prompt(wav: Path) -> str:
+    """Whisper hint: the words of `lyrics.txt` beside the wav (as `music gen` leaves it), else none.
+
+    Names and non-English words in the hint are what it fixes most; section tags like `[verse]` are dropped.
+    """
+    lyrics = wav.parent / "lyrics.txt"
+    if not lyrics.is_file():
+        return ""
+    lines = [l.strip() for l in lyrics.read_text(encoding="utf-8").splitlines()]
+    text = ", ".join(l for l in lines if l and not (l.startswith("[") and l.endswith("]")))
+    return text[:PROMPT_CHARS]
 DEFAULT_OUT = "music/markers.json"
 
 
@@ -54,7 +67,7 @@ def analyze(
     log_path = log_file("music", log)
     args: list[object] = [
         "--wav", wav_path, "--out", out_path, "--lang", lang,
-        "--prompt", prompt if prompt is not None else DEFAULT_PROMPT,
+        "--prompt", prompt if prompt is not None else default_prompt(wav_path),
     ]
     if bpm is not None:
         args += ["--bpm", bpm]  # absent means "estimate the tempo", not "the tempo is None"
