@@ -34,6 +34,7 @@
 | 3 | W3a wall perf (parity-pinned) | grok-4.7 | 19.8m ($0.62, 2.3M tok) | 2/2 (wall 0.055s, 9 frames bit-exact) | 92 pass | Sol 0H 3M 0L (2 latent, 1 out of domain) | 2 lines (clone bg, 2-D light) | yes | 0.56s → 0.055s per wall frame; final render 236s → 37.6s; 122 lines |
 | 3 | W3a wall perf (parity-pinned) | space-bunny | ~45m, killed by a driver crash | 2/2 (wall 0.056s) | 90 pass | — | — | no | Same speedup in 83 lines; died while verifying all 840 frames; required perf test not yet written |
 | 3 | W3b concat slip, check freezes, int crops | grok-4.6 | 9.0m ($0.32, 1.2M tok) | 2/2 | 94 pass | driver: 1 perf regression | 0 (fix round by same model: 3.0m, $0.23) | yes | First fix decoded every segment to count frames (+4.9s per render); fix round passes known counts |
+| 4 | W4 wall-hold freezes, k-scaled sharpen, intro lift | grok-4.6 | 14.3m ($0.54, 2.1M tok) | 7/7 (regression) + real `check` OK | 104 pass | driver inline (small diff) | 1 line (RENDER_REV bump the worker flagged but did not own) | yes | Flagged the stale-preview-cache risk itself; parity at k=1 unchanged |
 
 ## Review runs
 | Wave | Diff | Reviewer | Wall | Findings (H/M/L) | Confirmed real | False positives | Notes |

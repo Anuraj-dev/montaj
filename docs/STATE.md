@@ -4,20 +4,15 @@
 ## 🚧 In progress / next
 - **M1 engine is built on branch `feat/m1-engine`** (not pushed, no PR). Gate left: Raja watches the real
   render of the Vidyut film (`montaj new … --recipe birthday-short` + `montaj render --final`).
-- Wave 4 candidates (route grok-4.6, Sol review):
-  1. `montaj check` still WARNs on deliberate wall-camera holds (15.5–16.1s, 25.7–28s; film2 has the same
-     holds). Treat wall spans with a static camera as intended freezes.
-  2. `render/finish.py` sharpen kernel is not scaled by `Canvas.k` (preview-only, LOW).
-  3. `docs/conventions.md` promises marker times (`at: chorus1`); the schema forbids them. Move docs or schema.
-  4. Intro parity is a coincidence: `FramePlan.intro` is None for f ≥ dur, but film2 applies the white lift
-     every frame (`timeline.py` + `finish.py`).
+- Wave 4 done (a94de05): check ignores held wall cameras, preview sharpen scales with k, intro lift is a
+  fraction of the intro. `montaj check` on the real final: `OK check`.
 - Then M2 per `docs/PLAN.md` § Milestones.
 
 ## Status
 - CLI works end to end: `doctor new ingest validate render sheet check export`, `-C DIR`, `--json`.
 - Real gate (2026-10-01): final 1080×1920 840f in 38.1s (target ≤180s), preview 9.6s, cached re-render
   0.5s, one-shot edit re-renders 2/13 segments in 3.0s, PSNR vs film2 `final.mp4` mean 49.2 dB / min 44.6.
-- Tests: `uv run pytest -q` 97 passed (GPU included). Driver-held hidden tests live only in the session
+- Tests: `uv run pytest -q` 104 passed (GPU included). Driver-held hidden tests live only in the session
   scratchpad; they are not in the repo.
 
 ## Architecture map
