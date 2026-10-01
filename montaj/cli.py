@@ -20,7 +20,7 @@ from montaj.ingest import ingest
 from montaj.qa import check
 from montaj.sheet import MAX_TILES, pick_times, sheet
 from montaj.spec import SpecError, load_spec
-from montaj.timeline import Still, resolve
+from montaj.timeline import Still, Wall, resolve, wall_static_spans
 
 RECIPES = Path(__file__).resolve().parents[1] / "recipes"
 
@@ -257,18 +257,28 @@ def _cmd_sheet(ns: argparse.Namespace, root: Path) -> list[str]:
 
 
 def _intended_freeze(root: Path) -> list[tuple[float, float]]:
-    """Time spans whose FramePlan scene is a Still. Transitions and the wall move
-    (or are supposed to); a freeze there is still a defect."""
+    """Time spans whose picture is designed not to move: Still scenes, and wall
+    frames where both camera tracks hold (before the first key, after the last,
+    or between keys that resolve to the same spec identity). A freeze inside a
+    transition or a moving wall is still a defect."""
     spec_file = root / "montaj.yaml"
     if not spec_file.is_file():
         return []
     tl = resolve(load_spec(spec_file), root)
     fps = float(tl.fps)
+    holds: list[tuple[int, int]] = []
+    for sh in tl.shots:
+        holds.extend(wall_static_spans(sh))
+
+    def wall_hold(f: int) -> bool:
+        return any(lo <= f < hi for lo, hi in holds)
+
     spans: list[tuple[float, float]] = []
     start: int | None = None
     for f in range(tl.n_frames):
-        is_still = isinstance(tl.plan(f).scene, Still)
-        if is_still:
+        scene = tl.plan(f).scene
+        intended = isinstance(scene, Still) or (isinstance(scene, Wall) and wall_hold(f))
+        if intended:
             if start is None:
                 start = f
         elif start is not None:

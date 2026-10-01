@@ -6,11 +6,12 @@ import os
 import re
 import subprocess
 from pathlib import Path
+from shutil import copyfile
 
 import pytest
 from PIL import Image
 
-from montaj.cli import main
+from montaj.cli import _intended_freeze, main
 
 
 def _jpeg(folder: Path, stem: str, color: tuple[int, int, int] = (10, 20, 30)) -> None:
@@ -256,10 +257,22 @@ def test_expected_failures_are_one_err_line(tmp_path: Path, capsys: pytest.Captu
     assert "denied\nread" in validate_log
 
 
+def _solid(path: Path, seconds: float, fps: int = 30) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    subprocess.run(
+        [
+            "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+            "-f", "lavfi", "-i", f"color=c=red:size=320x240:rate={fps}:duration={seconds}",
+            "-pix_fmt", "yuv420p", str(path),
+        ],
+        check=True,
+    )
+
+
 def test_check_ignores_still_holds_but_warns_on_transition_freeze(
     tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A Still hold is intended freeze; a freeze inside a fade or the wall is not."""
+    """A Still hold is intended freeze; a freeze inside a fade or a moving wall is not."""
     monkeypatch.chdir(tmp_path)
     wall = (
         "      grid: 100x100\n"
@@ -271,8 +284,12 @@ def test_check_ignores_still_holds_but_warns_on_transition_freeze(
         "        - {photo: a, cell: [0, 0], straight: true}\n"
         "      light: {center: [0, 0], radius: [1, 1]}\n"
         "      camera:\n"
-        "        pos: [{t: 0f, print: a, at: [1, 1]}]\n"
-        "        zoom: [{t: 0f, value: 1}]\n"
+        "        pos:\n"
+        "          - {t: 0f, print: a, at: [0, 0]}\n"
+        "          - {t: 60f, print: a, at: [80, 80]}\n"
+        "        zoom:\n"
+        "          - {t: 0f, value: 1}\n"
+        "          - {t: 60f, value: 2}\n"
     )
     proj = _project(
         tmp_path,
@@ -283,15 +300,7 @@ def test_check_ignores_still_holds_but_warns_on_transition_freeze(
         ["a", "b"],
     )
     video = proj / "out" / "preview.mp4"
-    video.parent.mkdir(parents=True, exist_ok=True)
-    subprocess.run(
-        [
-            "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
-            "-f", "lavfi", "-i", "color=c=red:size=320x240:rate=30:duration=6",
-            "-pix_fmt", "yuv420p", str(video),
-        ],
-        check=True,
-    )
+    _solid(video, 6)
 
     code, out, err = _run(["-C", str(proj), "check"], capsys)
     assert code == 0 and err == "", out
@@ -304,10 +313,82 @@ def test_check_ignores_still_holds_but_warns_on_transition_freeze(
 
     # stills: [0, 2)s and [3, 4)s — those holds must not WARN
     assert not any(overlaps(s, 0.0, 1.9) or overlaps(s, 3.1, 3.9) for s in spans), frozen
-    # fade [2, 3)s and wall [4, 6)s — a freeze there is a defect
+    # fade [2, 3)s and moving wall [4, 6)s — a freeze there is a defect
     assert any(overlaps(s, 2.0, 3.0) for s in spans), frozen
     assert any(overlaps(s, 4.0, 6.0) for s in spans), frozen
     assert out.splitlines()[-1].startswith("WARN check:")
+
+
+def test_check_ignores_wall_camera_holds(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A wall freeze is intended while both camera tracks hold; a freeze while they move is not."""
+    monkeypatch.chdir(tmp_path)
+    wall = (
+        "      grid: 100x100\n"
+        "      seed: 1\n"
+        "      jitter: 0\n"
+        "      rot: 0\n"
+        "      print_height: 10\n"
+        "      prints:\n"
+        "        - {photo: a, cell: [0, 0], straight: true}\n"
+        "      light: {center: [0, 0], radius: [1, 1]}\n"
+        "      camera:\n"
+        "        pos:\n"
+        "          - {t: 0f, print: a, at: [1, 1]}\n"
+        "          - {t: 30f}\n"
+        "          - {t: 60f, print: a, at: [50, 50]}\n"
+        "        zoom:\n"
+        "          - {t: 0f, value: 1}\n"
+        "          - {t: 30f}\n"
+        "          - {t: 60f, value: 2}\n"
+    )
+    proj = _project(
+        tmp_path,
+        "  - {photo: a, hold: 30f}\n"
+        "  - hold: 90f\n"
+        "    wall:\n" + wall,
+        ["a"],
+    )
+    _solid(proj / "out" / "preview.mp4", 4)
+
+    intended = _intended_freeze(proj)
+    def covers(lo: float, hi: float) -> bool:
+        return any(a - 1e-6 <= lo and b + 1e-6 >= hi for a, b in intended)
+    # still [0, 1); wall hold [1, 2]; moving (2, 3); wall hold after last key [3, 4)
+    assert covers(0.0, 1.0) and covers(1.0, 2.0) and covers(3.0, 4.0)
+    assert not any(max(a, 2.05) < min(b, 2.95) for a, b in intended)
+
+    code, out, err = _run(["-C", str(proj), "check"], capsys)
+    assert code == 0 and err == "", out
+    frozen = [line for line in out.splitlines() if line.startswith("WARN frozen")]
+    assert frozen, out
+    spans = [tuple(float(v) for v in re.search(r"([\d.]+)-([\d.]+)s", line).groups()) for line in frozen]
+
+    def overlaps(span: tuple[float, float], lo: float, hi: float) -> bool:
+        return max(span[0], lo) < min(span[1], hi)
+
+    assert not any(overlaps(s, 0.0, 1.9) or overlaps(s, 3.1, 3.9) for s in spans), frozen
+    assert any(overlaps(s, 2.0, 3.0) for s in spans), frozen
+    assert out.splitlines()[-1].startswith("WARN check:")
+
+
+def test_intended_freeze_birthday_wall_holds(tmp_path: Path) -> None:
+    """CLI intended spans cover the wall start hold (after the fade) and the tail after the last key."""
+    stems = [
+        "09", "10", "12", "16", "19", "20", "21", "22",
+        "28", "29", "32", "33", "34", "35", "37", "38",
+    ]
+    copyfile(Path("recipes/birthday-short.yaml"), tmp_path / "montaj.yaml")
+    for stem in stems:
+        _jpeg(tmp_path / "assets", stem)
+    spans = _intended_freeze(tmp_path)
+    def covers(lo: float, hi: float) -> bool:
+        return any(a - 1e-6 <= lo and b + 1e-6 >= hi for a, b in spans)
+    # fade occupies [450, 465) = [15.0, 15.5); Wall hold then runs to local t=45 → 16.533s
+    assert covers(15.5, 496 / 30)
+    assert covers(740 / 30, 28.0)
+    assert not any(max(a, 16.6) < min(b, 24.5) for a, b in spans)
 
 
 def test_sheet_at_caps_count_at_twelve(tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch) -> None:

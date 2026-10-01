@@ -13,7 +13,7 @@ LOOKS = {"warm-film": {
     "leak_sigma": 8.0, "leak_w": 520.0, "leak_h": 900.0,
     "leak_dx": 280.0, "leak_drift": 24.0, "leak_dy": 8.0,
     "col": [1.0, 0.55, 0.25],
-    "intro_bloom": 0.9, "intro_lift": 0.35, "intro_lift_w": 24.0,
+    "intro_bloom": 0.9, "intro_lift": 0.35, "intro_lift_frac": 0.8,
     "outro_bloom": 0.55, "outro_rim": 0.10, "outro_ramp": 45.0,
 }}
 
@@ -21,6 +21,18 @@ LOOKS = {"warm-film": {
 def _odd(x: float) -> int:
     x = max(1, int(round(x)))
     return x if x % 2 else x + 1
+
+
+def _binomial(n: int, device) -> torch.Tensor:
+    """Separable binomial of odd size n; n=5 is film2's [1,4,6,4,1]/256."""
+    m = n - 1
+    row: list[int] = []
+    c = 1
+    for i in range(n):
+        row.append(c)
+        c = c * (m - i) // (i + 1)
+    v = torch.tensor(row, device=device, dtype=torch.float32)
+    return (v[:, None] * v[None]) / (v.sum() * v.sum())
 
 
 def bloom(cv, img, k: float):
@@ -32,9 +44,9 @@ def bloom(cv, img, k: float):
 def finish(cv, img, f: float, look: dict, flashes: list, leaks: list, intro, outro):
     """flashes [(at,k)], leaks [(at,k,dir)], intro ("white-lift",dur)|None, outro ("glow",dur,start)|None."""
     L = look
-    gk = torch.tensor([1, 4, 6, 4, 1], device=cv.device, dtype=torch.float32)
-    gk = (gk[:, None] * gk[None]) / 256
-    bl = F.conv2d(img[:, None], gk[None, None], padding=2)[:, 0]
+    n = max(3, _odd(5 * cv.k))
+    gk = _binomial(n, cv.device)
+    bl = F.conv2d(img[:, None], gk[None, None], padding=n // 2)[:, 0]
     img = (img + L["sharpen"] * (img - bl)).clamp(0, 1)
     img = img * img * (3 - 2 * img) * L["scurve"] + img * (1 - L["scurve"])
     vig = (1 - L["vignette"] * ((((cv.XX - cv.W / 2) / (cv.W * 0.62)) ** 2
@@ -56,8 +68,9 @@ def finish(cv, img, f: float, look: dict, flashes: list, leaks: list, intro, out
             img = img + (1 - img) * k * (1 - (f - c) / 6) ** 2
     if intro is not None and f < intro[1]:  # soft white bloom settling onto the picture
         img = bloom(cv, img, L["intro_bloom"] * (1 - smooth(f / intro[1])))
-    if intro is not None:  # opens on a soft white lift
-        img = 1 - (1 - img) * (1 - L["intro_lift"] * (1 - smooth(f / L["intro_lift_w"])))
+    if intro is not None:  # lift width is a fraction of dur so it dies inside the window
+        lift_w = L["intro_lift_frac"] * intro[1]
+        img = 1 - (1 - img) * (1 - L["intro_lift"] * (1 - smooth(f / lift_w)))
     if outro is not None and f >= outro[2]:  # ending glow grows and stays
         kk = smooth((f - outro[2]) / L["outro_ramp"])
         img = bloom(cv, img, L["outro_bloom"] * kk)

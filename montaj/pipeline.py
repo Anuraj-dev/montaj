@@ -17,7 +17,7 @@ from montaj.spec import Spec, load_spec
 from montaj.timeline import Segment, resolve
 
 # Bump when a pixel changes. Concatenated onto __version__ inside every segment hash.
-RENDER_REV = "+1"
+RENDER_REV = "+2"  # +2: preview sharpen kernel scales with Canvas.k
 
 
 def engine_version() -> str:

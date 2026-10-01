@@ -65,6 +65,82 @@ def _base_scene(shot: ResolvedShot) -> Still | Wall:
     return Still(shot=shot.index)
 
 
+def _merge_spans(spans: list[tuple[int, int]]) -> list[tuple[int, int]]:
+    out: list[tuple[int, int]] = []
+    for lo, hi in sorted(spans):
+        if hi <= lo:
+            continue
+        if out and lo <= out[-1][1]:
+            out[-1] = (out[-1][0], max(out[-1][1], hi))
+        else:
+            out.append((lo, hi))
+    return out
+
+
+def _pos_id(key) -> tuple[str, tuple[float, float]] | None:
+    if key.print is not None and key.at is not None:
+        return (str(key.print), (float(key.at[0]), float(key.at[1])))
+    return None
+
+
+def _zoom_id(key) -> tuple[float, str | None] | None:
+    if key.value is not None:
+        return (float(key.value), None if key.print is None else str(key.print))
+    return None
+
+
+def _track_holds(keys, ident, local_end: int) -> list[tuple[int, int]]:
+    """Local [lo, hi) where a key track holds one resolved identity."""
+    resolved: list[tuple[int, object]] = []
+    cur: object | None = None
+    for key in keys:
+        got = ident(key)
+        if got is not None:
+            cur = got
+        if cur is None:
+            continue
+        resolved.append((int(key.t), cur))
+    if not resolved:
+        return [(0, local_end)]
+    spans = [(0, resolved[0][0] + 1)]
+    for (t0, v0), (t1, v1) in zip(resolved, resolved[1:]):
+        if v0 == v1:
+            spans.append((t0, t1 + 1))
+    spans.append((resolved[-1][0], local_end))
+    clipped = [(max(0, lo), min(local_end, hi)) for lo, hi in spans]
+    return _merge_spans(clipped)
+
+
+def _intersect_spans(a: list[tuple[int, int]], b: list[tuple[int, int]]) -> list[tuple[int, int]]:
+    out: list[tuple[int, int]] = []
+    for lo1, hi1 in a:
+        for lo2, hi2 in b:
+            lo, hi = max(lo1, lo2), min(hi1, hi2)
+            if hi > lo:
+                out.append((lo, hi))
+    return _merge_spans(out)
+
+
+def wall_static_spans(shot: ResolvedShot) -> list[tuple[int, int]]:
+    """Absolute [start, end) frames where both wall camera tracks hold.
+
+    Identity is spec-only: pos matches on print+at, zoom on value+print. A
+    key without a value holds the previous one. Does not load photos.
+    """
+    wall = shot.spec.wall
+    if wall is None:
+        return []
+    local_end = shot.end - shot.start
+    pos = _track_holds(wall.camera.pos, _pos_id, local_end)
+    zoom = _track_holds(wall.camera.zoom, _zoom_id, local_end)
+    # Drop 1-frame key junctions (one track arriving, the other leaving).
+    return [
+        (lo + shot.start, hi + shot.start)
+        for lo, hi in _intersect_spans(pos, zoom)
+        if hi - lo > 1
+    ]
+
+
 @dataclass
 class Timeline:
     fps: int

@@ -5,7 +5,7 @@ from PIL import Image
 
 from montaj.project import file_sha, segment_hash
 from montaj.spec import load_spec
-from montaj.timeline import Still, Trans, Wall, resolve
+from montaj.timeline import Still, Trans, Wall, resolve, wall_static_spans
 
 BIRTHDAY_STEMS = [
     "09", "10", "12", "16", "19", "20", "21", "22",
@@ -283,3 +283,30 @@ def test_birthday_transition_edges(tmp_path: Path):
     assert tl.plan(730).outro == ("glow", 110, 730)
     assert tl.plan(120).flashes == ((120, 0.3),)
     assert tl.plan(70).leaks == ((70, 0.35, 1),)
+
+
+def test_birthday_wall_static_spans(tmp_path: Path):
+    """Camera holds on print 34 at the wall start, then after the last key through the outro.
+
+    Decided from spec keys only: pos 0–110 hold print 34, zoom 0–45 hold 1.606; both
+    constant on [0, 45]. Last zoom key is 290, so the tail is local t ≥ 290.
+    """
+    src = Path("recipes/birthday-short.yaml")
+    dst = tmp_path / "birthday-short.yaml"
+    copyfile(src, dst)
+    assets = tmp_path / "assets"
+    assets.mkdir()
+    for s in BIRTHDAY_STEMS:
+        _jpeg(assets, s)
+    tl = resolve(load_spec(dst), dst.parent)
+    wall = tl.shots[-1]
+    assert wall.kind == "wall" and wall.start == 450 and wall.end == 840
+    spans = wall_static_spans(wall)
+    assert (450, 496) in spans  # local [0, 45] inclusive
+    assert (740, 840) in spans  # after last zoom key t=290
+    covered = {f for lo, hi in spans for f in range(lo, hi)}
+    assert 450 in covered and 495 in covered and 496 not in covered
+    assert 740 in covered and 839 in covered
+    # zoom-out, pan, zoom-in must not count as holds
+    for f in (496, 560, 600, 669, 670, 671, 700, 739):
+        assert f not in covered, f"moving wall frame {f} marked static: {spans}"
