@@ -1,0 +1,9 @@
+.venv/
+__pycache__/
+*.pyc
+build/
+out/
+projects/*/build/
+*.mp4
+*.wav
+*.mov
