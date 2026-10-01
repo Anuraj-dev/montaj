@@ -189,6 +189,78 @@ def test_mux_cuts_audio_longer_than_the_film(tmp_path: Path) -> None:
     assert info.audio_duration == pytest.approx(2.0, abs=0.2)
 
 
+def pcm_rms(path: Path, *, start: float, seconds: float) -> float:
+    """RMS of a decoded audio window — loudness comparisons, without trusting ffmpeg's own numbers."""
+    raw = subprocess.run(
+        ["ffmpeg", "-hide_banner", "-loglevel", "error", "-ss", f"{start:g}", "-t", f"{seconds:g}",
+         "-i", str(path), "-vn", "-f", "s16le", "-ac", "1", "-ar", "48000", "-"],
+        stdout=subprocess.PIPE, check=True,
+    ).stdout
+    samples = np.frombuffer(raw, dtype="<i2").astype(np.float32) / 32768.0
+    assert samples.size, f"no audio decoded from {path} at {start}s"
+    return float(np.sqrt(np.mean(samples**2)))
+
+
+def test_mux_fade_out_decays_the_last_seconds(tmp_path: Path) -> None:
+    """`audio.fade_out`: the music lands on the picture's end, not the track's."""
+    log = tmp_path / "io.log"
+    video = clip(tmp_path / "v.mp4", seconds=6.0, src="testsrc")
+    audio = tone(tmp_path / "a.wav", seconds=6.0)
+
+    plain = encode.mux(video, audio, tmp_path / "plain.mp4", log=log)
+    faded = encode.mux(video, audio, tmp_path / "faded.mp4", fade_out=1.5, log=log)
+
+    mid = pcm_rms(plain, start=1.0, seconds=0.5)
+    assert pcm_rms(plain, start=5.5, seconds=0.5) == pytest.approx(mid, rel=0.15)  # no fade: flat
+    assert pcm_rms(faded, start=1.0, seconds=0.5) == pytest.approx(mid, rel=0.15)  # the body is untouched
+    assert pcm_rms(faded, start=5.5, seconds=0.5) < 0.25 * mid  # the last 1.5 s really decayed
+    assert encode.probe(faded, log=log).duration == pytest.approx(6.0, abs=0.1)
+
+
+def test_mux_rejects_a_negative_fade_out(tmp_path: Path) -> None:
+    with pytest.raises(encode.EncodeError):
+        encode.mux(clip(tmp_path / "v.mp4"), tone(tmp_path / "a.wav"), tmp_path / "m.mp4",
+                   fade_out=-1.0, log=tmp_path / "io.log")
+
+
+def test_mux_fade_out_longer_than_the_film_covers_the_whole_clip(tmp_path: Path) -> None:
+    """A 3 s fade on a 1 s film is the whole film, not a 3 s curve truncated at 1 s."""
+    log = tmp_path / "io.log"
+    video = clip(tmp_path / "v.mp4", seconds=1.0, src="testsrc")
+    audio = tone(tmp_path / "a.wav", seconds=1.0)
+    faded = encode.mux(video, audio, tmp_path / "faded.mp4", fade_out=3.0, log=log)
+    match = re.search(r"afade=t=out:st=([0-9.]+):d=([0-9.]+)", log.read_text())
+    assert match is not None, log.read_text()
+    assert float(match.group(1)) == pytest.approx(0.0, abs=0.05)
+    assert float(match.group(2)) == pytest.approx(1.0, abs=0.05)
+    start = pcm_rms(faded, start=0.0, seconds=0.15)
+    end = pcm_rms(faded, start=0.75, seconds=0.15)
+    assert end < 0.25 * start
+    assert encode.probe(faded, log=log).duration == pytest.approx(1.0, abs=0.1)
+
+
+def stream_colors(path: Path) -> tuple[str, str, str]:
+    out = subprocess.run(
+        ["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries",
+         "stream=color_space,color_primaries,color_transfer", "-of", "default=nk=1:nw=1", str(path)],
+        stdout=subprocess.PIPE, check=True,
+    ).stdout.decode().split()
+    return tuple(out)  # type: ignore[return-value]
+
+
+def test_encoder_and_export_carry_bt709_tags(tmp_path: Path) -> None:
+    log = tmp_path / "io.log"
+    seg = encode_frames(tmp_path / "seg.mp4", 4, log, codec="libx264")
+    assert stream_colors(seg) == ("bt709", "bt709", "bt709")
+
+    master = encode.export(seg, tmp_path / "master.mp4", "master", log=log)
+    assert stream_colors(master) == ("bt709", "bt709", "bt709")
+    assert stream_md5(master, "0:v") == stream_md5(seg, "0:v")  # copy stays a copy
+
+    whatsapp = encode.export(seg, tmp_path / "wa.mp4", "whatsapp", log=log)
+    assert stream_colors(whatsapp) == ("bt709", "bt709", "bt709")
+
+
 def test_probe_reports_video_and_audio_durations_separately(tmp_path: Path) -> None:
     log = tmp_path / "io.log"
     video = clip(tmp_path / "v.mp4", seconds=1.0, src="testsrc")
@@ -436,14 +508,29 @@ def test_doctor_lines_and_traps() -> None:
         assert any(name in check for check in checks), f"doctor is missing the {name} check: {lines}"
     assert all(line.split(":", 1)[0].split(" ", 1)[0] in {"OK", "WARN", "FAIL", "TRAP"} for line in lines)
     traps = [line for line in lines if line.startswith("TRAP ")]
-    assert len(traps) == len(doctor.TRAPS) == 5
+    assert len(traps) == len(doctor.TRAPS) >= 5
     assert any("chromium" in t for t in traps) and any("vram" in t for t in traps)
+    assert any("gpu-lock" in t for t in traps), "the shared-GPU trap must travel with doctor"
 
 
-def test_doctor_reports_present_tools() -> None:
+def test_doctor_reports_present_tools(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    (tmp_path / "ace").mkdir()
+    (tmp_path / "site").mkdir()
+    py = tmp_path / "py"
+    py.write_text("#!/bin/sh\nexit 0\n")
+    py.chmod(0o755)
+    cfg = _stub_config(tmp_path, {
+        "ace_step_dir": str(tmp_path / "ace"),
+        "ace_python": py.as_posix(),
+        "ace_site_packages": str(tmp_path / "site"),
+        "whisper_python": py.as_posix(),
+    })
+    monkeypatch.setenv("MONTAJ_CONFIG", str(cfg))
     lines = doctor.doctor()
     assert any(line.startswith("OK ffmpeg:") for line in lines)
     assert any(line.startswith("OK ffprobe:") for line in lines)
+    for key in ("ace_step_dir", "ace_python", "ace_site_packages", "whisper_python", "faster_whisper"):
+        assert any(line.split(":", 1)[0].endswith(key) for line in lines), f"no {key} line: {lines}"
 
 
 @pytest.mark.gpu
@@ -484,3 +571,62 @@ def test_free_vram_handles_missing_tool(monkeypatch: pytest.MonkeyPatch) -> None
 
     monkeypatch.setattr(doctor.subprocess, "run", boom)
     assert doctor.free_vram() is None
+
+def _stub_config(tmp_path: Path, body: dict[str, str]) -> Path:
+    path = tmp_path / "config.toml"
+    path.write_text("".join(f'{k} = "{v}"\n' for k, v in body.items()))
+    return path
+
+
+def test_doctor_config_lines_report_every_key_and_the_whisper_import(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    (tmp_path / "ace").mkdir()
+    (tmp_path / "site").mkdir()
+    whisper = tmp_path / "whisper"
+    whisper.write_text("#!/bin/sh\nprintf 'importing faster_whisper\\n'\n")
+    whisper.chmod(0o755)
+    cfg = _stub_config(tmp_path, {
+        "ace_step_dir": str(tmp_path / "ace"),
+        "ace_python": whisper.as_posix(),
+        "ace_site_packages": str(tmp_path / "site"),
+        "whisper_python": whisper.as_posix(),
+    })
+    monkeypatch.setenv("MONTAJ_CONFIG", str(cfg))
+    lines = doctor.config_lines()
+    assert lines[0] == f"OK config: {cfg}"
+    assert all(line.startswith("OK ") for line in lines[1:]), lines
+    assert any(line.startswith("OK faster_whisper:") for line in lines)
+
+    missing = _stub_config(tmp_path, {
+        "ace_step_dir": str(tmp_path / "nope"),
+        "ace_python": whisper.as_posix(),
+        "ace_site_packages": str(tmp_path / "site"),
+        "whisper_python": whisper.as_posix(),
+    })
+    monkeypatch.setenv("MONTAJ_CONFIG", str(missing))
+    fails = doctor.config_lines()
+    assert [line for line in fails if line.startswith("FAIL")] == [
+        f"FAIL ace_step_dir: {tmp_path / 'nope'} does not exist"
+    ], fails
+
+
+def test_doctor_reports_a_config_that_cannot_load_and_a_failing_import(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("MONTAJ_CONFIG", str(tmp_path / "absent.toml"))
+    lines = doctor.config_lines()
+    assert len(lines) == 1 and lines[0].startswith("FAIL config: ") and "absent.toml" in lines[0]
+
+    (tmp_path / "sh").mkdir()
+    dumb = tmp_path / "dumb"
+    dumb.write_text("#!/bin/sh\necho 'No module named faster_whisper' >&2\nexit 1\n")
+    dumb.chmod(0o755)
+    line = doctor.faster_whisper_line(dumb.as_posix())
+    assert line.startswith("FAIL faster_whisper: ") and "No module named faster_whisper" in line
+
+    silent = tmp_path / "silent"
+    silent.write_text("#!/bin/sh\nsleep 30\n")
+    silent.chmod(0o755)
+    line = doctor.faster_whisper_line(silent.as_posix(), timeout=1)
+    assert line.startswith("FAIL faster_whisper:") and "did not finish" in line

@@ -14,6 +14,9 @@ from pathlib import Path
 
 import yaml
 
+from montaj.audio import analyze as analyze_audio
+from montaj.audio import music as music_gen
+from montaj.audio.music import parse_duration
 from montaj.doctor import doctor
 from montaj.encode import export, probe
 from montaj.ingest import ingest
@@ -31,7 +34,7 @@ class _Usage(Exception):
         self.as_json = as_json
 
 
-_COMMANDS = ("doctor", "new", "ingest", "validate", "render", "sheet", "check", "export")
+_COMMANDS = ("doctor", "new", "ingest", "validate", "render", "sheet", "check", "export", "music")
 
 
 class _Parser(argparse.ArgumentParser):
@@ -71,6 +74,23 @@ def _parser() -> argparse.ArgumentParser:
 
     ex = sub.add_parser("export")
     ex.add_argument("--target", required=True, choices=("master", "whatsapp"))
+
+    music_p = sub.add_parser("music")
+    music_sub = music_p.add_subparsers(dest="music_cmd", required=True, metavar="gen|analyze")
+    gen = music_sub.add_parser("gen")
+    gen.add_argument("--caption", required=True)
+    gen.add_argument("--lyrics", required=True)
+    gen.add_argument("--bpm", type=float, default=music_gen.DEFAULT_BPM)
+    gen.add_argument("--key", default=music_gen.DEFAULT_KEY)
+    gen.add_argument("--lang", default=music_gen.DEFAULT_LANG)
+    gen.add_argument("--duration", default=f"{music_gen.DEFAULT_DURATION:g}s")
+    gen.add_argument("--n", type=int, default=music_gen.DEFAULT_N)
+    ana = music_sub.add_parser("analyze")
+    ana.add_argument("wav")
+    ana.add_argument("--lang", default=analyze_audio.DEFAULT_LANG)
+    ana.add_argument("--prompt", default=None)
+    ana.add_argument("--bpm", type=float, default=None)
+    ana.add_argument("--out", default=analyze_audio.DEFAULT_OUT)
     return p
 
 
@@ -303,6 +323,48 @@ def _cmd_export(ns: argparse.Namespace, root: Path) -> list[str]:
     return [f"OK out/{ns.target}.mp4 {mb:.1f}MB"]
 
 
+def _rel(root: Path, path: Path) -> str:
+    """Path shown to the agent: relative to the project when it is inside it, else absolute."""
+    try:
+        return path.resolve().relative_to(root).as_posix()
+    except ValueError:
+        return path.as_posix()
+
+
+def _cmd_music_gen(ns: argparse.Namespace, root: Path) -> list[str]:
+    try:
+        made = music_gen.gen(
+            root / "music",
+            caption=ns.caption,
+            lyrics=_at(root, ns.lyrics),
+            bpm=ns.bpm,
+            key=ns.key,
+            lang=ns.lang,
+            duration=parse_duration(ns.duration),
+            n=ns.n,
+            log=root / "build" / "music.log",
+        )
+    except music_gen.PartialGenError as exc:
+        lines = [f"{_rel(root, wav)} seed={seed}" for wav, seed in zip(exc.files, exc.seeds, strict=True)]
+        lines.append(f"ERR music gen: {len(exc.files)}/{exc.n} candidates ({exc.reason})")
+        return lines
+    lines = [f"{_rel(root, wav)} seed={seed}" for wav, seed in zip(made.files, made.seeds, strict=True)]
+    lines.append(f"OK music gen {len(made)} candidates")
+    return lines
+
+
+def _cmd_music_analyze(ns: argparse.Namespace, root: Path) -> list[str]:
+    analysis = analyze_audio.analyze(
+        _at(root, ns.wav),
+        _at(root, ns.out),
+        lang=ns.lang,
+        prompt=ns.prompt,
+        bpm=ns.bpm,
+        log=root / "build" / "music.log",
+    )
+    return [*analysis.lines, f"OK {_rel(root, analysis.path)} {analysis.n_words} words {analysis.n_beats} beats"]
+
+
 def _dispatch(ns: argparse.Namespace, root: Path) -> list[str]:
     if ns.cmd == "doctor":
         return _cmd_doctor()
@@ -320,6 +382,8 @@ def _dispatch(ns: argparse.Namespace, root: Path) -> list[str]:
         return _cmd_check(ns, root)
     if ns.cmd == "export":
         return _cmd_export(ns, root)
+    if ns.cmd == "music":
+        return _cmd_music_gen(ns, root) if ns.music_cmd == "gen" else _cmd_music_analyze(ns, root)
     raise _Usage(f"cli: unknown command {ns.cmd!r}")
 
 
