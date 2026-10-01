@@ -1,22 +1,42 @@
 # Spec reference
 
-Photo fields (`crop`, `focus`, swirl `center`, wall `at`) are source-image pixels. `zoom`, the wall grid and leak size are design pixels of a 1080-wide frame, so a half-size preview matches the final framing. Durations are `22f` (frames), `4b` (beats at `video.bpm`) or `1.5s`; a bare number is an error.
+Photo fields (`crop`, `focus`, swirl `center`, wall `at`) are source-image pixels. `zoom`, the wall grid and leak size are design pixels of a 1080-wide frame, so a half-size preview matches the final framing. Durations are `22f` (frames), `4b` (beats at `video.bpm`) or `1.5s`; a bare number is an error. A time expression is a duration from film start, or `<marker>[±duration]` (`ch1`, `ch1+2.4s`, `pre2-6f`). Marker names are `[a-z][a-z0-9_]*`. Marker values may be a duration, `word:<i>` (start of word `i` in `audio.markers`), or another marker plus an optional duration offset; cycles are an error.
 
 - `video.size` — string, required — output `WxH`, both numbers even. Preview halves each side, rounded down to even.
 - `video.fps` — integer, required — frames per second.
 - `video.bpm` — number, default none — beats per minute. Required when any duration uses `b`.
 - `video.look` — string, required — finish preset applied to every frame. See looks below.
+- `video.background` — `#rrggbb`, default `#000000` — colour that shows through a fade from or to nothing.
 - `video.intro` — mapping, default none — opening treatment on the first frames.
 - `video.intro.type` — string, required with intro — `white-lift`: a white bloom that settles onto the picture, plus a short lift from white.
 - `video.intro.dur` — duration, required with intro — how long the opening bloom lasts.
 - `video.outro` — mapping, default none — ending treatment. Starts at `n_frames - dur`.
-- `video.outro.type` — string, required with outro — `glow`: a bloom and warm rim that grow and then stay.
+- `video.outro.type` — string, required with outro — `glow`: a bloom and warm rim that grow and then stay. `fade`: everything fades to black over the last `dur`.
 - `video.outro.dur` — duration, required with outro — how long the ending lasts.
 - `video.motion_blur` — integer, default `1` — sub-frames averaged into each frame. `1` is off. Preview uses at most 2.
 - `assets` — string, default `assets` — photo folder relative to the spec file. A photo is the file stem (`jpg`, `jpeg`, `png` or `webp`).
 - `shots` — list, required — played in order. Each shot starts when the previous one ends.
-- `shots[].photo` — string, photo or wall — stem of the still. An integer in the YAML is read as a string. Mutually exclusive with `wall`.
-- `shots[].hold` — duration, required — how long this shot is on screen.
+- `shots[].photo` — string, photo or wall or clip — stem of the still. An integer in the YAML is read as a string. Mutually exclusive with `wall` and `clip`.
+- `shots[].clip` — string, photo or wall or clip — stem of a video file in `assets/` (`mp4`, `mov`, `webm`, `mkv`). Mutually exclusive with `photo` and `wall`.
+- `shots[].clip_in` — duration, default `0s` — source offset into the clip.
+- `shots[].hold` — duration, hold or until — how long this shot is on screen. Exactly one of `hold` or `until`.
+- `shots[].until` — time expression, hold or until — the shot ends at this time from film start. Must fall after the shot's start.
+- `shots[].drift` — mapping, default none — Ken Burns zoom/pan on a photo. Needs `photo`. Mutually exclusive with `zoom`.
+- `shots[].drift.zoom` — `[from, to]`, default `[1, 1]` — scale over the shot's visible span.
+- `shots[].drift.pan` — `[x, y]`, default `[0, 0]` — pan in design px; the image sits at `pan·(k − .5)`.
+- `shots[].tone` — mapping, default none — CSS filter on the photo, order brightness → saturate → contrast. Needs `photo`.
+- `shots[].tone.brightness` — number, default `1` — CSS `brightness`.
+- `shots[].tone.saturate` — number, default `1` — CSS `saturate`.
+- `shots[].tone.contrast` — number, default `1` — CSS `contrast`.
+- `shots[].frame` — mapping, default none — polaroid card on a blurred copy of the photo. Needs `photo`.
+- `shots[].frame.caption` — string, default none — Great Vibes caption on the card.
+- `shots[].frame.tilt` — `[from, to]` degrees, default none — card rotation over the visible span.
+- `shots[].morph` — mapping, default none — a second photo blooms in as a circle. Needs `photo`.
+- `shots[].morph.photo` — string, required with morph — stem of the arriving photo.
+- `shots[].morph.at` — duration, required with morph — when the morph starts, from this shot's start.
+- `shots[].morph.dur` — duration, required with morph — how long the circle takes to open.
+- `shots[].morph.center` — `[x, y]`, default none — screen fraction where the circle is centred.
+- `shots[].pulse` — `heartbeat`, default none — beat-locked scale pulse on `video.bpm`, phased from the shot start. Needs `photo` and `video.bpm`.
 - `shots[].crop` — `[x0, y0, x1, y1]`, default the full image — the part of the photo that is shown.
 - `shots[].focus` — `[x, y]`, default the crop centre — the photo point placed at the screen centre.
 - `shots[].zoom` — number, default cover — design pixels per photo pixel. Cover fits the crop with a hair of overscan.
@@ -25,6 +45,7 @@ Photo fields (`crop`, `focus`, swirl `center`, wall `at`) are source-image pixel
 - `shots[].in.dur` — duration, required except for a cut — length of the transition. It has to fit in the shots it overlaps.
 - `shots[].in.center` — `[x, y]`, default the outgoing shot's focus — where a swirl opens, in the outgoing photo.
 - `shots[].in.axis` — `x` or `y`, default `x` — which way a whip travels.
+- `shots[].in.blur` — number, default `0` — design-px blur on fading layers. Shot 0 may use `fade` (from `video.background`); other transitions on shot 0 stay an error.
 - `shots[].flash` — number, default none — white flash on this shot's first frame, fading out over the next 6 frames.
 - `shots[].wall` — mapping, photo or wall — a flat field of prints. The camera only pans and zooms. Mutually exclusive with `photo`.
 - `wall.grid` — `WxH` string, required — distance between print cells, in world design pixels.
@@ -50,11 +71,56 @@ Photo fields (`crop`, `focus`, swirl `center`, wall `at`) are source-image pixel
 - `wall.camera.zoom[].value` — number, optional — zoom at this key. Leave it off to hold the previous zoom.
 - `wall.camera.zoom[].print` — string, optional — if set, `value` is divided by that print's scale, so the number is a zoom relative to the print.
 - `wall.camera.zoom[].ease` — easing name, default `smooth` — how the zoom changes into this key.
-- `fx` — list, default none — light leaks and flashes at absolute frame times, not tied to a shot.
-- `fx[].leak` — number, leak or flash — strength of a warm light leak around `at`.
-- `fx[].flash` — number, leak or flash — strength of a white flash at `at`, fading over 6 frames.
-- `fx[].at` — duration, required — when it happens, in frames from the start of the film.
-- `fx[].dir` — `1` or `-1`, required with a leak — which side the leak comes in from. Not used on a flash.
+- `fx` — list, default none — light leaks, flashes, hits and bursts at absolute times, not tied to a shot.
+- `fx[].leak` — number, leak or flash or hit or burst — strength of a warm light leak around `at`.
+- `fx[].flash` — number, leak or flash or hit or burst — strength of a white flash at `at`, fading over 6 frames.
+- `fx[].hit` — number, leak or flash or hit or burst — golden radial flash (and optional punch) at `at`.
+- `fx[].burst` — integer, leak or flash or hit or burst — sparkle-particle count. Needs `pos`. Seed is `100` plus the burst's index among bursts.
+- `fx[].pos` — `[x, y]`, required with a burst — burst origin in design px.
+- `fx[].at` — time expression, required — when it happens, from the start of the film.
+- `fx[].dir` — `1` or `-1`, required with a leak — which side the leak comes in from. Not used on a flash, hit or burst.
+- `markers` — mapping, default none — name to a time expression from film start, or `word:<i>`.
+- `audio` — mapping, default none — soundtrack. No audio block is a silent film.
+- `audio.track` — string, required with audio — wav/path relative to the spec file.
+- `audio.markers` — string, default none — JSON `{words: [{i, w, s, e}, …]}` relative to the spec file. Needed for `word:` markers.
+- `audio.fade_out` — duration, default `0s` — afade at the end of the film.
+- `audio.loudnorm` — boolean, default true — loudnorm `-14` LUFS, TP `-1.5`, LRA `11`.
+- `text` — list, default none — overlay blocks. Each line reveals unit by unit.
+- `text[].from` — time expression, required — block visible window start.
+- `text[].to` — time expression, required — block visible window end.
+- `text[].fade_in` — duration, default `0s` — block fade in. `0` is instant.
+- `text[].fade_out` — duration, default `0.8s` — block fade out; the block blurs by `(1 − a)·blur`.
+- `text[].blur` — number, default `10` — design-px blur while the block fades.
+- `text[].lines` — list, required — the lines in this block.
+- `text[].lines[].text` — string, required — the line.
+- `text[].lines[].style` — `serif`, `script`, `caps` or `deva`, default `serif`.
+- `text[].lines[].italic` — boolean, default false — serif only.
+- `text[].lines[].gold` — boolean, default false — gold gradient fill with a travelling sweep.
+- `text[].lines[].color` — `cream`, `gold`, `ink` or `#rrggbb`, default the style's colour.
+- `text[].lines[].size` — number, default the style's — font size in design px.
+- `text[].lines[].weight` — number, default the style's — font weight.
+- `text[].lines[].tracking` — number, default the style's — letter-spacing in em.
+- `text[].lines[].line_height` — number, default the style's.
+- `text[].lines[].y` — number, required — design-px top of the line box.
+- `text[].lines[].at` — time expression, required — when this line starts revealing.
+- `text[].lines[].by` — `word` or `char`, default `word` — reveal unit.
+- `text[].lines[].stagger` — duration, default `0.16s` word / `0.07s` char — delay between units.
+- `text[].lines[].dur` — duration, default `0.9s` — reveal length of one unit.
+- `text[].lines[].rise` — number, default `26` — design-px rise of each unit.
+- `text[].lines[].reveal` — `rise` or `pop`, default `rise`.
+- `text[].lines[].sweep` — `[from, to]` time expressions, default the block window — gold gradient travels 100%→0% across it.
+- `text[].lines[].shadow` — boolean, default true — false drops the text shadow (ink lines).
+- `subs` — list, default none — lyric subtitles, one fixed style.
+- `subs[].from` — time expression, required — subtitle window start.
+- `subs[].to` — time expression, required — subtitle window end.
+- `subs[].text` — string, required — the lyric line.
+- `tracks` — mapping, default none — slow global levels. Keys are piecewise curves like wall camera keys. Before the first key: first value; after the last: last value.
+- `tracks.dust` — list of keys, default none — mote level.
+- `tracks.glow` — list of keys, default none — strength of the two drifting light leaks.
+- `tracks.bars` — list of keys, default none — letterbox height in design px.
+- `tracks.*[].t` — time expression, required — when this key is reached.
+- `tracks.*[].v` — number, required — value at this key.
+- `tracks.*[].ease` — easing name, default `linear` for dust and glow, `sine` for bars — the curve into this key.
 
 Transitions (`shots[].in`):
 
@@ -66,10 +132,12 @@ Transitions (`shots[].in`):
 Looks (`video.look`):
 
 - `warm-film` — a little sharpen, softer contrast, lifted blacks, a vignette, and amber light leaks.
+- `golden-film` — the Arshiya look: leaks, dust, gold hits, letterbox bars, grain, then a fade to black.
 
 Easing (the curve into a camera key):
 
 - `linear` — constant speed.
+- `sine` — half a cosine, the film.html `es` curve. Default for `tracks.bars`.
 - `smooth` — gentle slow start and slow end. This is the default.
 - `cubic` — a stronger slow start and slow end.
 - `outc` — leaves quickly and settles into the key.

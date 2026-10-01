@@ -50,8 +50,14 @@ def linear(x: float) -> float:
     return clamp01(x)
 
 
+def sine(x: float) -> float:
+    """film.html `es` (line 73): .5 − .5·cos(πx)."""
+    x = clamp01(x)
+    return 0.5 - 0.5 * math.cos(math.pi * x)
+
+
 EASE = {"linear": linear, "smooth": smooth, "cubic": cubic, "outc": outc,
-        "inc": inc, "expo": expo, "ramp": ramp}
+        "inc": inc, "expo": expo, "ramp": ramp, "sine": sine}
 
 
 def lerp(a: float, b: float, e: float) -> float:
