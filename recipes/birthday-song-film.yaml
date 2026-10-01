@@ -1,0 +1,346 @@
+# Arshiya birthday film — port of film.html 78–362 (1080x1920, 30 fps, 165 s).
+video:
+  size: 1080x1920
+  fps: 30
+  bpm: 76
+  look: golden-film
+  background: "#07060a"
+  outro: {type: fade, dur: 1.2s}
+  motion_blur: 2
+assets: assets
+# film.html 79–86 C
+markers:
+  hum: 5.2s
+  v1: 12.0s
+  masjid: 17.9s
+  mehendi: 23.74s
+  chaar: 29.88s
+  pre: 34.9s
+  pre2: 41.4s
+  ch1: 47.96s
+  ch1b: 52.82s
+  ch1c: 58.8s
+  ch1d: 64.58s
+  ch1e: 68.1s
+  ch1end: 72s
+  v2: 72s
+  pahad: 77.78s
+  gaadi: 83.42s
+  so: 88.46s
+  muskaan: 94.22s
+  br: 99.98s
+  br2: 105.98s
+  br3: 112.38s
+  build: 118.4s
+  ch2: 124.88s
+  ch2b: 129.84s
+  ch2c: 136.84s
+  janam: 141.6s
+  jaan: 145.96s
+  arshiya: 148.04s
+  hb: 151.06s
+  hamesha: 154.36s
+  samar: 157.3s
+audio:
+  track: music/song.wav
+  fade_out: 3s
+# film.html 372 dustK — linear P() ramps, summed (no overlap)
+tracks:
+  dust:
+    - {t: 0s, v: .35}
+    - {t: ch1-1s, v: .35}
+    - {t: ch1, v: .85, ease: linear}
+    - {t: ch1end, v: .85}
+    - {t: ch1end+3s, v: .50, ease: linear}
+    - {t: br3, v: .50}
+    - {t: ch2, v: 1.20, ease: linear}
+    - {t: hb, v: 1.20}
+    - {t: hb+1.5s, v: .60, ease: linear}
+  # film.html 404 leakK
+  glow:
+    - {t: 0s, v: .25}
+    - {t: ch1-0.5s, v: .25}
+    - {t: ch1, v: .60, ease: linear}
+    - {t: v2, v: .60}
+    - {t: v2+3s, v: .25, ease: linear}
+    - {t: br3, v: .25}
+    - {t: ch2, v: .70, ease: linear}
+    - {t: hb, v: .70}
+    - {t: hb+1s, v: .20, ease: linear}
+  # film.html 406 barH — es = sine; product of ramps, no overlap
+  bars:
+    - {t: 0s, v: 150}
+    - {t: ch1-0.6s, v: 150}
+    - {t: ch1+0.4s, v: 0, ease: sine}
+    - {t: v2, v: 0}
+    - {t: v2+2s, v: 150, ease: sine}
+    - {t: br-0.5s, v: 150}
+    - {t: br+0.5s, v: 0, ease: sine}
+# film.html 403 HITS (k .7), 368 BURSTS (n, pos)
+fx:
+  - {hit: 0.7, at: ch1}
+  - {hit: 0.7, at: ch2}
+  - {hit: 0.7, at: janam}
+  - {burst: 70, at: ch1, pos: [540, 1100]}
+  - {burst: 90, at: ch2, pos: [540, 1300]}
+  - {burst: 140, at: janam+1s, pos: [540, 1000]}
+  - {burst: 120, at: arshiya, pos: [540, 1180]}
+  - {burst: 60, at: arshiya+1.4s, pos: [300, 700]}
+  - {burst: 60, at: arshiya+2s, pos: [780, 760]}
+# film.html 88–103 LYR
+subs:
+  - {from: 12.0s, to: 17.7s, text: "Jaipur ki dhoop mein, tera woh sharmaana"}
+  - {from: 17.9s, to: 23.5s, text: "Jama Masjid ki shaam, tera dupatta sambhaalna"}
+  - {from: 23.74s, to: 29.6s, text: "Haathon pe mehendi, aur mere haath mein tu"}
+  - {from: 29.88s, to: 34.7s, text: "Chaar saal ho gaye, par lagta hai kal hi mili tu"}
+  - {from: 52.82s, to: 58.4s, text: "Tere bina adhoora sa, har ek lamha"}
+  - {from: 64.58s, to: 67.9s, text: "Janamdin mubarak ho,"}
+  - {from: 68.1s, to: 71.8s, text: "meri jaan Arshiya"}
+  - {from: 77.78s, to: 83.2s, text: "Pahadon ki dhund mein, tera kandha mera ghar"}
+  - {from: 83.42s, to: 88.2s, text: "Gaadi mein so jaaye tu, meri baahon mein bekhabar"}
+  - {from: 94.22s, to: 99.7s, text: "Teri har muskaan mein, meri subah aati hai"}
+  - {from: 99.98s, to: 105.7s, text: "Chaar saal, hazaar lamhe, ek hi kahaani"}
+  - {from: 105.98s, to: 112.1s, text: "Samar ki har dhadkan mein, bas teri nishaani"}
+  - {from: 129.84s, to: 135.2s, text: "Tere bina adhoora sa, har ek lamha"}
+  - {from: 136.84s, to: 141.4s, text: "Baaees baras ki tu, meri saari duniya"}
+shots:
+  # film.html 193–199 opening
+  - {photo: sky, until: 6.8s, focus: [512, 460.8], drift: {zoom: [1.18, 1.05]}, tone: {brightness: .45, saturate: .9}, in: {type: fade, dur: 2.5s, blur: 14}}
+  - {photo: hands-light, until: v1, focus: [449, 633.36], drift: {zoom: [1.25, 1.04]}, in: {type: fade, dur: 1.0s, blur: 14}}
+  # film.html 209–218 verse 1
+  - {photo: jaipur-scrunchie, until: v1+2.8s, focus: [388.8, 460.8], drift: {zoom: [1.1, 1.0], pan: [0, 40]}, in: {type: fade, dur: 0.5s, blur: 14}}
+  - {photo: jaipur-film3, until: masjid, focus: [511.5, 384.25], drift: {zoom: [1.0, 1.1], pan: [0, 120]}, in: {type: fade, dur: 0.5s, blur: 14}}
+  - {photo: masjid-front, until: masjid+2.5s, focus: [360, 576], drift: {zoom: [1.12, 1.02]}, in: {type: fade, dur: 0.5s, blur: 14}}
+  - photo: masjid-back
+    until: mehendi
+    focus: [360, 512]
+    drift: {zoom: [1.02, 1.12]}
+    morph: {photo: masjid-painted, at: 0.9s, dur: 1.6s, center: [.55, .5]}
+    in: {type: fade, dur: 0.5s, blur: 14}
+  - {photo: ring-metro, until: mehendi+2.7s, focus: [487.5, 614.25], drift: {zoom: [1.15, 1.03]}, in: {type: fade, dur: 0.5s, blur: 14}}
+  - {photo: scrunchie-hand, until: chaar, focus: [395, 550], drift: {zoom: [1.02, 1.14]}, in: {type: fade, dur: 0.5s, blur: 14}}
+  - {photo: jaipur-film2, until: pre, focus: [542, 725.5], drift: {zoom: [1.02, 1.12]}, tone: {brightness: .6}, in: {type: fade, dur: 0.6s, blur: 14}}
+  # film.html 226–238 pre-chorus
+  - {photo: hands-light, until: pre2, focus: [449, 527.8], drift: {zoom: [1.05, 1.22]}, tone: {brightness: .5}, in: {type: fade, dur: 0.8s, blur: 14}}
+  - {photo: hands-framed, until: pre2+2.9s, focus: [395, 550], drift: {zoom: [1.12, 1.0]}, in: {type: fade, dur: 0.5s, blur: 14}}
+  - {photo: headphones-real, until: ch1, focus: [395, 440], drift: {zoom: [1.0, 1.16]}, in: {type: fade, dur: 0.5s, blur: 14}}
+  # film.html 240–254 chorus 1
+  - {photo: starry-headphones, until: ch1b, focus: [512, 614.4], drift: {zoom: [1.14, 1.0]}, tone: {brightness: .82}}
+  - {photo: peek, until: ch1c, focus: [405, 672], drift: {zoom: [1.02, 1.15], pan: [40, 0]}, in: {type: fade, dur: 0.6s, blur: 14}}
+  - photo: venice
+    until: ch1d
+    focus: [540, 720]
+    drift: {zoom: [1.02, 1.1]}
+    morph: {photo: venice-painted, at: 1.6s, dur: 2.0s, center: [.5, .35]}
+    in: {type: fade, dur: 0.6s, blur: 14}
+  - {photo: shy2, until: ch1e, focus: [540, 405], drift: {zoom: [1.0, 1.04]}, frame: {caption: "my shy girl", tilt: [2, -1.5]}, in: {type: fade, dur: 0.5s, blur: 14}}
+  - {photo: starry-selfie, until: v2, focus: [512, 512], drift: {zoom: [1.02, .98]}, frame: {tilt: [-2, 1]}, in: {type: fade, dur: 0.5s, blur: 14}}
+  # film.html 256–268 verse 2
+  - {photo: masjid-bw, until: pahad, focus: [360, 449.55], drift: {zoom: [1.0, 1.1]}, in: {type: fade, dur: 1.0s, blur: 14}}
+  - {photo: hills-bw, until: gaadi, focus: [540, 1056], drift: {zoom: [1.0, 1.12], pan: [0, -60]}, in: {type: fade, dur: 1.0s, blur: 14}}
+  - {photo: car-bw, until: muskaan, focus: [449.5, 959.4], drift: {zoom: [1.0, 1.14]}, tone: {brightness: .6, contrast: 1.05}, in: {type: fade, dur: 0.9s, blur: 14}}
+  - {photo: lake-selfie, until: br, focus: [640, 480], drift: {zoom: [.98, 1.03]}, frame: {caption: "my sunshine", tilt: [-1.5, 1.5]}, in: {type: fade, dur: 0.6s, blur: 14}}
+  # film.html 271–278 bridge beat flips
+  - {photo: jaipur-selfie, until: br+1b, focus: [576, 362.88], drift: {zoom: [1.12, 1.04]}, tone: {brightness: .36, saturate: .8}, in: {type: fade, dur: 0.08s}}
+  - {photo: masjid-front, until: br+2b, focus: [360, 537.6], drift: {zoom: [1.12, 1.04]}, tone: {brightness: .36, saturate: .8}, in: {type: fade, dur: 0.08s}}
+  - {photo: peek, until: br+3b, focus: [450, 672], drift: {zoom: [1.12, 1.04]}, tone: {brightness: .36, saturate: .8}, in: {type: fade, dur: 0.08s}}
+  - {photo: eiffel, until: br+4b, focus: [288.5, 537.6], drift: {zoom: [1.12, 1.04]}, tone: {brightness: .36, saturate: .8}, in: {type: fade, dur: 0.08s}}
+  - {photo: lake-night, until: br+5b, focus: [288.5, 537.6], drift: {zoom: [1.12, 1.04]}, tone: {brightness: .36, saturate: .8}, in: {type: fade, dur: 0.08s}}
+  - {photo: venice-painted, until: br+6b, focus: [426.5, 537.6], drift: {zoom: [1.12, 1.04]}, tone: {brightness: .36, saturate: .8}, in: {type: fade, dur: 0.08s}}
+  - {photo: jaipur-film3, until: br+7b, focus: [511.5, 645.54], drift: {zoom: [1.12, 1.04]}, tone: {brightness: .36, saturate: .8}, in: {type: fade, dur: 0.08s}}
+  - {photo: gurudwara, until: br2, focus: [288, 537.6], drift: {zoom: [1.12, 1.04]}, tone: {brightness: .36, saturate: .8}, in: {type: fade, dur: 0.08s}}
+  # film.html 294–306 heartbeat + lanterns
+  - {photo: sky-headphones, until: br3, focus: [449.5, 720], drift: {zoom: [1.05, 1.12]}, pulse: heartbeat, in: {type: fade, dur: 0.3s, blur: 14}}
+  - {photo: lanterns, until: build+2s, focus: [512, 1075.2], drift: {zoom: [1.0, 1.2], pan: [0, 220]}, in: {type: fade, dur: 0.8s, blur: 14}}
+  # film.html 307–316 accelerating cuts (d *= 0.8, floor BEAT*.25)
+  - {photo: gurudwara, until: 121.18947368421053s, focus: [288, 537.6], drift: {zoom: [1.02, 1.1]}, tone: {brightness: .9}, in: {type: fade, dur: 0.05s}}
+  - {photo: eiffel, until: 121.82105263157895s, focus: [288.5, 537.6], drift: {zoom: [1.02, 1.1]}, tone: {brightness: .9}, in: {type: fade, dur: 0.05s}}
+  - {photo: lake-night, until: 122.32631578947368s, focus: [288.5, 537.6], drift: {zoom: [1.02, 1.1]}, tone: {brightness: .9}, in: {type: fade, dur: 0.05s}}
+  - {photo: bed-light, until: 122.73052631578948s, focus: [449, 633.36], drift: {zoom: [1.02, 1.1]}, tone: {brightness: .9}, in: {type: fade, dur: 0.05s}}
+  - {photo: jaipur-selfie, until: 123.05389473684211s, focus: [576, 362.88], drift: {zoom: [1.02, 1.1]}, tone: {brightness: .9}, in: {type: fade, dur: 0.05s}}
+  - {photo: masjid-painted, until: 123.31258947368421s, focus: [511.5, 645.54], drift: {zoom: [1.02, 1.1]}, tone: {brightness: .9}, in: {type: fade, dur: 0.05s}}
+  - {photo: shy1, until: 123.5195452631579s, focus: [540, 340.2], drift: {zoom: [1.02, 1.1]}, tone: {brightness: .9}, in: {type: fade, dur: 0.05s}}
+  - {photo: venice-painted, until: 123.71691368421052s, focus: [426.5, 537.6], drift: {zoom: [1.02, 1.1]}, tone: {brightness: .9}, in: {type: fade, dur: 0.05s}}
+  - {photo: jaipur-film3, until: 123.91428210526315s, focus: [511.5, 645.54], drift: {zoom: [1.02, 1.1]}, tone: {brightness: .9}, in: {type: fade, dur: 0.05s}}
+  - {photo: peek, until: 124.11165052631578s, focus: [450, 672], drift: {zoom: [1.02, 1.1]}, tone: {brightness: .9}, in: {type: fade, dur: 0.05s}}
+  - {photo: masjid-front, until: 124.30901894736841s, focus: [360, 537.6], drift: {zoom: [1.02, 1.1]}, tone: {brightness: .9}, in: {type: fade, dur: 0.05s}}
+  - {photo: starry-headphones, until: 124.50638736842104s, focus: [512, 645.12], drift: {zoom: [1.02, 1.1]}, tone: {brightness: .9}, in: {type: fade, dur: 0.05s}}
+  - {photo: gurudwara, until: 124.70375578947368s, focus: [288, 537.6], drift: {zoom: [1.02, 1.1]}, tone: {brightness: .9}, in: {type: fade, dur: 0.05s}}
+  - {photo: eiffel, until: ch2, focus: [288.5, 537.6], drift: {zoom: [1.02, 1.1]}, tone: {brightness: .9}, in: {type: fade, dur: 0.05s}}
+  # film.html 319–327 final-chorus picks
+  - {photo: jaipur-film3, until: ch2+2b, focus: [511.5, 645.54], drift: {zoom: [1.02, 1.14]}}
+  - {photo: masjid-painted, until: ch2+4b, focus: [511.5, 645.54], drift: {zoom: [1.14, 1.02]}, in: {type: fade, dur: 0.15s, blur: 6}}
+  - {photo: peek, until: ch2+6b, focus: [450, 672], drift: {zoom: [1.02, 1.14]}, in: {type: fade, dur: 0.15s, blur: 6}}
+  - {photo: venice-painted, until: ch2+8b, focus: [426.5, 537.6], drift: {zoom: [1.14, 1.02]}, in: {type: fade, dur: 0.15s, blur: 6}}
+  - {photo: eiffel, until: ch2+10b, focus: [288.5, 537.6], drift: {zoom: [1.02, 1.14]}, in: {type: fade, dur: 0.15s, blur: 6}}
+  - {photo: masjid-front, until: ch2+12b, focus: [360, 537.6], drift: {zoom: [1.14, 1.02]}, in: {type: fade, dur: 0.15s, blur: 6}}
+  - {photo: starry-headphones, until: ch2c, focus: [512, 645.12], drift: {zoom: [1.02, 1.14]}, in: {type: fade, dur: 0.15s, blur: 6}}
+  # film.html 332–346 cake / 22 / letter
+  - {photo: cake, until: janam, focus: [512, 844.8], drift: {zoom: [1.05, 1.18]}, in: {type: fade, dur: 0.6s, blur: 14}}
+  - {photo: sky, until: hb, focus: [512, 537.6], drift: {zoom: [1.0, 1.16]}, in: {type: fade, dur: 0.7s, blur: 14}}
+  - {photo: paper, until: 165s, focus: [512, 768], drift: {zoom: [1.06, 1.0]}, tone: {brightness: .96}, in: {type: fade, dur: 1.0s, blur: 14}}
+text:
+  # film.html 195–199
+  - from: 0s
+    to: 7.2s
+    fade_out: 0.9s
+    lines:
+      - {text: "a little film for", style: caps, y: 700, at: 1.2s, stagger: 0.12s}
+      - {text: Arshiya, style: script, size: 230, y: 760, at: hum-0.3s, by: char, stagger: 0.09s, dur: 1.4s, rise: 10}
+      - {text: "from Samar, with all his heart", style: serif, italic: true, size: 46, y: 1110, at: hum+1.0s}
+  # film.html 203–207
+  - from: 7.2s
+    to: v1
+    fade_out: 0.5s
+    lines:
+      - {text: "Some stories begin", style: serif, italic: true, y: 1330, at: 7.6s}
+      - {text: "with a hand held", style: serif, italic: true, y: 1430, at: 8.8s}
+      - {text: "and never let go.", style: serif, y: 1560, at: 10.0s, color: gold}
+  # film.html 210
+  - from: v1-0.2s
+    to: v1+4.2s
+    fade_out: 0.6s
+    lines:
+      - {text: "I  ·  the golden hours", style: caps, y: 200, at: v1+0.1s}
+  # film.html 219–224
+  - from: chaar
+    to: pre+0.2s
+    fade_out: 0.6s
+    lines:
+      - {text: "4", style: serif, gold: true, size: 420, y: 480, at: chaar+0.2s, dur: 1.4s, weight: 300, line_height: 1, sweep: [chaar, pre]}
+      - {text: years, style: caps, size: 40, y: 940, at: chaar+0.9s}
+      - {text: "and it still feels", style: serif, italic: true, y: 1150, at: chaar+2.3s}
+      - {text: "like yesterday.", style: serif, italic: true, y: 1250, at: chaar+3.2s}
+  # film.html 228–232
+  - from: pre
+    to: pre2+0.2s
+    fade_out: 0.5s
+    lines:
+      - {text: "तेरा हाथ हाथ में हो अगर", style: deva, y: 760, at: pre+0.3s, stagger: 0.35s}
+      - {text: "तो सफ़र ही असल-ए-हयात है", style: deva, y: 870, at: pre+3.0s, stagger: 0.3s, color: gold}
+      - {text: "if your hand is in mine, the journey itself is life", style: serif, italic: true, size: 38, y: 1040, at: pre+4.2s, stagger: 0.06s}
+  # film.html 235–238
+  - from: pre2+0.4s
+    to: ch1-0.1s
+    fade_out: 0.4s
+    lines:
+      - {text: "and every day since", style: serif, italic: true, size: 64, y: 1460, at: pre2+0.8s}
+      - {text: "has been about you", style: serif, italic: true, size: 64, y: 1550, at: pre2+3.4s}
+  # film.html 242–245
+  - from: ch1
+    to: ch1b+0.2s
+    fade_out: 0.5s
+    lines:
+      - {text: ARSHIYA, style: serif, gold: true, size: 170, y: 1240, at: ch1+0.1s, by: char, stagger: 0.08s, dur: 1.2s, weight: 600, tracking: 0.16, sweep: [ch1, ch1b]}
+      - {text: "turns twenty-two", style: script, size: 110, y: 1440, at: ch1+2.4s, stagger: 0.22s}
+  # film.html 249–252
+  - from: ch1c
+    to: ch1d
+    fade_out: 0.5s
+    lines:
+      - {text: "baaees baras ki tu,", style: serif, italic: true, size: 70, y: 200, at: ch1c+0.1s}
+      - {text: "meri saari duniya", style: script, size: 104, y: 285, at: ch1c+3.6s}
+  # film.html 258
+  - from: v2+0.6s
+    to: v2+5.4s
+    fade_out: 0.8s
+    lines:
+      - {text: "II  ·  the quiet moments", style: caps, y: 200, at: v2+1.0s}
+  # film.html 261–267
+  - from: so-0.6s
+    to: muskaan+0.2s
+    fade_out: 0.6s
+    lines:
+      - {text: "She doesn’t even realise", style: serif, italic: true, size: 60, y: 520, at: so-0.2s}
+      - {text: "how peaceful the world becomes", style: serif, italic: true, size: 60, y: 600, at: so+1.2s}
+      - {text: "when she sleeps in my arms.", style: serif, italic: true, size: 60, y: 680, at: so+2.6s}
+      - {text: "I’ll always keep her safe,", style: serif, italic: true, size: 56, y: 860, at: so+4.0s, color: gold}
+      - {text: "even in the silence of her dreams.", style: serif, italic: true, size: 56, y: 935, at: so+4.8s, color: gold}
+  # film.html 280–293 counter (five pop blocks; span = (br2−br)/5)
+  - from: br
+    to: br+1.2s
+    fade_in: 0.2s
+    fade_out: 0s
+    lines:
+      - {text: "4", style: serif, gold: true, size: 250, y: 640, at: br, weight: 300, line_height: 1, reveal: pop}
+      - {text: years, style: caps, size: 40, y: 930, at: br, reveal: pop}
+  - from: br+1.2s
+    to: br+2.4s
+    fade_out: 0s
+    lines:
+      - {text: "48", style: serif, gold: true, size: 250, y: 640, at: br+1.2s, weight: 300, line_height: 1, reveal: pop}
+      - {text: months, style: caps, size: 40, y: 930, at: br+1.2s, reveal: pop}
+  - from: br+2.4s
+    to: br+3.6s
+    fade_out: 0s
+    lines:
+      - {text: "1,461", style: serif, gold: true, size: 250, y: 640, at: br+2.4s, weight: 300, line_height: 1, reveal: pop}
+      - {text: days, style: caps, size: 40, y: 930, at: br+2.4s, reveal: pop}
+  - from: br+3.6s
+    to: br+4.8s
+    fade_out: 0s
+    lines:
+      - {text: "35,064", style: serif, gold: true, size: 250, y: 640, at: br+3.6s, weight: 300, line_height: 1, reveal: pop}
+      - {text: hours, style: caps, size: 40, y: 930, at: br+3.6s, reveal: pop}
+  - from: br+4.8s
+    to: br2+0.2s
+    fade_out: 0.4s
+    lines:
+      - {text: "1", style: serif, gold: true, size: 250, y: 640, at: br+4.8s, weight: 300, line_height: 1, reveal: pop}
+      - {text: story, style: caps, size: 40, y: 930, at: br+4.8s, reveal: pop}
+  # film.html 297–300
+  - from: br2+0.3s
+    to: br3
+    fade_out: 0.5s
+    lines:
+      - {text: "every heartbeat of mine", style: serif, italic: true, size: 62, y: 230, at: br2+0.8s}
+      - {text: "carries your name", style: script, size: 110, y: 310, at: br2+2.6s}
+  # film.html 302–306
+  - from: br3+0.2s
+    to: build+2s
+    fade_out: 0.4s
+    lines:
+      - {text: "मेरे हर क़दम पे हैं मंज़िलें", style: deva, size: 64, y: 330, at: br3+0.3s, stagger: 0.3s}
+      - {text: "तेरा प्यार गर मेरे साथ है", style: deva, size: 64, y: 440, at: br3+3.6s, stagger: 0.3s, color: gold}
+      - {text: "every step is a destination, if your love walks with me", style: serif, italic: true, size: 36, y: 590, at: br3+4.6s, stagger: 0.05s}
+  # film.html 328–331
+  - from: ch2+0.05s
+    to: ch2b
+    fade_out: 0.6s
+    lines:
+      - {text: Arshiya, style: script, size: 190, y: 1360, at: ch2+0.1s, by: char, stagger: 0.08s, dur: 1.2s}
+      - {text: "tu hi meri dua", style: serif, italic: true, size: 64, y: 1600, at: ch2+3.0s}
+  # film.html 333–336
+  - from: ch2c+0.3s
+    to: janam+0.2s
+    fade_out: 0.5s
+    lines:
+      - {text: "make a wish,", style: serif, italic: true, size: 72, y: 250, at: ch2c+0.6s}
+      - {text: "birthday girl", style: script, size: 130, y: 340, at: ch2c+1.8s}
+  # film.html 338–343
+  - from: janam
+    to: hb+0.6s
+    fade_out: 0.9s
+    lines:
+      - {text: "22", style: serif, gold: true, size: 560, y: 340, at: janam+0.2s, dur: 2s, rise: 0, weight: 300, line_height: 1, sweep: [janam, hb]}
+      - {text: "Happy Birthday", style: script, size: 150, y: 930, at: janam+1.0s, stagger: 0.3s, dur: 1.2s}
+      - {text: ARSHIYA, style: serif, gold: true, size: 150, y: 1160, at: arshiya-0.15s, by: char, stagger: 0.09s, dur: 1.2s, weight: 600, tracking: 0.18, sweep: [janam, hb]}
+      - {text: "meri jaan", style: serif, italic: true, size: 60, y: 1370, at: jaan+0.1s}
+  # film.html 347–358 letter
+  - from: hb+0.3s
+    to: 161.6s
+    fade_out: 1.2s
+    lines:
+      - {text: "Arshiya,", style: script, size: 104, y: 380, at: hb+0.4s, by: char, stagger: 0.12s, color: ink, shadow: false}
+      - {text: "four years, a thousand moments,", style: serif, italic: true, size: 58, y: 560, at: hb+1.4s, stagger: 0.12s, color: ink, shadow: false}
+      - {text: "and you are still", style: serif, italic: true, size: 58, y: 640, at: hb+2.6s, stagger: 0.12s, color: ink, shadow: false}
+      - {text: "my favourite one.", style: serif, italic: true, size: 58, y: 720, at: hb+3.4s, stagger: 0.12s, color: ink, shadow: false}
+      - {text: "forever yours,", style: serif, italic: true, size: 54, y: 960, at: hamesha+0.2s, stagger: 0.12s, color: ink, shadow: false}
+      - {text: Samar, style: script, size: 150, y: 1030, at: samar-0.1s, by: char, stagger: 0.12s, color: ink, shadow: false}
+  # film.html 359–362
+  - from: 161.4s
+    to: 165s
+    fade_out: 1.4s
+    lines:
+      - {text: "four years down,", style: serif, italic: true, size: 58, y: 860, at: 161.8s}
+      - {text: "forever to go.", style: script, size: 110, y: 940, at: 162.6s}
