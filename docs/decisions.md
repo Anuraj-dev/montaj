@@ -22,3 +22,12 @@
 
 ## 2026-10-01 — CLI, not MCP server
 **Why:** works in Claude, Codex, opencode; no per-turn tool-schema tokens; composes in bash. Revisit only if a host cannot shell out.
+
+## 2026-10-01 — Build the engine in waves by external models, scored in BENCHMARK.md
+**Why:** Raja wants evidence on non-Claude models. Each wave runs head-to-head where cheap, is scored by driver-held hidden tests, and is reviewed by Sol. From wave 3, routing follows the benchmark (grok-4.6, grok-4.7, Space Bunny, Sol). Rejected: Opus-by-default implementation.
+
+## 2026-10-01 — Cache granularity is one segment per shot
+**Why:** segments split only at shot starts, so a shot edit re-renders that shot plus any transition segment that reads it (2/13 on the real film). Finer splits add concat joins without a measured need.
+
+## 2026-10-01 — Concat writes per-chunk durations from known frame counts
+**Why:** NVENC segments mux a short last packet; without explicit durations, every later frame drifts 0.3 ms and frame-exact tools misalign. Probing counts cost +4.9 s per render, so the pipeline passes them.
