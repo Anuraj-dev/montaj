@@ -7,6 +7,7 @@ import torch
 import torch.nn.functional as F
 
 from .core import smooth
+from .golden import bars, dust, fade_out as fade_layer, grain, hits, leaks, vignette
 
 LOOKS = {"warm-film": {
     "sharpen": 0.3, "scurve": 0.3, "lift": 0.012, "gain": 0.98, "vignette": 0.28,
@@ -15,7 +16,7 @@ LOOKS = {"warm-film": {
     "col": [1.0, 0.55, 0.25],
     "intro_bloom": 0.9, "intro_lift": 0.35, "intro_lift_frac": 0.8,
     "outro_bloom": 0.55, "outro_rim": 0.10, "outro_ramp": 45.0,
-}}
+}, "golden-film": {"kind": "golden-film"}}
 
 
 def _odd(x: float) -> int:
@@ -41,7 +42,7 @@ def bloom(cv, img, k: float):
     return 1 - (1 - img) * (1 - (g**1.5) * k)
 
 
-def finish(cv, img, f: float, look: dict, flashes: list, leaks: list, intro, outro):
+def _warm(cv, img, f: float, look: dict, flashes: list, leaks: list, intro, outro):
     """flashes [(at,k)], leaks [(at,k,dir)], intro ("white-lift",dur)|None, outro ("glow",dur,start)|None."""
     L = look
     n = max(3, _odd(5 * cv.k))
@@ -78,3 +79,50 @@ def finish(cv, img, f: float, look: dict, flashes: list, leaks: list, intro, out
                           + ((cv.YY - cv.H * 0.42) / (cv.H * 0.45)) ** 2))[None]
         img = 1 - (1 - img) * (1 - rim * col * L["outro_rim"] * kk)
     return img.clamp(0, 1)
+
+
+def _is_plan(obj) -> bool:
+    return hasattr(obj, "flashes") and hasattr(obj, "dust") and hasattr(obj, "fade_out")
+
+
+def _golden(cv, img, f, look: dict, plan, overlay):
+    """film.html 364–436. t = f / fps seconds. Overlay (text + subs) is step 4."""
+    fps = float(look.get("fps") or 30.0)
+    t = float(f) / fps
+    img = leaks(cv, img, t, plan.glow, math.inf)  # the end-of-film ramp is already in plan.glow
+    # FramePlan stores hit/burst `at` in frames. golden.hits and golden.dust take seconds.
+    bursts = tuple((i, at / fps, x, y, n) for i, at, x, y, n in plan.bursts)
+    img = dust(cv, img, t, plan.dust, bursts)
+    if callable(overlay):
+        img = overlay(img)
+    img = vignette(cv, img)
+    img = grain(cv, img, f)
+    img = hits(cv, img, t, tuple((at / fps, k) for at, k in plan.hits))
+    img = bars(cv, img, plan.bars)
+    if plan.fade_out is not None:
+        span, start = plan.fade_out
+        img = fade_layer(img, f, start, span)
+    return img.clamp(0, 1)
+
+
+def finish(cv, img, f, look, plan=None, overlay=None, intro=None, outro=None):
+    """`finish(cv, img, f, look, plan, overlay)`.
+
+    M1 callers still pass flashes, leaks, intro, outro in those last four spots.
+    A FramePlan selects the new path. warm-film grades, then the overlay.
+    golden-film is the nine-step order, overlay at step 4.
+    """
+    if not _is_plan(plan):
+        flashes = [] if plan is None else plan
+        leaks = overlay if isinstance(overlay, (list, tuple)) else []
+        return _warm(cv, img, f, look, flashes, leaks, intro, outro)
+    if isinstance(look, dict) and look.get("kind") == "golden-film":
+        return _golden(cv, img, f, look, plan, overlay)
+    out = _warm(cv, img, f, look, plan.flashes, plan.leaks, plan.intro, plan.outro)
+    if callable(overlay):
+        out = overlay(out)
+    # Fade after the grade and the overlay, so text and the warm look go to black too.
+    if plan.fade_out is not None:
+        span, start = plan.fade_out
+        out = fade_layer(out, f, start, span)
+    return out

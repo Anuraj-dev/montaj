@@ -191,6 +191,7 @@ class Shot(Frozen):
     frame: FrameCard | None = None
     morph: Morph | None = None
     pulse: str | None = None
+    blank: bool = False
     in_: Transition | None = Field(default=None, alias="in")
     flash: float | None = None
 
@@ -214,6 +215,7 @@ class TextLine(Frozen):
     reveal: str = "rise"
     sweep: tuple[TimeExpr, TimeExpr] | None = None
     shadow: bool = True
+    indent: float = 0.0
 
 
 class TextBlock(Frozen):
@@ -818,9 +820,12 @@ def validate_spec(
         has_p = sh.photo is not None
         has_w = sh.wall is not None
         has_c = sh.clip is not None
-        n_src = has_p + has_w + has_c
+        has_b = sh.blank
+        n_src = has_p + has_w + has_c + has_b
         if n_src > 1:
-            errors.append(_line(f"shots[{i}]", "photo, wall and clip are mutually exclusive", "remove extra"))
+            errors.append(
+                _line(f"shots[{i}]", "photo, wall, clip and blank are mutually exclusive", "remove extra")
+            )
         elif n_src == 0:
             errors.append(_line(f"shots[{i}]", "need photo, wall or clip", "add one"))
         if not has_p:

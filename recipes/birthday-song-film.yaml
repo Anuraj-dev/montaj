@@ -178,7 +178,9 @@ shots:
   # film.html 332–346 cake / 22 / letter
   - {photo: cake, until: janam, focus: [512, 844.8], drift: {zoom: [1.05, 1.18]}, in: {type: fade, dur: 0.6s, blur: 14}}
   - {photo: sky, until: hb, focus: [512, 537.6], drift: {zoom: [1.0, 1.16]}, in: {type: fade, dur: 0.7s, blur: 14}}
-  - {photo: paper, until: 165s, focus: [512, 768], drift: {zoom: [1.06, 1.0]}, tone: {brightness: .96}, in: {type: fade, dur: 1.0s, blur: 14}}
+  - {photo: paper, until: 161.8s, focus: [512, 768], drift: {zoom: [1.06, 1.0]}, tone: {brightness: .96}, in: {type: fade, dur: 1.0s, blur: 14}}
+  # film.html 346: paper t1 161.8, fo 1.2 onto the stage colour. Default scene blur is 14 (line 161).
+  - {blank: true, until: 165s, in: {type: fade, dur: 1.2s, blur: 14}}
 text:
   # film.html 195–199
   - from: 0s
@@ -231,7 +233,7 @@ text:
     to: ch1b+0.2s
     fade_out: 0.5s
     lines:
-      - {text: ARSHIYA, style: serif, gold: true, size: 170, y: 1240, at: ch1+0.1s, by: char, stagger: 0.08s, dur: 1.2s, weight: 600, tracking: 0.16, sweep: [ch1, ch1b]}
+      - {text: ARSHIYA, style: serif, gold: true, size: 170, y: 1240, at: ch1+0.1s, by: char, stagger: 0.08s, dur: 1.2s, weight: 600, tracking: 0.16, indent: 0.16, sweep: [ch1, ch1b]}
       - {text: "turns twenty-two", style: script, size: 110, y: 1440, at: ch1+2.4s, stagger: 0.22s}
   # film.html 249–252
   - from: ch1c
@@ -324,7 +326,7 @@ text:
     lines:
       - {text: "22", style: serif, gold: true, size: 560, y: 340, at: janam+0.2s, dur: 2s, rise: 0, weight: 300, line_height: 1, sweep: [janam, hb]}
       - {text: "Happy Birthday", style: script, size: 150, y: 930, at: janam+1.0s, stagger: 0.3s, dur: 1.2s}
-      - {text: ARSHIYA, style: serif, gold: true, size: 150, y: 1160, at: arshiya-0.15s, by: char, stagger: 0.09s, dur: 1.2s, weight: 600, tracking: 0.18, sweep: [janam, hb]}
+      - {text: ARSHIYA, style: serif, gold: true, size: 150, y: 1160, at: arshiya-0.15s, by: char, stagger: 0.09s, dur: 1.2s, weight: 600, tracking: 0.18, indent: 0.18, sweep: [janam, hb]}
       - {text: "meri jaan", style: serif, italic: true, size: 60, y: 1370, at: jaan+0.1s}
   # film.html 347–358 letter
   - from: hb+0.3s

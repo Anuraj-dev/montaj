@@ -11,7 +11,7 @@ from dataclasses import dataclass
 import torch
 import torch.nn.functional as F
 
-from .core import cubic
+from .core import cubic, sine
 
 _LUMA = (0.2126, 0.7152, 0.0722)  # W3C saturate()
 _CREAM = (246 / 255, 239 / 255, 226 / 255)  # .frame background, film.html line 21
@@ -20,12 +20,6 @@ _CREAM = (246 / 255, 239 / 255, 226 / 255)  # .frame background, film.html line 
 def _clamp(x: float, a: float, b: float) -> float:
     """film.html line 68. `b < a` still returns `b` (JS Math.min/max order)."""
     return min(b, max(a, x))
-
-
-def sine(x: float) -> float:
-    """film.html line 73 `es`. Smoothstep is a different curve."""
-    x = max(0.0, min(1.0, x))
-    return 0.5 - 0.5 * math.cos(math.pi * x)
 
 
 def drift(t: float, v0: float, v1: float, zoom: tuple[float, float] = (1.0, 1.0),

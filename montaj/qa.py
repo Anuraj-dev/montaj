@@ -115,16 +115,28 @@ def subtract(span: Span, ranges: Sequence[Span]) -> list[Span]:
     return [piece for piece in pieces if piece[1] - piece[0] > SPAN_EPS_S]
 
 
-def check(video: Path | str, intended_freeze: Sequence[Span] = (), *, log: Path | str | None = None) -> list[str]:
-    """One short line per check; the only stdout surface of the QA stage."""
+def check(video: Path | str, intended_freeze: Sequence[Span] = (), *, log: Path | str | None = None,
+          av_tol: float | None = None, intended_black: Sequence[Span] = ()) -> list[str]:
+    """One short line per check; the only stdout surface of the QA stage.
+
+    `av_tol` overrides the 0.5 s default. The CLI passes one frame when the spec has audio.
+    `intended_black` drops black spans that sit inside a designed dark window (opening fade
+    from a dark ground, a dark blank and its transitions, the outro fade).
+    """
     info = probe(video, log=log)
+    tol = AV_TOL_S if av_tol is None else av_tol
     lines = [
         f"OK duration {info.duration:.2f}s",
         f"OK size {info.width}x{info.height}",
         f"OK fps {info.fps:.1f}",
     ]
-    for start, end in black_spans(video, log=log):
-        lines.append(f"WARN black {start:.2f}-{end:.2f}s")
+    ignored_black = 0
+    for span in black_spans(video, log=log):
+        left = subtract(span, intended_black)
+        ignored_black += 1 if not left else 0
+        lines += [f"WARN black {start:.2f}-{end:.2f}s" for start, end in left]
+    if ignored_black:
+        lines.append(f"INFO black {ignored_black} span(s) ignored as intended")
     ignored = 0
     for span in frozen_spans(video, log=log):
         left = subtract(span, intended_freeze)
@@ -144,7 +156,7 @@ def check(video: Path | str, intended_freeze: Sequence[Span] = (), *, log: Path 
         lines.append(f"WARN loudness {i:.1f} LUFS (want {LOUDNESS_TARGET:.0f})")
     if info.av_offset is None:
         lines.append("INFO av-offset unknown")
-    elif abs(info.av_offset) > AV_TOL_S:
+    elif abs(info.av_offset) > tol:
         lines.append(f"WARN av-offset {info.av_offset:+.2f}s")
     else:
         lines.append(f"OK av-offset {info.av_offset:+.2f}s")

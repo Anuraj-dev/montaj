@@ -11,7 +11,7 @@ from shutil import copyfile
 import pytest
 from PIL import Image
 
-from montaj.cli import _intended_freeze, main
+from montaj.cli import _intended_black, _intended_freeze, main
 
 
 def _jpeg(folder: Path, stem: str, color: tuple[int, int, int] = (10, 20, 30)) -> None:
@@ -399,6 +399,160 @@ def test_sheet_at_caps_count_at_twelve(tmp_path: Path, capsys: pytest.CaptureFix
     code, out, err = _run(["-C", str(proj), "sheet", "--at", times], capsys)
     assert code == 0 and err == "", out
     assert out.strip() == "OK build/sheet.jpg 12 frames"
+
+
+def test_intended_freeze_includes_a_blank_hold(tmp_path: Path) -> None:
+    proj = _project(
+        tmp_path,
+        "  - {photo: a, hold: 30f}\n"
+        "  - {blank: true, hold: 60f, in: {type: fade, dur: 30f}}\n",
+        ["a"],
+    )
+    spans = _intended_freeze(proj)
+
+    def covers(lo: float, hi: float) -> bool:
+        return any(a - 1e-6 <= lo and b + 1e-6 >= hi for a, b in spans)
+
+    assert covers(0.0, 1.0)  # still
+    assert covers(2.0, 3.0)  # blank, after the fade
+    assert not any(max(a, 1.1) < min(b, 1.9) for a, b in spans)
+
+
+def test_intended_freeze_skips_drift_morph_pulse_and_frame(tmp_path: Path) -> None:
+    proj = _project(
+        tmp_path,
+        "  - {photo: a, hold: 30f}\n"
+        "  - {photo: a, hold: 30f, zoom: 1.4, tone: {brightness: 0.5}}\n"
+        "  - {photo: a, hold: 30f, drift: {zoom: [1, 1.4]}}\n"
+        "  - {photo: a, hold: 30f, pulse: heartbeat}\n"
+        "  - {photo: a, hold: 30f, morph: {photo: b, at: 0f, dur: 10f}}\n"
+        "  - {photo: a, hold: 30f, frame: {tilt: [0, 3]}}\n"
+        "  - {blank: true, hold: 30f}\n",
+        ["a", "b"],
+    )
+    spans = _intended_freeze(proj)
+
+    def covers(lo: float, hi: float) -> bool:
+        return any(a - 1e-6 <= lo and b + 1e-6 >= hi for a, b in spans)
+
+    assert covers(0.0, 1.0)  # static still
+    assert covers(1.0, 2.0)  # zoom + tone, no motion
+    assert covers(6.0, 7.0)  # blank
+    for lo in (2.0, 3.0, 4.0, 5.0):
+        assert not any(max(a, lo + 0.05) < min(b, lo + 0.95) for a, b in spans)
+
+
+def _black(path: Path, seconds: float) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    subprocess.run(
+        ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-f", "lavfi",
+         "-i", f"color=c=black:size=320x240:rate=30:duration={seconds}",
+         "-pix_fmt", "yuv420p", str(path)],
+        check=True,
+    )
+
+
+def test_intended_black_covers_dark_windows_only(tmp_path: Path) -> None:
+    proj = tmp_path / "proj"
+    _jpeg(proj / "assets", "a")
+    (proj / "montaj.yaml").write_text(
+        "video:\n  size: 320x240\n  fps: 30\n  look: warm-film\n"
+        "  background: \"#07060a\"\n"
+        "  outro: {type: fade, dur: 15f}\n"
+        "assets: assets\nshots:\n"
+        "  - {photo: a, hold: 60f, in: {type: fade, dur: 30f}}\n"
+        "  - {blank: true, hold: 60f, in: {type: fade, dur: 15f}}\n"
+    )
+    spans = _intended_black(proj)
+
+    def covers(lo: float, hi: float) -> bool:
+        return any(a - 1e-6 <= lo and b + 1e-6 >= hi for a, b in spans)
+
+    assert covers(0.0, 1.0)  # shot-0 fade, not the rest of the still
+    assert not any(max(a, 1.05) < min(b, 1.95) for a, b in spans)
+    assert covers(2.0, 4.0)  # blank hold, its fade, and the outro
+
+    text = (proj / "montaj.yaml").read_text().replace("#07060a", "#ffffff")
+    (proj / "montaj.yaml").write_text(text)
+    bright = _intended_black(proj)
+    assert bright == [(3.5, 4.0)]  # outro only; a bright ground is not a dark window
+
+
+def test_check_warns_black_outside_the_opening_fade(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    proj = tmp_path / "proj"
+    _jpeg(proj / "assets", "a")
+    (proj / "montaj.yaml").write_text(
+        "video:\n  size: 320x240\n  fps: 30\n  look: warm-film\n"
+        "  background: \"#07060a\"\n"
+        "assets: assets\nshots:\n"
+        "  - {photo: a, hold: 60f, in: {type: fade, dur: 30f}}\n"
+    )
+    _black(proj / "out" / "preview.mp4", 2.0)
+    code, out, err = _run(["-C", str(proj), "check"], capsys)
+    assert code == 0 and err == "", out
+    blacks = [line for line in out.splitlines() if line.startswith("WARN black")]
+    assert blacks, out
+    spans = [tuple(float(v) for v in re.search(r"([\d.]+)-([\d.]+)s", line).groups()) for line in blacks]
+    assert any(max(s[0], 1.05) < min(s[1], 1.95) for s in spans), blacks
+    assert not any(s[1] <= 1.05 for s in spans), blacks
+
+
+def test_render_line_suffixes_audio(tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch) -> None:
+    from montaj.pipeline import RenderResult
+
+    proj = _project(tmp_path, "  - {photo: a, hold: 4f}\n", ["a"])
+    out = proj / "out" / "final.mp4"
+    out.parent.mkdir(parents=True)
+    out.write_bytes(b"x" * 2048)
+
+    def fake(path, mode="preview"):
+        return RenderResult(path=out, n_frames=4, seconds=4 / 30, size=(8, 8), rendered=1, cached=0, audio=True)
+
+    monkeypatch.setattr("montaj.pipeline.render", fake)
+    code, text, err = _run(["-C", str(proj), "render", "--final"], capsys)
+    assert code == 0 and err == "", text
+    assert text.strip().endswith(" audio")
+    assert "rendered 1/1 cached 0/1" in text
+
+    def silent(path, mode="preview"):
+        return RenderResult(path=out, n_frames=4, seconds=4 / 30, size=(8, 8), rendered=0, cached=1, audio=False)
+
+    monkeypatch.setattr("montaj.pipeline.render", silent)
+    code, text, err = _run(["-C", str(proj), "render"], capsys)
+    assert code == 0 and err == "", text
+    assert not text.strip().endswith(" audio")
+
+
+def test_check_av_tolerance_is_one_frame_when_audio_is_set(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str],
+) -> None:
+    """0.25 s of extra audio is inside the 0.5 s default and outside one frame at 30 fps."""
+    proj = _project(tmp_path, "  - {photo: a, hold: 30f}\n", ["a"])
+    video = proj / "out" / "preview.mp4"
+    video.parent.mkdir(parents=True)
+    subprocess.run(
+        ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+         "-f", "lavfi", "-i", "color=c=red:size=64x64:rate=30:duration=1",
+         "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000:duration=1.25",
+         "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", str(video)],
+        check=True,
+    )
+    code, out, err = _run(["-C", str(proj), "check", "--video", "out/preview.mp4"], capsys)
+    assert code == 0 and err == "", out
+    assert any(line.startswith("OK av-offset") for line in out.splitlines()), out
+
+    text = (proj / "montaj.yaml").read_text().replace(
+        "assets: assets\n", "assets: assets\naudio:\n  track: music/song.wav\n",
+    )
+    (proj / "music").mkdir()
+    (proj / "music" / "song.wav").write_bytes(b"RIFFstub")
+    (proj / "montaj.yaml").write_text(text)
+    code, out, err = _run(["-C", str(proj), "check", "--video", "out/preview.mp4"], capsys)
+    assert code == 0 and err == "", out
+    assert any(line.startswith("WARN av-offset") for line in out.splitlines()), out
 
 
 def test_music_group_names_itself_in_errors_and_has_help(capsys: pytest.CaptureFixture[str]) -> None:

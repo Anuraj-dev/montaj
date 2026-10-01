@@ -374,6 +374,61 @@ def concat(
     return out
 
 
+def _parse_loudnorm(stderr: str) -> dict:
+    """The last loudnorm JSON object in ffmpeg's stderr."""
+    decoder = json.JSONDecoder()
+    found = None
+    for i, ch in enumerate(stderr):
+        if ch != "{":
+            continue
+        try:
+            obj, _end = decoder.raw_decode(stderr[i:])
+        except json.JSONDecodeError:
+            continue
+        if isinstance(obj, dict) and "input_i" in obj:
+            found = obj
+    if found is None:
+        raise EncodeError("mux: loudnorm measurement missing", tail_lines(stderr))
+    return found
+
+
+def _loudnorm_field(stats: dict, key: str) -> str:
+    if key not in stats:
+        raise EncodeError(f"mux: loudnorm json has no {key}")
+    text = str(stats[key]).strip()
+    if text.lower() in {"-inf", "inf", "nan"}:
+        raise EncodeError(f"mux: loudnorm measured {key}={text}")
+    return text
+
+
+def _measure_loudnorm(audio: Path | str, duration: float, log: Path | str | None) -> dict:
+    """Pass 1: integrated loudness of the trimmed track. No fade and no apad.
+
+    The fade is applied after the gain, so it must not change the measurement.
+    Padding silence into the analysis would pull a short track away from -14.
+    """
+    af = (
+        f"atrim=start=0:end={duration:.6f},asetpts=PTS-STARTPTS,"
+        f"{LOUDNORM}:print_format=json"
+    )
+    _code, stderr = run(
+        [FFMPEG, "-y", "-hide_banner", "-i", str(audio), "-af", af, "-f", "null", "-"],
+        log=log,
+        desc="mux",
+    )
+    return _parse_loudnorm(stderr)
+
+
+def _linear_loudnorm(stats: dict) -> str:
+    return (
+        f"{LOUDNORM}:measured_I={_loudnorm_field(stats, 'input_i')}:"
+        f"measured_TP={_loudnorm_field(stats, 'input_tp')}:"
+        f"measured_LRA={_loudnorm_field(stats, 'input_lra')}:"
+        f"measured_thresh={_loudnorm_field(stats, 'input_thresh')}:"
+        f"offset={_loudnorm_field(stats, 'target_offset')}:linear=true"
+    )
+
+
 def mux(
     video: Path | str,
     audio: Path | str,
@@ -383,11 +438,12 @@ def mux(
     *,
     log: Path | str | None = None,
 ) -> Path:
-    """Attach audio to a finished video: video copied, audio loudnorm'd to -14 LUFS as AAC 256k/48k.
+    """Attach audio to a finished video: video copied, audio at -14 LUFS as AAC 256k/48k.
 
-    The film's length wins: short audio is padded (apad), long audio is cut, so adding music
-    never truncates the picture. Padding goes *after* loudnorm — normalising an endless apad
-    stream makes loudnorm's single-pass analysis see a different signal.
+    Loudnorm is two-pass and linear. Pass 1 measures the track trimmed to the film.
+    Pass 2 applies `measured_I/TP/LRA/thresh` and `offset` with `linear=true`.
+    The film's length wins: short audio is padded (apad), long audio is cut.
+    The fade, when set, runs after the gain so the body stays put and the ending decays.
 
     `fade_out` seconds fade out over the *film's* last seconds (`audio.fade_out` in a spec), so
     the music lands on the picture's end rather than the track's.
@@ -402,7 +458,15 @@ def mux(
         raise EncodeError(f"mux: fade_out must not be negative, got {fade_out}")
     out = Path(out)
     out.parent.mkdir(parents=True, exist_ok=True)
-    chain = [LOUDNORM] if loudnorm else []
+    if loudnorm:
+        stats = _measure_loudnorm(audio, info.duration, log)
+        chain = [
+            f"atrim=start=0:end={info.duration:.6f}",
+            "asetpts=PTS-STARTPTS",
+            _linear_loudnorm(stats),
+        ]
+    else:
+        chain = []
     if fade_out > 0:
         start = max(0.0, info.duration - fade_out)
         duration = min(fade_out, info.duration)

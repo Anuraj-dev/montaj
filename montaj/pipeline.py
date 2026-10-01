@@ -9,15 +9,16 @@ from pathlib import Path
 import torch
 
 from montaj import __version__
-from montaj.encode import Encoder, concat
-from montaj.project import file_sha, find_photo, segment_hash
+from montaj.encode import Encoder, concat, mux
+from montaj.gpulock import hold as gpu_hold
+from montaj.project import file_sha, find_clip, find_photo, segment_hash
 from montaj.render.canvas import Canvas
 from montaj.render.frame import Renderer
-from montaj.spec import Spec, load_spec
+from montaj.spec import Spec, _dur_frames, load_spec
 from montaj.timeline import Segment, resolve
 
 # Bump when a pixel changes. Concatenated onto __version__ inside every segment hash.
-RENDER_REV = "+2"  # +2: preview sharpen kernel scales with Canvas.k
+RENDER_REV = "+4"  # duration hash, photo/clip shas, sine fades, zoom, clip tail, warm fade
 
 
 def engine_version() -> str:
@@ -32,6 +33,7 @@ class RenderResult:
     size: tuple[int, int]
     rendered: int
     cached: int
+    audio: bool = False
 
 
 def _apply_mode(spec: Spec, mode: str) -> Spec:
@@ -55,16 +57,28 @@ def _apply_mode(spec: Spec, mode: str) -> Spec:
 
 def _asset_shas(spec: Spec, spec_dir: Path) -> dict[str, str]:
     assets = spec_dir / spec.assets
-    ids: list[str] = []
+    photos: list[str] = []
+    clips: list[str] = []
     for shot in spec.shots:
         if shot.photo:
-            ids.append(shot.photo)
+            photos.append(shot.photo)
         if shot.wall:
-            ids.extend(p.photo for p in shot.wall.prints)
+            photos.extend(p.photo for p in shot.wall.prints)
+        if shot.morph is not None:
+            photos.append(shot.morph.photo)
+        if shot.clip:
+            clips.append(shot.clip)
+    # A still and a clip can share a stem (`reel.jpg` and `reel.mp4`). One dict
+    # keyed by stem kept the photo sha and skipped the clip.
     out: dict[str, str] = {}
-    for pid in ids:
-        if pid not in out:
-            out[pid] = file_sha(find_photo(assets, pid))
+    for pid in photos:
+        key = f"photo:{pid}"
+        if key not in out:
+            out[key] = file_sha(find_photo(assets, pid))
+    for cid in clips:
+        key = f"clip:{cid}"
+        if key not in out:
+            out[key] = file_sha(find_clip(assets, cid))
     return out
 
 
@@ -109,38 +123,61 @@ def render(spec_path: Path, mode: str = "preview") -> RenderResult:
     out = spec_dir / "out" / f"{mode}.mp4"
     W, H = tl.size
     _log(log, f"render {mode} {W}x{H} motion_blur {spec.video.motion_blur} frames {tl.n_frames}")
+    fade_s = 0.0
+    loudnorm = True
+    track: Path | None = None
+    if spec.audio is not None:
+        track = (spec_dir / spec.audio.track).resolve()
+        loudnorm = spec.audio.loudnorm
+        if spec.audio.fade_out:
+            frames = _dur_frames(
+                spec.audio.fade_out, spec.video.fps, spec.video.bpm, "audio.fade_out", [],
+            )
+            fade_s = 0.0 if frames is None else frames / float(spec.video.fps)
 
     rendered = 0
     cached = 0
     chunks: list[Path] = []
-    with torch.no_grad():
-        cv = Canvas(W, H, device="cuda")
-        renderer = Renderer(tl, spec_dir, cv)
-        try:
-            for seg in tl.segments:
-                digest = segment_hash(tl, seg, shas, version)
-                dest = seg_dir / f"{digest}.mp4"
-                chunks.append(dest)
-                if dest.is_file() and dest.stat().st_size > 0:
-                    cached += 1
-                    _log(log, f"segment {seg.index} {seg.start}-{seg.end} hit {digest}")
-                    continue
-                _log(log, f"segment {seg.index} {seg.start}-{seg.end} miss {digest}")
-                _encode_segment(renderer, seg, dest, tl.fps, log)
-                rendered += 1
-        finally:
-            del renderer, cv
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
+    # The lock covers CUDA, encode, concat and mux. Wait lines land in render.log.
+    with gpu_hold(log):
+        with torch.no_grad():
+            cv = Canvas(W, H, device="cuda")
+            renderer = Renderer(tl, spec_dir, cv)
+            try:
+                for seg in tl.segments:
+                    digest = segment_hash(tl, seg, shas, version)
+                    dest = seg_dir / f"{digest}.mp4"
+                    chunks.append(dest)
+                    if dest.is_file() and dest.stat().st_size > 0:
+                        cached += 1
+                        _log(log, f"segment {seg.index} {seg.start}-{seg.end} hit {digest}")
+                        continue
+                    _log(log, f"segment {seg.index} {seg.start}-{seg.end} miss {digest}")
+                    _encode_segment(renderer, seg, dest, tl.fps, log)
+                    rendered += 1
+            finally:
+                del renderer, cv
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
 
-    concat(
-        chunks,
-        out,
-        fps=tl.fps,
-        frames=[seg.end - seg.start for seg in tl.segments],
-        log=log,
-    )
-    _log(log, f"concat {out.name} rendered {rendered} cached {cached}")
+        concat(
+            chunks,
+            out,
+            fps=tl.fps,
+            frames=[seg.end - seg.start for seg in tl.segments],
+            log=log,
+        )
+        _log(log, f"concat {out.name} rendered {rendered} cached {cached}")
+        if track is not None:
+            # ffmpeg cannot read and write the same path. A failed mux leaves the silent concat.
+            tmp = out.with_name(f".{out.name}.muxing.mp4")
+            try:
+                mux(out, track, tmp, loudnorm=loudnorm, fade_out=fade_s, log=log)
+                os.replace(tmp, out)
+            except Exception:
+                tmp.unlink(missing_ok=True)
+                raise
+            _log(log, f"mux {track.name} loudnorm={loudnorm} fade_out={fade_s:.3f}s")
     return RenderResult(
         path=out.resolve(),
         n_frames=tl.n_frames,
@@ -148,4 +185,5 @@ def render(spec_path: Path, mode: str = "preview") -> RenderResult:
         size=(W, H),
         rendered=rendered,
         cached=cached,
+        audio=track is not None,
     )
