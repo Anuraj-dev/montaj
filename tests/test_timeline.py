@@ -1,11 +1,12 @@
 from pathlib import Path
 from shutil import copyfile
 
+import pytest
 from PIL import Image
 
 from montaj.project import file_sha, segment_hash
 from montaj.spec import load_spec
-from montaj.timeline import Still, Trans, Wall, resolve, wall_static_spans
+from montaj.timeline import Blank, Clip, Still, Trans, Wall, resolve, wall_static_spans
 
 BIRTHDAY_STEMS = [
     "09", "10", "12", "16", "19", "20", "21", "22",
@@ -310,3 +311,173 @@ def test_birthday_wall_static_spans(tmp_path: Path):
     # zoom-out, pan, zoom-in must not count as holds
     for f in (496, 560, 600, 669, 670, 671, 700, 739):
         assert f not in covered, f"moving wall frame {f} marked static: {spans}"
+
+
+def test_until_rounding(tmp_path: Path):
+    tl = _mini(tmp_path, "  - {photo: a, until: 1.51s}\n", ["a"])
+    assert tl.n_frames == 45
+    assert tl.shots[0].end == 45
+
+
+def test_visible_span_fade_and_whip(tmp_path: Path):
+    tl = _mini(
+        tmp_path,
+        "  - {photo: a, hold: 20f, drift: {zoom: [1.2, 1.0]}}\n"
+        "  - {photo: b, hold: 20f, in: {type: fade, dur: 10f}}\n",
+        ["a", "b"],
+    )
+    sc0 = tl.plan(0).scene
+    assert isinstance(sc0, Still) and sc0.span == (0, 30)
+    assert isinstance(tl.plan(19).scene, Still) and tl.plan(19).scene.span == (0, 30)
+    assert isinstance(tl.plan(20).scene, Trans)
+    assert tl.plan(20).scene.a.span == (0, 30)
+
+    other = tmp_path / "whip"
+    other.mkdir()
+    tlw = _mini(
+        other,
+        "  - {photo: a, hold: 30f, drift: {zoom: [1.0, 1.1]}}\n"
+        "  - {photo: b, hold: 30f, drift: {zoom: [1.1, 1.0]}, in: {type: whip, dur: 14f}}\n",
+        ["a", "b"],
+    )
+    assert isinstance(tlw.plan(0).scene, Still) and tlw.plan(0).scene.span == (0, 37)
+    sc1 = tlw.plan(40).scene
+    assert isinstance(sc1, Still) and sc1.span == (23, 60)
+    whip = tlw.plan(23).scene
+    assert isinstance(whip, Trans) and whip.kind == "whip"
+    assert whip.a.span == (0, 37) and whip.b.span == (23, 60)
+
+
+def test_text_and_sub_windows(tmp_path: Path):
+    assets = tmp_path / "assets"
+    assets.mkdir()
+    _jpeg(assets, "a")
+    p = tmp_path / "montaj.yaml"
+    p.write_text(
+        "video:\n  size: 1080x1920\n  fps: 30\n  bpm: 120\n  look: warm-film\n"
+        "assets: assets\nshots:\n  - {photo: a, hold: 70f}\n"
+        "text:\n  - from: 1s\n    to: 2s\n    lines:\n      - {text: hello, y: 100, at: 1s}\n"
+        "subs:\n  - {from: 0.5s, to: 1.5s, text: lyric}\n"
+    )
+    tl = resolve(load_spec(p), p.parent)
+    assert tl.plan(28).texts == ()
+    assert tl.plan(29).texts == (0,)
+    assert tl.plan(60).texts == (0,)
+    assert tl.plan(61).texts == (0,)
+    assert tl.plan(62).texts == ()
+    # from 0.5s=15f, to 1.5s=45f; opacity [from−0.2s, to+0.3s] ±1 frame → [8, 55]
+    assert tl.plan(7).subs == ()
+    assert tl.plan(8).subs == (0,)
+    assert tl.plan(55).subs == (0,)
+    assert tl.plan(56).subs == ()
+
+
+def test_hit_and_burst_windows(tmp_path: Path):
+    extra = (
+        "\nfx:\n"
+        "  - {hit: 0.7, at: 10s}\n"
+        "  - {burst: 70, at: 10s, pos: [540, 1100]}\n"
+    )
+    tl = _mini(tmp_path, "  - {photo: a, hold: 410f}\n", ["a"], fx=extra.split("\nfx:\n", 1)[1])
+    assert tl.plan(296).hits == ()
+    assert tl.plan(297).hits == ((300.0, 0.7),)
+    assert tl.plan(335).hits == ((300.0, 0.7),)
+    assert tl.plan(336).hits == ()
+    assert tl.plan(299).bursts == ()
+    b = tl.plan(300).bursts
+    assert b == ((0, 300.0, 540.0, 1100.0, 70),)
+    assert tl.plan(402).bursts == b
+    assert tl.plan(403).bursts == ()
+
+
+def test_track_values_linear_sine_before_after(tmp_path: Path):
+    extra = """
+tracks:
+  dust:
+    - {t: 1s, v: 0.35}
+    - {t: 2s, v: 0.85, ease: linear}
+  glow:
+    - {t: 0s, v: 0.25}
+  bars:
+    - {t: 0s, v: 150}
+    - {t: 1s, v: 0}
+"""
+    p = tmp_path / "t.yaml"
+    assets = tmp_path / "assets"
+    assets.mkdir()
+    _jpeg(assets, "a")
+    p.write_text(
+        "video:\n  size: 1080x1920\n  fps: 30\n  bpm: 120\n  look: warm-film\n"
+        "assets: assets\nshots:\n  - {photo: a, hold: 90f}\n" + extra
+    )
+    tl = resolve(load_spec(p), p.parent)
+    assert tl.plan(0).dust == pytest.approx(0.35)
+    assert tl.plan(45).dust == pytest.approx(0.6)
+    assert tl.plan(89).dust == pytest.approx(0.85)
+    assert tl.plan(10).glow == pytest.approx(0.25)
+    import math
+    k = 8 / 30.0
+    sine = 0.5 - 0.5 * math.cos(math.pi * k)
+    assert tl.plan(8).bars == pytest.approx(150 * (1 - sine), abs=1e-6)
+    assert tl.plan(0).bars == pytest.approx(150)
+    assert tl.plan(30).bars == pytest.approx(0)
+
+
+def test_fade_out_plan(tmp_path: Path):
+    tl = _mini(
+        tmp_path,
+        "  - {photo: a, hold: 100f}\n",
+        ["a"],
+        outro="{type: fade, dur: 1.2s}",
+    )
+    assert tl.plan(63).fade_out is None
+    assert tl.plan(64).fade_out == (36, 64)
+    assert tl.plan(99).fade_out == (36, 64)
+    assert tl.plan(64).outro is None
+
+
+def test_clip_scene(tmp_path: Path):
+    assets = tmp_path / "assets"
+    assets.mkdir()
+    _jpeg(assets, "a")
+    (assets / "intro.mp4").write_bytes(b"x")
+    p = tmp_path / "montaj.yaml"
+    p.write_text(
+        "video:\n  size: 1080x1920\n  fps: 30\n  look: warm-film\n"
+        "assets: assets\nshots:\n  - {clip: intro, hold: 10f, clip_in: 1.5s}\n"
+        "  - {photo: a, hold: 10f}\n"
+    )
+    tl = resolve(load_spec(p), p.parent)
+    sc = tl.plan(0).scene
+    assert isinstance(sc, Clip) and sc.shot == 0 and sc.t0 == 0
+    assert isinstance(tl.plan(10).scene, Still)
+    assert tl.shots[0].kind == "clip"
+
+
+def test_m1_still_has_no_span(tmp_path: Path):
+    tl = _mini(tmp_path, "  - {photo: a, hold: 10f}\n", ["a"])
+    sc = tl.plan(0).scene
+    assert isinstance(sc, Still) and sc.span is None
+    assert sc.shot == 0
+
+
+def test_shot0_fade_from_blank(tmp_path: Path):
+    tl = _mini(tmp_path, "  - {photo: a, hold: 30f, in: {type: fade, dur: 10f}}\n", ["a"])
+    sc0 = tl.plan(0).scene
+    assert isinstance(sc0, Trans) and sc0.kind == "fade"
+    assert isinstance(sc0.a, Blank)
+    assert isinstance(sc0.b, Still) and sc0.b.shot == 0
+    assert isinstance(tl.plan(9).scene, Trans) and tl.plan(9).scene.kind == "fade"
+    end = tl.plan(10).scene
+    assert isinstance(end, Still) and end.shot == 0
+
+
+def test_frame_card_has_span(tmp_path: Path):
+    tl = _mini(
+        tmp_path,
+        "  - {photo: a, hold: 20f, frame: {tilt: [2, -1.5]}}\n"
+        "  - {photo: b, hold: 20f, in: {type: fade, dur: 10f}}\n",
+        ["a", "b"],
+    )
+    sc0 = tl.plan(0).scene
+    assert isinstance(sc0, Still) and sc0.span == (0, 30)

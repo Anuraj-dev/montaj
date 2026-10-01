@@ -110,3 +110,61 @@ def test_hash_wall_prints_included(tmp_path: Path):
     shas2["b"] = "0" * 64
     assert segment_hash(tl, tl.segments[1], shas2, "e1") != h
     assert segment_hash(tl, tl.segments[0], shas2, "e1") == segment_hash(tl, tl.segments[0], shas, "e1")
+
+
+def test_hash_text_block_locality(tmp_path: Path):
+    extra = """
+text:
+  - from: 0s
+    to: 0.5s
+    lines:
+      - {text: first, y: 100, at: 0s}
+  - from: 1.2s
+    to: 2s
+    lines:
+      - {text: second, y: 200, at: 1.2s}
+"""
+    shots = "  - {photo: a, hold: 30f}\n  - {photo: b, hold: 30f}\n"
+    tl, shas = _resolve(tmp_path, shots, ["a", "b"], extra=extra)
+    h0 = [segment_hash(tl, seg, shas, "e1") for seg in tl.segments]
+    spec2 = tl.spec.model_copy(deep=True)
+    spec2.text[0].lines[0].text = "edited"
+    tl2 = resolve(spec2, tmp_path)
+    h1 = [segment_hash(tl2, seg, shas, "e1") for seg in tl2.segments]
+    assert h0[0] != h1[0]
+    assert h0[1] == h1[1]
+    spec3 = tl.spec.model_copy(deep=True)
+    spec3.text[1].lines[0].text = "edited-b"
+    tl3 = resolve(spec3, tmp_path)
+    h2 = [segment_hash(tl3, seg, shas, "e1") for seg in tl3.segments]
+    assert h0[0] == h2[0]
+    assert h0[1] != h2[1]
+
+
+def test_hash_frame_span_follows_next_fade(tmp_path: Path):
+    shots = (
+        "  - {photo: a, hold: 20f, frame: {tilt: [2, -1.5]}}\n"
+        "  - {photo: b, hold: 20f, in: {type: fade, dur: 10f}}\n"
+    )
+    tl, shas = _resolve(tmp_path, shots, ["a", "b"])
+    h0 = segment_hash(tl, tl.segments[0], shas, "e1")
+    spec2 = tl.spec.model_copy(deep=True)
+    spec2.shots[1].in_.dur = "15f"
+    h1 = segment_hash(resolve(spec2, tmp_path), tl.segments[0], shas, "e1")
+    assert h0 != h1
+
+
+def test_hash_frame_caption_includes_text_assets(tmp_path: Path, monkeypatch):
+    from montaj import project as project_mod
+
+    tl, shas = _resolve(tmp_path, "  - {photo: a, hold: 10f, frame: {caption: hi}}\n", ["a"])
+    h0 = segment_hash(tl, tl.segments[0], shas, "e1")
+    monkeypatch.setattr(project_mod, "_text_asset_shas", lambda: {"text.css": "a" * 64})
+    assert segment_hash(tl, tl.segments[0], shas, "e1") != h0
+
+    other = tmp_path / "plain"
+    other.mkdir()
+    tl2, shas2 = _resolve(other, "  - {photo: a, hold: 10f, frame: {tilt: [1, 2]}}\n", ["a"])
+    h2 = segment_hash(tl2, tl2.segments[0], shas2, "e1")
+    monkeypatch.setattr(project_mod, "_text_asset_shas", lambda: {"text.css": "b" * 64})
+    assert segment_hash(tl2, tl2.segments[0], shas2, "e1") == h2
