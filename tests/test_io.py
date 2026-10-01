@@ -96,13 +96,57 @@ def test_concat_frame_count_is_sum_of_chunks(tmp_path: Path) -> None:
     log = tmp_path / "io.log"
     a = encode_frames(tmp_path / "a.mp4", 10, log)
     b = encode_frames(tmp_path / "b.mp4", 15, log)
-    out = encode.concat([a, b], tmp_path / "joined.mp4", log=log)
+    out = encode.concat([a, b], tmp_path / "joined.mp4", fps=FPS, frames=[10, 15], log=log)
     assert encode.frame_count(out, log=log) == 25
 
 
 def test_concat_rejects_missing_chunk(tmp_path: Path) -> None:
     with pytest.raises(encode.EncodeError):
-        encode.concat([tmp_path / "nope.mp4"], tmp_path / "out.mp4", log=tmp_path / "io.log")
+        encode.concat(
+            [tmp_path / "nope.mp4"], tmp_path / "out.mp4", fps=FPS, frames=[1], log=tmp_path / "io.log"
+        )
+
+
+def _packet_pts(path: Path, log: Path) -> list[int]:
+    raw = encode.capture(
+        [
+            encode.FFPROBE, "-v", "error", "-select_streams", "v:0",
+            "-show_entries", "packet=pts", "-of", "json", str(path),
+        ],
+        log=log,
+        desc="ffprobe",
+    )
+    packets = json.loads(raw or "{}").get("packets") or []
+    return sorted(int(p["pts"]) for p in packets if p.get("pts") not in (None, "N/A"))
+
+
+def test_concat_uniform_pts_across_uneven_segments(tmp_path: Path) -> None:
+    """NVENC often stores the last packet a few ticks short of 1/fps. Concat must
+    not let that shortfall offset every later frame (46+15+23 = 84)."""
+    log = tmp_path / "io.log"
+    codec = encode.prefer_encoder()
+    counts = (46, 15, 23)
+    chunks = [encode_frames(tmp_path / f"c{n}.mp4", n, log, codec=codec) for n in counts]
+    out = encode.concat(chunks, tmp_path / "joined.mp4", fps=FPS, frames=counts, log=log)
+    assert encode.frame_count(out, log=log) == 84
+    pts = _packet_pts(out, log)
+    assert len(pts) == 84, pts
+    steps = [b - a for a, b in zip(pts, pts[1:])]
+    assert steps and len(set(steps)) == 1, steps
+
+
+def test_concat_does_not_probe(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    log = tmp_path / "io.log"
+    a = encode_frames(tmp_path / "a.mp4", 10, log)
+
+    def boom(*_a: object, **_k: object) -> None:
+        raise AssertionError("concat must not ffprobe")
+
+    monkeypatch.setattr(encode, "capture", boom)
+    monkeypatch.setattr(encode, "frame_count", boom)
+    monkeypatch.setattr(encode, "probe", boom)
+    out = encode.concat([a], tmp_path / "joined.mp4", fps=FPS, frames=[10], log=log)
+    assert out.is_file() and out.stat().st_size > 0
 
 
 def test_mux_loudnorm(tmp_path: Path) -> None:
@@ -169,7 +213,11 @@ def test_export_master_copies_both_streams(tmp_path: Path) -> None:
 def test_export_whatsapp_width(tmp_path: Path) -> None:
     log = tmp_path / "io.log"
     src = encode.concat(
-        [encode_frames(tmp_path / f"c{i}.mp4", 5, log) for i in range(2)], tmp_path / "master.mp4", log=log
+        [encode_frames(tmp_path / f"c{i}.mp4", 5, log) for i in range(2)],
+        tmp_path / "master.mp4",
+        fps=FPS,
+        frames=[5, 5],
+        log=log,
     )
     wa = encode.export(src, tmp_path / "wa.mp4", "whatsapp", log=log)
     info = encode.probe(wa, log=log)

@@ -19,13 +19,6 @@ from montaj.render.wall import build_wall, wall_camera, wall_frame
 from montaj.timeline import Scene, Still, Timeline, Trans, Wall
 
 
-def _as_crop(crop: tuple[float, ...] | None) -> tuple[int, int, int, int] | None:
-    """Photo slices need ints. The schema stores whole source pixels as floats."""
-    if crop is None:
-        return None
-    return (int(crop[0]), int(crop[1]), int(crop[2]), int(crop[3]))
-
-
 class Renderer:
     """`frame(f)` samples the plan's scene across the motion-blur shutter, then finishes it."""
 
@@ -46,8 +39,9 @@ class Renderer:
             self._photos[key] = hit
         return hit
 
-    def _load_photo(self, stem: str, crop, card: bool) -> Photo:
-        return self._photo(str(stem), _as_crop(tuple(crop) if crop else None), bool(card))
+    def _load_photo(self, stem: str, crop: tuple[int, ...] | None, card: bool) -> Photo:
+        box = None if not crop else (crop[0], crop[1], crop[2], crop[3])
+        return self._photo(str(stem), box, bool(card))
 
     def _wall(self, index: int):
         hit = self._walls.get(index)
@@ -65,7 +59,7 @@ class Renderer:
             sh = self.tl.shots[index].spec
             if sh.photo is None:
                 raise ValueError(f"shot {index} is not a still")
-            photo = self._photo(sh.photo, _as_crop(sh.crop), False)
+            photo = self._photo(sh.photo, sh.crop, False)
             hit = still(self.cv, photo, focus=sh.focus, zoom=sh.zoom)
             self._stills[index] = hit
         return hit
@@ -85,7 +79,7 @@ class Renderer:
         sh = self.tl.shots[scene.shot].spec
         if sh.photo is None:
             return (self.cv.W / 2, self.cv.H / 2)
-        photo = self._photo(sh.photo, _as_crop(sh.crop), False)
+        photo = self._photo(sh.photo, sh.crop, False)
         x0, y0, x1, y1 = photo.crop
         focus = sh.focus if sh.focus is not None else ((x0 + x1) / 2, (y0 + y1) / 2)
         center = tr.center if tr.center is not None else focus

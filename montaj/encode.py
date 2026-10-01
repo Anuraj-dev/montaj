@@ -326,18 +326,40 @@ def _concat_quote(path: Path) -> str:
     return "'" + path.resolve().as_posix().replace("'", "'\\''") + "'"
 
 
-def concat(chunks: Sequence[Path | str], out: Path | str, *, log: Path | str | None = None) -> Path:
-    """Join segments with the concat demuxer and `-c copy` (no re-encode)."""
+def concat(
+    chunks: Sequence[Path | str],
+    out: Path | str,
+    *,
+    fps: float,
+    frames: Sequence[int],
+    log: Path | str | None = None,
+) -> Path:
+    """Join segments with the concat demuxer and `-c copy` (no re-encode).
+
+    Each file gets a `duration` of n/fps from the caller so the next file starts on
+    the 1/fps grid, even when a muxer stored a slightly short last-packet duration.
+    Frame counts are passed in: probing them would decode every chunk.
+    """
     chunks = [Path(c) for c in chunks]
     if not chunks:
         raise EncodeError("concat: no chunks")
+    if fps <= 0:
+        raise EncodeError(f"concat: fps must be positive, got {fps}")
+    if len(frames) != len(chunks):
+        raise EncodeError(f"concat: expected {len(chunks)} frame counts, got {len(frames)}")
     missing = [str(c) for c in chunks if not c.exists()]
     if missing:
         raise EncodeError(f"concat: missing chunks {missing}")
     out = Path(out)
     out.parent.mkdir(parents=True, exist_ok=True)
     listing = out.with_suffix(".concat.txt")
-    listing.write_text("".join(f"file {_concat_quote(c)}\n" for c in chunks))
+    lines = ["ffconcat version 1.0\n"]
+    for chunk, n in zip(chunks, frames, strict=True):
+        if n <= 0:
+            raise EncodeError(f"concat: frame count must be positive, got {n} for {chunk}")
+        lines.append(f"file {_concat_quote(chunk)}\n")
+        lines.append(f"duration {format(n / fps, '.17g')}\n")
+    listing.write_text("".join(lines))
     run(
         [FFMPEG, "-y", "-hide_banner", "-loglevel", "error", "-f", "concat", "-safe", "0",
          "-i", str(listing), "-c", "copy", "-movflags", "+faststart", str(out)],

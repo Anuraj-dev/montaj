@@ -226,6 +226,76 @@ def test_bpm_nan_and_inf_are_spec_error(tmp_path: Path):
         assert all(_LINE.match(e) for e in ei.value.errors)
 
 
+def test_crop_is_integer_source_px(tmp_path: Path):
+    p = _write(
+        tmp_path,
+        '  - {photo: a, hold: 10f, crop: [60, 180, 865, 1330]}\n'
+        "  - hold: 10f\n"
+        "    wall:\n"
+        "      grid: 100x100\n"
+        "      seed: 1\n"
+        "      jitter: 0\n"
+        "      rot: 0\n"
+        "      print_height: 10\n"
+        "      prints:\n"
+        "        - {photo: a, cell: [0, 0], crop: [0.0, 0, 8, 8]}\n"
+        "      light: {center: [0, 0], radius: [1, 1]}\n"
+        "      camera:\n"
+        "        pos: [{t: 0f}]\n"
+        "        zoom: [{t: 0f, value: 1}]\n",
+        ["a"],
+    )
+    spec = load_spec(p)
+    assert spec.shots[0].crop == (60, 180, 865, 1330)
+    assert all(type(x) is int for x in spec.shots[0].crop)
+    wall = spec.shots[1].wall
+    assert wall is not None and wall.prints[0].crop == (0, 0, 8, 8)
+    assert all(type(x) is int for x in wall.prints[0].crop)
+
+    bad = _write(tmp_path, "  - {photo: a, hold: 10f, crop: [60.5, 180, 865, 1330]}\n", ["a"])
+    with pytest.raises(SpecError) as ei:
+        load_spec(bad)
+    assert any("crop" in e and "60.5" in e and "integer source-px" in e for e in ei.value.errors)
+    assert all(_LINE.match(e) for e in ei.value.errors)
+
+    wall_bad = _write(
+        tmp_path,
+        "  - hold: 10f\n"
+        "    wall:\n"
+        "      grid: 100x100\n"
+        "      seed: 1\n"
+        "      jitter: 0\n"
+        "      rot: 0\n"
+        "      print_height: 10\n"
+        "      prints:\n"
+        "        - {photo: a, cell: [0, 0], crop: [1, 2, 3.25, 4]}\n"
+        "      light: {center: [0, 0], radius: [1, 1]}\n"
+        "      camera:\n"
+        "        pos: [{t: 0f}]\n"
+        "        zoom: [{t: 0f, value: 1}]\n",
+        ["a"],
+    )
+    with pytest.raises(SpecError) as ei:
+        load_spec(wall_bad)
+    assert any("prints[0].crop" in e and "3.25" in e for e in ei.value.errors)
+    assert all(_LINE.match(e) for e in ei.value.errors)
+
+
+def test_birthday_recipe_crops_load(tmp_path: Path):
+    src = Path(__file__).resolve().parents[1] / "recipes" / "birthday-short.yaml"
+    stems = ["09", "10", "12", "16", "19", "20", "21", "22", "28", "29", "32", "33", "34", "35", "37", "38"]
+    for stem in stems:
+        _jpeg(tmp_path / "assets", stem)
+    dest = tmp_path / "montaj.yaml"
+    dest.write_text(src.read_text())
+    spec = load_spec(dest)
+    assert spec.shots[2].crop == (60, 180, 865, 1330)
+    wall = spec.shots[-1].wall
+    assert wall is not None
+    assert wall.prints[7].crop == (60, 180, 865, 1330)
+    assert wall.prints[15].crop == (0, 0, 1024, 890)
+
+
 def test_wall_print_missing(tmp_path: Path):
     wall = """
   - hold: 10f

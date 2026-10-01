@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Annotated
 
 import yaml
-from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, ValidationError, WrapSerializer
 
 EASE = ("linear", "smooth", "cubic", "outc", "inc", "expo", "ramp")
 TRANS_TYPES = ("cut", "fade", "swirl", "whip")
@@ -24,6 +24,30 @@ def _photo_id(v: object) -> object:
 
 
 PhotoId = Annotated[str, BeforeValidator(_photo_id)]
+
+
+def _int_px(v: object) -> object:
+    """Crops are source-pixel slices. Integral floats (YAML `60.0`) become ints."""
+    if isinstance(v, bool):
+        raise ValueError(f"{v!r} is not a whole pixel")
+    if isinstance(v, int):
+        return v
+    if isinstance(v, float):
+        if math.isfinite(v) and v == int(v):
+            return int(v)
+        raise ValueError(f"{v!r} is not a whole pixel")
+    return v
+
+
+def _dump_int_px(v: object, handler):
+    """Assignment can park an integral float on the field; dump it as an int."""
+    if isinstance(v, float) and math.isfinite(v) and v == int(v):
+        v = int(v)
+    return handler(v)
+
+
+IntPx = Annotated[int, BeforeValidator(_int_px), WrapSerializer(_dump_int_px)]
+CropBox = tuple[IntPx, IntPx, IntPx, IntPx]
 
 
 def _reject_bare_duration(v: object) -> object:
@@ -78,7 +102,7 @@ class WallPrint(Frozen):
     cell: tuple[int, int]
     straight: bool = False
     scale: float | None = None
-    crop: tuple[float, float, float, float] | None = None
+    crop: CropBox | None = None
 
 
 class WallLight(Frozen):
@@ -120,7 +144,7 @@ class Shot(Frozen):
     photo: PhotoId | None = None
     wall: WallSpec | None = None
     hold: DurationStr
-    crop: tuple[float, float, float, float] | None = None
+    crop: CropBox | None = None
     focus: tuple[float, float] | None = None
     zoom: float | None = None
     in_: Transition | None = Field(default=None, alias="in")
@@ -184,6 +208,8 @@ def _from_pydantic(exc: ValidationError) -> list[str]:
         if "bare number" in msg:
             msg = "bare number"
             hint = "use 22f, 4b or 1.5s"
+        elif "whole pixel" in msg:
+            hint = "use integer source-px"
         lines.append(_line(path, msg, hint))
     return lines
 

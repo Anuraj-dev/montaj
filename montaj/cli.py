@@ -20,7 +20,7 @@ from montaj.ingest import ingest
 from montaj.qa import check
 from montaj.sheet import MAX_TILES, pick_times, sheet
 from montaj.spec import SpecError, load_spec
-from montaj.timeline import resolve
+from montaj.timeline import Still, resolve
 
 RECIPES = Path(__file__).resolve().parents[1] / "recipes"
 
@@ -256,8 +256,31 @@ def _cmd_sheet(ns: argparse.Namespace, root: Path) -> list[str]:
     return [f"OK build/sheet.jpg {shown} frames"]
 
 
+def _intended_freeze(root: Path) -> list[tuple[float, float]]:
+    """Time spans whose FramePlan scene is a Still. Transitions and the wall move
+    (or are supposed to); a freeze there is still a defect."""
+    spec_file = root / "montaj.yaml"
+    if not spec_file.is_file():
+        return []
+    tl = resolve(load_spec(spec_file), root)
+    fps = float(tl.fps)
+    spans: list[tuple[float, float]] = []
+    start: int | None = None
+    for f in range(tl.n_frames):
+        is_still = isinstance(tl.plan(f).scene, Still)
+        if is_still:
+            if start is None:
+                start = f
+        elif start is not None:
+            spans.append((start / fps, f / fps))
+            start = None
+    if start is not None:
+        spans.append((start / fps, tl.n_frames / fps))
+    return spans
+
+
 def _cmd_check(ns: argparse.Namespace, root: Path) -> list[str]:
-    lines = check(_video(root, ns.video), log=root / "build" / "qa.log")
+    lines = check(_video(root, ns.video), _intended_freeze(root), log=root / "build" / "qa.log")
     warns = sum(line.startswith("WARN") for line in lines)
     lines.append(f"WARN check: {warns} warnings" if warns else "OK check")
     return lines

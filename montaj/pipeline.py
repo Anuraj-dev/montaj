@@ -133,7 +133,13 @@ def render(spec_path: Path, mode: str = "preview") -> RenderResult:
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
 
-    concat(chunks, out, log=log)
+    concat(
+        chunks,
+        out,
+        fps=tl.fps,
+        frames=[seg.end - seg.start for seg in tl.segments],
+        log=log,
+    )
     _log(log, f"concat {out.name} rendered {rendered} cached {cached}")
     return RenderResult(
         path=out.resolve(),

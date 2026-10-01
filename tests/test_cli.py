@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 from pathlib import Path
 
@@ -253,6 +254,60 @@ def test_expected_failures_are_one_err_line(tmp_path: Path, capsys: pytest.Captu
     assert payload["status"] == "ERR" and payload["lines"] == ["ERR validate: denied read"]
     validate_log = (proj / "build" / "validate.log").read_text()
     assert "denied\nread" in validate_log
+
+
+def test_check_ignores_still_holds_but_warns_on_transition_freeze(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A Still hold is intended freeze; a freeze inside a fade or the wall is not."""
+    monkeypatch.chdir(tmp_path)
+    wall = (
+        "      grid: 100x100\n"
+        "      seed: 1\n"
+        "      jitter: 0\n"
+        "      rot: 0\n"
+        "      print_height: 10\n"
+        "      prints:\n"
+        "        - {photo: a, cell: [0, 0], straight: true}\n"
+        "      light: {center: [0, 0], radius: [1, 1]}\n"
+        "      camera:\n"
+        "        pos: [{t: 0f, print: a, at: [1, 1]}]\n"
+        "        zoom: [{t: 0f, value: 1}]\n"
+    )
+    proj = _project(
+        tmp_path,
+        "  - {photo: a, hold: 60f}\n"
+        "  - {photo: b, hold: 60f, in: {type: fade, dur: 30f}}\n"
+        "  - hold: 60f\n"
+        "    wall:\n" + wall,
+        ["a", "b"],
+    )
+    video = proj / "out" / "preview.mp4"
+    video.parent.mkdir(parents=True, exist_ok=True)
+    subprocess.run(
+        [
+            "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+            "-f", "lavfi", "-i", "color=c=red:size=320x240:rate=30:duration=6",
+            "-pix_fmt", "yuv420p", str(video),
+        ],
+        check=True,
+    )
+
+    code, out, err = _run(["-C", str(proj), "check"], capsys)
+    assert code == 0 and err == "", out
+    frozen = [line for line in out.splitlines() if line.startswith("WARN frozen")]
+    assert frozen, out
+    spans = [tuple(float(v) for v in re.search(r"([\d.]+)-([\d.]+)s", line).groups()) for line in frozen]
+
+    def overlaps(span: tuple[float, float], lo: float, hi: float) -> bool:
+        return max(span[0], lo) < min(span[1], hi)
+
+    # stills: [0, 2)s and [3, 4)s — those holds must not WARN
+    assert not any(overlaps(s, 0.0, 1.9) or overlaps(s, 3.1, 3.9) for s in spans), frozen
+    # fade [2, 3)s and wall [4, 6)s — a freeze there is a defect
+    assert any(overlaps(s, 2.0, 3.0) for s in spans), frozen
+    assert any(overlaps(s, 4.0, 6.0) for s in spans), frozen
+    assert out.splitlines()[-1].startswith("WARN check:")
 
 
 def test_sheet_at_caps_count_at_twelve(tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch) -> None:
