@@ -31,3 +31,15 @@
 
 ## 2026-10-01 — Concat writes per-chunk durations from known frame counts
 **Why:** NVENC segments mux a short last packet; without explicit durations, every later frame drifts 0.3 ms and frame-exact tools misalign. Probing counts cost +4.9 s per render, so the pipeline passes them.
+
+## 2026-10-02 — M2 ports film.html as sequential shots
+**Why:** film.html layers overlap freely; Montaj's timeline plays one shot at a time with transitions. The port keeps the schema simple and the cache per shot; parity still clears the gate (mean 32.9 dB). Rejected: a free layer stack (deferred to M5 `custom:` layers).
+
+## 2026-10-02 — Duration-dependent effects live in FramePlan, not in the renderer
+**Why:** the golden-film leak fades over the last 2 s. Hashing the film length re-rendered every segment on any hold edit; folding the ramp into `plan.glow` limits it to the tail segments.
+
+## 2026-10-02 — Two-pass loudnorm on mux
+**Why:** single-pass dynamic loudnorm left the Arshiya song at −12.6 LUFS (target −14). Two-pass linear lands −14.0 for one extra audio decode.
+
+## 2026-10-02 — Stacked branches per milestone (m1 → m2 → m3 → m4)
+**Why:** one milestone per PR keeps reviews readable; each builds on the previous engine. Raja decides when to push.

@@ -10,6 +10,9 @@
 | research/token-audit-2026-10-01.md | Baseline token spend of the 7 pre-Montaj video sessions + the six sinks |
 | research/prior-art.md | Reusable code in claude-test to port, and known traps |
 | specs/001-m1-engine.md | M1 contract: spec schema, timeline/FramePlan, segment hash, renderer + IO APIs |
+| specs/002-m2-text-music.md | M2 contract: text cards, subs, shot treatments, clips, golden-film, music, Arshiya parity gate |
+| specs/003-m3-review-loop.md | M3 contract: review page + review.json, watch, taste.md |
+| ../skills/make-video/SKILL.md | The agent skill: brief → spec → preview → zero-token review → final |
 | SPEC-REFERENCE.md | One line per spec field, transition, look and easing (the spec author's reference) |
 | BENCHMARK.md | Per-dispatch model results (hidden tests, review findings, driver fix-up) |
 | specs/ | Numbered specs for complex features |
