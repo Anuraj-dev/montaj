@@ -1,0 +1,220 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>montaj review</title>
+<style>
+  :root {
+    --bg: #12110f;
+    --panel: #1c1a17;
+    --ink: #ece6d8;
+    --mute: #9a9284;
+    --line: #2e2a24;
+    --gold: #d4a36a;
+    --ok: #7d9b6e;
+    --no: #c45c4a;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; background: var(--bg); color: var(--ink); font: 14px/1.4 "Iowan Old Style", Palatino, "Palatino Linotype", Georgia, serif; }
+  body { min-height: 100dvh; display: flex; flex-direction: column; }
+  header { display: flex; justify-content: space-between; align-items: baseline; padding: 10px 16px 6px; letter-spacing: .12em; text-transform: uppercase; font-size: 11px; color: var(--mute); }
+  header b { color: var(--gold); font-weight: 600; letter-spacing: .18em; }
+  #stage { flex: 1; display: flex; flex-direction: column; align-items: center; padding: 0 12px; min-height: 0; }
+  video { width: min(100%, 420px); height: auto; max-height: 58dvh; background: #000; border-radius: 2px; }
+  #strip { display: flex; gap: 6px; overflow-x: auto; width: 100%; max-width: 920px; padding: 12px 4px 8px; scrollbar-width: thin; }
+  .cell { flex: 0 0 88px; padding: 8px 8px 6px; border: 1px solid var(--line); background: var(--panel); cursor: pointer; border-radius: 2px; }
+  .cell .i { font-size: 10px; color: var(--gold); letter-spacing: .08em; }
+  .cell .l { font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .cell .t { font-size: 10px; color: var(--mute); }
+  .cell .tx { font-size: 10px; color: var(--mute); font-style: italic; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .cell.on { border-color: var(--gold); box-shadow: 0 0 0 1px var(--gold); }
+  .cell.approved { border-left: 3px solid var(--ok); }
+  .cell.rejected { border-left: 3px solid var(--no); }
+  .cell.stale { outline: 1px dashed var(--mute); }
+  #dock { width: 100%; max-width: 920px; padding: 4px 4px 16px; }
+  #meta { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 8px; }
+  #meta .who { font-size: 16px; }
+  button { font: inherit; background: transparent; color: var(--ink); border: 1px solid var(--line); padding: 6px 12px; cursor: pointer; letter-spacing: .08em; text-transform: uppercase; font-size: 11px; }
+  button.on-ok { border-color: var(--ok); color: var(--ok); }
+  button.on-no { border-color: var(--no); color: var(--no); }
+  #comments { list-style: none; margin: 0 0 8px; padding: 0; color: var(--mute); }
+  #comments li { padding: 4px 0; border-bottom: 1px solid var(--line); }
+  #comments .tm { color: var(--gold); margin-right: 8px; font-size: 11px; }
+  #comments button { padding: 2px 8px; float: right; }
+  #bar { display: flex; gap: 8px; }
+  #bar input { flex: 1; background: var(--panel); border: 1px solid var(--line); color: var(--ink); padding: 8px 10px; font: inherit; }
+  kbd { font: 10px/1 ui-monospace, monospace; color: var(--mute); border: 1px solid var(--line); padding: 1px 4px; }
+  #keys { margin-top: 8px; color: var(--mute); font-size: 11px; letter-spacing: .04em; }
+</style>
+</head>
+<body>
+<header><b>montaj</b> review <span id="file"></span></header>
+<div id="stage">
+  <video id="v" controls playsinline></video>
+  <div id="strip"></div>
+  <div id="dock">
+    <div id="meta">
+      <span class="who" id="who">—</span>
+      <button type="button" id="approve">Approve</button>
+      <button type="button" id="reject">Reject</button>
+      <span id="stale" hidden>stale</span>
+    </div>
+    <ul id="comments"></ul>
+    <form id="bar">
+      <input id="cmt" type="text" placeholder="comment this frame" autocomplete="off">
+      <button type="submit">Stamp</button>
+    </form>
+    <div id="keys"><kbd>space</kbd> play <kbd>←</kbd><kbd>→</kbd> frame <kbd>a</kbd> approve <kbd>r</kbd> reject <kbd>c</kbd> comment</div>
+  </div>
+</div>
+<script>
+const video = document.getElementById("v");
+const strip = document.getElementById("strip");
+const who = document.getElementById("who");
+const comments = document.getElementById("comments");
+const cmt = document.getElementById("cmt");
+const btnA = document.getElementById("approve");
+const btnR = document.getElementById("reject");
+const staleEl = document.getElementById("stale");
+let state = null;
+let loadedMtime = null;
+
+function shotAt(t) {
+  if (!state) return null;
+  const fps = state.fps || 30;
+  const f = t * fps;
+  return state.shots.find(s => f >= s.start_f && f < s.end_f) || null;
+}
+function seekShot(s) {
+  const fps = state.fps || 30;
+  video.currentTime = (s.start_f != null ? s.start_f : s.start * fps) / fps;
+}
+function reviewShot(i) {
+  return (state.review.shots || []).find(s => s.index === i);
+}
+function fmt(t) { return Number(t).toFixed(2); }
+
+async function api(path, opts) {
+  const r = await fetch(path, opts);
+  if (!r.ok) throw new Error(await r.text());
+  return r.json();
+}
+
+function renderStrip() {
+  const t = video.currentTime || 0;
+  const cur = shotAt(t);
+  strip.replaceChildren();
+  for (const s of state.shots) {
+    const rs = reviewShot(s.index) || {};
+    const el = document.createElement("div");
+    el.className = "cell";
+    if (cur && cur.index === s.index) el.classList.add("on");
+    if (rs.status) el.classList.add(rs.status);
+    if (rs.stale) el.classList.add("stale");
+    el.innerHTML = `<div class="i">#${s.index}</div><div class="l"></div><div class="t">${fmt(s.start)}–${fmt(s.end)}</div><div class="tx"></div>`;
+    el.querySelector(".l").textContent = s.label;
+    el.querySelector(".tx").textContent = s.text || "";
+    el.addEventListener("click", () => { seekShot(s); video.focus(); paintDock(); });
+    strip.appendChild(el);
+  }
+  if (cur) {
+    const on = strip.children[state.shots.indexOf(cur)];
+    if (on) on.scrollIntoView({ inline: "nearest", block: "nearest" });
+  }
+  paintDock();
+}
+
+function paintDock() {
+  const s = shotAt(video.currentTime || 0);
+  const rs = s ? reviewShot(s.index) : null;
+  who.textContent = s ? `#${s.index} ${s.label}  ${fmt(s.start)}–${fmt(s.end)}` : "general";
+  btnA.classList.toggle("on-ok", rs && rs.status === "approved");
+  btnR.classList.toggle("on-no", rs && rs.status === "rejected");
+  staleEl.hidden = !(rs && rs.stale);
+  comments.replaceChildren();
+  const items = s ? (rs && rs.comments) || [] : (state.review.general || []);
+  for (const c of items) {
+    const li = document.createElement("li");
+    const tm = document.createElement("span");
+    tm.className = "tm";
+    tm.textContent = fmt(c.t) + "s";
+    const tx = document.createElement("span");
+    tx.textContent = c.text;
+    const del = document.createElement("button");
+    del.type = "button";
+    del.textContent = "delete";
+    del.addEventListener("click", () => delComment(c.id));
+    li.append(tm, tx, del);
+    comments.appendChild(li);
+  }
+}
+
+function applyState(s, force) {
+  const t = video.currentTime || 0;
+  const playing = !video.paused;
+  state = s;
+  if (force || loadedMtime === null || s.video_mtime !== loadedMtime) {
+    video.src = "/video?m=" + encodeURIComponent(s.video_mtime);
+    loadedMtime = s.video_mtime;
+    video.addEventListener("loadedmetadata", () => {
+      video.currentTime = t;
+      if (playing) video.play();
+    }, { once: true });
+  }
+  document.getElementById("file").textContent = s.video || "";
+  renderStrip();
+}
+
+async function pull(force) {
+  applyState(await api("/api/state"), force);
+}
+
+async function setStatus(status) {
+  const s = shotAt(video.currentTime || 0);
+  if (!s) return;
+  const rs = reviewShot(s.index);
+  const next = rs && rs.status === status ? null : status;
+  applyState(await api("/api/status", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ shot: s.index, status: next }),
+  }));
+}
+
+async function delComment(id) {
+  applyState(await api("/api/comment/" + id, { method: "DELETE" }));
+}
+
+document.getElementById("bar").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const text = cmt.value.trim();
+  if (!text) return;
+  applyState(await api("/api/comment", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ t: video.currentTime || 0, text }),
+  }));
+  cmt.value = "";
+});
+btnA.addEventListener("click", () => setStatus("approved"));
+btnR.addEventListener("click", () => setStatus("rejected"));
+video.addEventListener("timeupdate", () => { if (state) renderStrip(); });
+
+document.addEventListener("keydown", (e) => {
+  const typing = e.target.tagName === "INPUT" || e.target.tagName === "TEXTAREA";
+  if (e.key === "c" && !typing) { e.preventDefault(); cmt.focus(); return; }
+  if (typing) return;
+  const fps = (state && state.fps) || 30;
+  if (e.key === " ") { e.preventDefault(); video.paused ? video.play() : video.pause(); }
+  else if (e.key === "ArrowLeft") { e.preventDefault(); video.currentTime = Math.max(0, video.currentTime - 1 / fps); }
+  else if (e.key === "ArrowRight") { e.preventDefault(); video.currentTime += 1 / fps; }
+  else if (e.key === "a") setStatus("approved");
+  else if (e.key === "r") setStatus("rejected");
+});
+
+pull(true);
+setInterval(pull, 1000);
+</script>
+</body>
+</html>
