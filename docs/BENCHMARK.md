@@ -31,6 +31,9 @@
 | 2 | W2 frame renderer + pipeline + CLI | longcat-2.5-preview | 15.6m + 21.8m resume (free, 3.7M tok) | 4/4 | 83 pass | Sol 2H 3M 2L | — | no | First run hit output-length limit after 11 read-only steps; after one resume, leanest diff (717 lines); preview swirl centre double-scaled by k |
 | 2 | W2 frame renderer + pipeline + CLI | ling-3.0-flash-fin | 1.8m | — | — | — | — | no | Provider "Endpoint is unavailable" (400) on every call, incl. one-word smoke tests: no data |
 | 2 | W2 frame renderer + pipeline + CLI | nemotron-3.5-lightning | ~50m, stopped | — | — | — | — | no | Still unfinished after the others were merged; stopped and unscored |
+| 3 | W3a wall perf (parity-pinned) | grok-4.7 | 19.8m ($0.62, 2.3M tok) | 2/2 (wall 0.055s, 9 frames bit-exact) | 92 pass | Sol 0H 3M 0L (2 latent, 1 out of domain) | 2 lines (clone bg, 2-D light) | yes | 0.56s → 0.055s per wall frame; final render 236s → 37.6s; 122 lines |
+| 3 | W3a wall perf (parity-pinned) | space-bunny | ~45m, killed by a driver crash | 2/2 (wall 0.056s) | 90 pass | — | — | no | Same speedup in 83 lines; died while verifying all 840 frames; required perf test not yet written |
+| 3 | W3b concat slip, check freezes, int crops | grok-4.6 | 9.0m ($0.32, 1.2M tok) | 2/2 | 94 pass | driver: 1 perf regression | 0 (fix round by same model: 3.0m, $0.23) | yes | First fix decoded every segment to count frames (+4.9s per render); fix round passes known counts |
 
 ## Review runs
 | Wave | Diff | Reviewer | Wall | Findings (H/M/L) | Confirmed real | False positives | Notes |
@@ -43,6 +46,7 @@
 | 2 | W2 grok-4.7 | gpt-6.1-sol high | 4.3m | 1/3/1 | 5 | 0 | Missed the `new` overwrite bug it flagged on both sibling diffs |
 | 2 | W2 space-bunny | gpt-6.1-sol high | 5.7m | 1/6/5 | 12 | 0 | Missed argparse `--json` exit-2 it flagged on grok's diff |
 | 2 | W2 longcat | gpt-6.1-sol high | ~5m | 2/3/2 | 7 | 0 | Caught a preview-only math bug full-res parity cannot see |
+| 3 | W3a grok-4.7 | gpt-6.1-sol high | 4.4m | 0/3/0 | 2 (latent) | 1 (1e9 world coords) | Reproduced each on CPU; none affects current scenes |
 
 ## Takeaways so far (wave 1)
 - **Implementation:** grok-4.6 was fastest to a fully correct result on a tightly specified pure-logic task. Space Bunny is slow and token-heavy, but it was the most rigorous: it ran real-machine smokes and proved its tests fail without the fix. Muse Spark wrote the leanest, most faithful GPU port.
@@ -55,3 +59,8 @@
 - **Dropped from wave 3 on (Raja's call):** LongCat, Ling, Nemotron and similar free trial models. From wave 3, routing follows this table: grok-4.6 for tight-spec code, grok-4.7 and Space Bunny for render/integration, Sol for review.
 - **Sol misses about one finding per diff** that it catches on a sibling diff. Head-to-head reviews plus a driver cross-check found 2 bugs that a single review would have shipped.
 - **Full-resolution parity cannot see preview-scale bugs** (k = 1 hides any missing or doubled `Canvas.k`). Future render contracts need a preview-scale assertion.
+
+## Takeaways (wave 3)
+- **grok-4.6 stays the pick for tight-spec fixes:** 12 minutes and $0.55 for three bugs across encode, CLI and schema, including one driver-requested rework.
+- **grok-4.7 vs Space Bunny on GPU perf:** both found the same 10× win (cull each print to its screen box). grok finished in under 20 minutes; Space Bunny was still verifying at about 45. On a tight task, grok's speed matters more than Space Bunny's extra rigor.
+- **The driver's own review caught a regression that the hidden tests missed**: correct output, 5 s slower per render. Hidden tests need a timing budget wherever speed is part of the contract.
