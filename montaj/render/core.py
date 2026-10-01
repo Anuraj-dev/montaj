@@ -124,6 +124,28 @@ class Photo:
 
 
 # ---------------------------------------------------------------- camera / draw
+# Bicubic (Keys, a=-0.75) reads texels with |Δ| < 2 and is zero at exactly 2.
+# The extra half texel is the open edge of that window (sp ∈ (-2, n+1) → source ±1.5,
+# closed here at ±2). Screen pad covers float32 rounding of the projected corners.
+_TEXEL_PAD = 2.0
+_SCREEN_PAD = 2
+
+
+class _Cam:
+    """Unpacks as `(C, dirs)`. `axes` is the basis draw uses to bound a layer."""
+
+    __slots__ = ("C", "dirs", "axes")
+
+    def __init__(self, C, dirs, axes):
+        self.C = C
+        self.dirs = dirs
+        self.axes = axes
+
+    def __iter__(self):
+        yield self.C
+        yield self.dirs
+
+
 def camera(cv, T: tuple, s: float, yaw: float = 0.0, pitch: float = 0.0):
     h = cv.foc / s
     y, th = math.radians(yaw), math.radians(pitch)
@@ -132,31 +154,104 @@ def camera(cv, T: tuple, s: float, yaw: float = 0.0, pitch: float = 0.0):
     z_ax = -math.cos(th) * np.array([0, 0, 1.0]) + math.sin(th) * up
     y_ax = np.cross(x_ax, z_ax)
     C = np.array([T[0], T[1], 0.0]) - h * z_ax
-    dirs = [float(x_ax[i]) * cv.GA + float(y_ax[i]) * cv.GB + float(z_ax[i]) for i in range(3)]
-    return C, dirs
+    dirs = tuple(float(x_ax[i]) * cv.GA + float(y_ax[i]) * cv.GB + float(z_ax[i]) for i in range(3))
+    return _Cam(C, dirs, (x_ax, y_ax, z_ax))
+
+
+def _src_span(img: Photo) -> tuple[float, float, float, float]:
+    """Source-pixel box whose bicubic footprint can be nonzero."""
+    ox, oy = img.off
+    return (-ox - _TEXEL_PAD, img.tw - ox + _TEXEL_PAD,
+            -oy - _TEXEL_PAD, img.th - oy + _TEXEL_PAD)
+
+
+def _to_world(px, py, rot, p, cx, cy, sx, sy) -> tuple[float, float]:
+    """Inverse of draw's source map. `rot` is radians; `p` is print scale."""
+    cr, sr = math.cos(-rot), math.sin(-rot)
+    xr, yr = (sx - cx) * p, (sy - cy) * p
+    return px + cr * xr + sr * yr, py - sr * xr + cr * yr
+
+
+def _to_screen(cv, C, axes, Xw: float, Yw: float) -> tuple[float, float] | None:
+    """Pixel-center index of a world point on z=0, or None if it is behind the lens."""
+    x_ax, y_ax, z_ax = axes
+    rel = np.array([Xw - float(C[0]), Yw - float(C[1]), -float(C[2])], dtype=np.float64)
+    t = float(rel @ np.asarray(z_ax, dtype=np.float64))
+    if t <= 1e-8:
+        return None
+    ga = float(rel @ np.asarray(x_ax, dtype=np.float64)) / t
+    gb = float(rel @ np.asarray(y_ax, dtype=np.float64)) / t
+    return gb * cv.foc + cv.H / 2 - 0.5, ga * cv.foc + cv.W / 2 - 0.5
+
+
+def _screen_window(cv, cam, layer) -> tuple[int, int, int, int]:
+    """Half-open (row0, row1, col0, col1) that can receive this layer.
+
+    Rotation makes the texture a parallelogram; its corners' AABB contains every
+    pixel whose center lands inside. A corner behind the lens falls back to the
+    whole frame so a cull can never drop a visible sample. An empty window misses.
+    """
+    full = (0, cv.H, 0, cv.W)
+    axes = getattr(cam, "axes", None)
+    img = layer.get("img")
+    if axes is None or img is None or not hasattr(img, "tw"):
+        return full
+    C = cam.C if hasattr(cam, "C") else cam[0]
+    px, py = layer.get("pos", (0.0, 0.0))
+    rot = math.radians(float(layer.get("rot", 0.0)))
+    p = float(layer.get("p", 1.0))
+    cx, cy = layer.get("c", (0.0, 0.0))
+    sx0, sx1, sy0, sy1 = _src_span(img)
+    pts = []
+    for sx, sy in ((sx0, sy0), (sx1, sy0), (sx0, sy1), (sx1, sy1)):
+        hit = _to_screen(cv, C, axes, *_to_world(px, py, rot, p, cx, cy, sx, sy))
+        if hit is None:
+            return full
+        pts.append(hit)
+    i0 = math.floor(min(i for i, _ in pts)) - _SCREEN_PAD
+    i1 = math.ceil(max(i for i, _ in pts)) + 1 + _SCREEN_PAD
+    j0 = math.floor(min(j for _, j in pts)) - _SCREEN_PAD
+    j1 = math.ceil(max(j for _, j in pts)) + 1 + _SCREEN_PAD
+    return max(0, i0), min(cv.H, i1), max(0, j0), min(cv.W, j1)
 
 
 def draw(cv, cam, layers: list, bg=None):
     C, (dx, dy, dz) = cam
-    out = torch.zeros(3, cv.H, cv.W, device=cv.device) if bg is None else bg(cam)
+    # Tiles are written in place, so never alias a tensor the background callback may reuse.
+    out = torch.zeros(3, cv.H, cv.W, device=cv.device) if bg is None else bg(cam).clone()
+    # Plane hit is the same for every layer. Compute it once; light is a function of it.
+    t = (0.0 - C[2]) / dz
+    wx = C[0] + t * dx
+    wy = C[1] + t * dy
+    lights: dict[int, torch.Tensor] = {}
     for L in layers:
+        i0, i1, j0, j1 = _screen_window(cv, cam, L)
+        if i0 >= i1 or j0 >= j1:
+            continue
         img = L["img"]
-        px, py = L.get("pos", (0, 0))
-        rot = math.radians(L.get("rot", 0))
-        p = L.get("p", 1.0)
-        cx, cy = L.get("c", (0, 0))
+        px, py = L.get("pos", (0.0, 0.0))
+        rot = math.radians(float(L.get("rot", 0.0)))
+        p = float(L.get("p", 1.0))
+        cx, cy = L.get("c", (0.0, 0.0))
         cr, sr = math.cos(-rot), math.sin(-rot)
-        t = (0.0 - C[2]) / dz
-        X = C[0] + t * dx - px
-        Y = C[1] + t * dy - py
+        # Same arithmetic as the full-frame map, on the pixels that can come out nonzero.
+        X = wx[i0:i1, j0:j1] - px
+        Y = wy[i0:i1, j0:j1] - py
         sx = cx + (cr * X - sr * Y) / p
         sy = cy + (sr * X + cr * Y) / p
         rgba = img.sample(sx, sy, [0, 1, 2, 3], "bicubic").clamp(0, 1)
-        rgba = rgba * (t > 0).float()
+        rgba = rgba * (t[i0:i1, j0:j1] > 0).float()
         if "light" in L:
-            rgba[:3] *= L["light"](C[0] + t * dx, C[1] + t * dy)
+            fn = L["light"]
+            lit = lights.get(id(fn))
+            if lit is None:
+                lit = fn(wx, wy)
+                lit = lit if lit.dim() == 3 else lit[None]
+                lights[id(fn)] = lit
+            rgba[:3] *= lit[:, i0:i1, j0:j1]
         op = L.get("op", 1.0)
-        out = out * (1 - rgba[3:4] * op) + rgba[:3] * op
+        tile = out[:, i0:i1, j0:j1]
+        out[:, i0:i1, j0:j1] = tile * (1 - rgba[3:4] * op) + rgba[:3] * op
     return out
 
 

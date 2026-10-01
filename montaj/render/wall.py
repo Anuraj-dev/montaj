@@ -22,6 +22,8 @@ class WallScene:
         self.order = order
         self.light = light
         self.by_name = {L["n"]: L for L in order}
+        # One light for every print. Bound once so a frame does not rebuild the layer list.
+        self.lit = [dict(L, light=light) for L in order]
 
     def __getitem__(self, k: str) -> dict:
         return self.by_name[k]
@@ -80,8 +82,7 @@ def wall_bg(cv):
 
 
 def wall_frame(cv, wall: WallScene, T: tuple, s: float):
-    layers = [dict(L, light=wall.light) for L in wall.order]
-    return draw(cv, camera(cv, T, s * cv.k), layers, wall_bg(cv))
+    return draw(cv, camera(cv, T, s * cv.k), wall.lit, wall_bg(cv))
 
 
 def _parse_t(t) -> float:
