@@ -139,7 +139,9 @@ def check(video: Path | str, intended_freeze: Sequence[Span] = (), *, log: Path 
         lines.append(f"INFO black {ignored_black} span(s) ignored as intended")
     ignored = 0
     for span in frozen_spans(video, log=log):
-        left = subtract(span, intended_freeze)
+        # A leftover shorter than the detector's own minimum is the eased tail of a transition
+        # running into an intended hold, not a freeze in its own right.
+        left = [p for p in subtract(span, intended_freeze) if p[1] - p[0] >= FREEZE_MIN_S]
         ignored += 1 if not left else 0
         lines += [f"WARN frozen {start:.1f}-{end:.1f}s" for start, end in left]
     if ignored:

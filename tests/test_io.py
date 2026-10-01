@@ -452,11 +452,15 @@ def test_check_detects_frozen_span(tmp_path: Path) -> None:
     assert not any("frozen" in line and line.startswith("WARN") for line in intended)
     assert any(line.startswith("INFO frozen 1 span(s) ignored") for line in intended)
 
-    # only the first 0.5 s of the hold was intended: the rest is still a defect
-    partial = [line for line in qa.check(video, [(0.9, 1.5)], log=log) if "frozen" in line]
+    # only the first 0.3 s of the hold was intended: the unclaimed 0.7 s is still a defect
+    partial = [line for line in qa.check(video, [(0.9, 1.3)], log=log) if "frozen" in line]
     assert len(partial) == 1 and partial[0].startswith("WARN frozen"), partial
     left, right = (float(v) for v in re.search(r"([\d.]+)-([\d.]+)s", partial[0]).groups())
-    assert left == pytest.approx(1.5, abs=0.2) and right == pytest.approx(2.0, abs=0.2)
+    assert left == pytest.approx(1.3, abs=0.2) and right == pytest.approx(2.0, abs=0.2)
+
+    # an unclaimed remnant shorter than FREEZE_MIN_S (an eased transition tail) is not reported
+    tail = qa.check(video, [(1.25, 2.1)], log=log)
+    assert not any(line.startswith("WARN frozen") for line in tail), tail
 
 
 def test_subtract_keeps_the_part_nobody_claimed() -> None:
