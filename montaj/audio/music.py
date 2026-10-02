@@ -17,7 +17,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from montaj.audio._worker import AudioError, parse_candidates, run_worker
-from montaj.config import Config, load
+from montaj.config import ACE_KEYS, Config, load
 from montaj.encode import log_file
 from montaj.gpulock import hold
 
@@ -88,7 +88,7 @@ def gen(
     log: Path | str | None = None,
 ) -> Candidates:
     """Generate `n` candidates into `out_dir` as `cand-<seed>.wav` / `cand-<seed>.json`."""
-    cfg = config or load()
+    cfg = config or load(required=ACE_KEYS)
     lyrics_path = Path(lyrics).expanduser().resolve()
     if not lyrics_path.is_file():
         raise AudioError(f"lyrics: {lyrics_path} does not exist")

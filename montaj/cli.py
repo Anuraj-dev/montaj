@@ -15,6 +15,7 @@ from pathlib import Path
 import yaml
 
 from montaj.audio import analyze as analyze_audio
+from montaj.audio import compose as compose_audio
 from montaj.audio import music as music_gen
 from montaj.audio.music import parse_duration
 from montaj.doctor import doctor
@@ -83,7 +84,7 @@ def _parser() -> argparse.ArgumentParser:
     ex.add_argument("--target", required=True, choices=("master", "whatsapp"))
 
     music_p = sub.add_parser("music")
-    music_sub = music_p.add_subparsers(dest="music_cmd", required=True, metavar="gen|analyze")
+    music_sub = music_p.add_subparsers(dest="music_cmd", required=True, metavar="gen|analyze|compose")
     gen = music_sub.add_parser("gen")
     gen.add_argument("--caption", required=True)
     gen.add_argument("--lyrics", required=True)
@@ -98,6 +99,11 @@ def _parser() -> argparse.ArgumentParser:
     ana.add_argument("--prompt", default=None)
     ana.add_argument("--bpm", type=float, default=None)
     ana.add_argument("--out", default=analyze_audio.DEFAULT_OUT)
+    ana.add_argument("--no-words", action="store_true")
+    comp = music_sub.add_parser("compose")
+    comp.add_argument("script")
+    comp.add_argument("--out", default="music/song.wav")
+    comp.add_argument("--timeout", type=float, default=600.0)
 
     rv = sub.add_parser("review")
     rv.add_argument("--port", type=int, default=8765)
@@ -449,6 +455,8 @@ def _rel(root: Path, path: Path) -> str:
 
 
 def _cmd_music_gen(ns: argparse.Namespace, root: Path) -> list[str]:
+    duration = parse_duration(ns.duration)
+    log = root / "build" / "music.log"
     try:
         made = music_gen.gen(
             root / "music",
@@ -459,15 +467,29 @@ def _cmd_music_gen(ns: argparse.Namespace, root: Path) -> list[str]:
             lang=ns.lang,
             duration=parse_duration(ns.duration),
             n=ns.n,
-            log=root / "build" / "music.log",
+            log=log,
         )
     except music_gen.PartialGenError as exc:
-        lines = [f"{_rel(root, wav)} seed={seed}" for wav, seed in zip(exc.files, exc.seeds, strict=True)]
+        lines = [
+            f"{_rel(root, wav)} seed={seed} {_candidate_duration(wav, log):.1f}s"
+            for wav, seed in zip(exc.files, exc.seeds, strict=True)
+        ]
         lines.append(f"ERR music gen: {len(exc.files)}/{exc.n} candidates ({exc.reason})")
         return lines
-    lines = [f"{_rel(root, wav)} seed={seed}" for wav, seed in zip(made.files, made.seeds, strict=True)]
-    lines.append(f"OK music gen {len(made)} candidates")
+    lines = [
+        f"{_rel(root, wav)} seed={seed} {_candidate_duration(wav, log):.1f}s"
+        for wav, seed in zip(made.files, made.seeds, strict=True)
+    ]
+    lines.append(
+        f"OK music gen {len(made)} candidates {duration:g}s lang={ns.lang} "
+        f"bpm={ns.bpm:g} key={ns.key}"
+    )
     return lines
+
+
+def _candidate_duration(path: Path, log: Path) -> float:
+    info = probe(path, log=log)
+    return info.audio_duration if info.audio_duration is not None else info.duration
 
 
 def _cmd_music_analyze(ns: argparse.Namespace, root: Path) -> list[str]:
@@ -477,9 +499,45 @@ def _cmd_music_analyze(ns: argparse.Namespace, root: Path) -> list[str]:
         lang=ns.lang,
         prompt=ns.prompt,
         bpm=ns.bpm,
+        no_words=ns.no_words,
         log=root / "build" / "music.log",
     )
-    return [*analysis.lines, f"OK {_rel(root, analysis.path)} {analysis.n_words} words {analysis.n_beats} beats"]
+    duration = f"{analysis.duration:.1f}s"
+    beat0 = f"{analysis.first_beat:.2f}s" if analysis.first_beat is not None else "none"
+    if analysis.no_words:
+        result = f"OK {_rel(root, analysis.path)} {duration} bpm={analysis.bpm:.1f} beat0={beat0} no words"
+    elif analysis.first_word is not None:
+        result = (
+            f"OK {_rel(root, analysis.path)} {duration} bpm={analysis.bpm:.1f} beat0={beat0} "
+            f"{analysis.n_words} words first_word={analysis.first_word:.2f}s lang={analysis.lang}"
+        )
+    else:
+        result = (
+            f"OK {_rel(root, analysis.path)} {duration} bpm={analysis.bpm:.1f} beat0={beat0} "
+            f"{analysis.n_words} words lang={analysis.lang}"
+        )
+    return [*analysis.lines, result]
+
+
+def _cmd_music_compose(ns: argparse.Namespace, root: Path) -> list[str]:
+    try:
+        result = compose_audio.compose(
+            _at(root, ns.script),
+            _at(root, ns.out),
+            root=root,
+            timeout=ns.timeout,
+            log=root / "build" / "music.log",
+        )
+    except compose_audio.ComposeError as exc:
+        return [f"ERR music compose: {exc}"]
+    lines: list[str] = []
+    if result.peak_dbfs >= -0.1:
+        lines.append(f"WARN music compose: clipping (peak {compose_audio.format_db(result.peak_dbfs)} dBFS)")
+    lines.append(
+        f"OK {_rel(root, result.path)} {result.duration:.2f}s {result.sample_rate}Hz {result.channels}ch "
+        f"peak {compose_audio.format_db(result.peak_dbfs)}dBFS {result.lufs:.1f}LUFS"
+    )
+    return lines
 
 
 def _cmd_taste(ns: argparse.Namespace) -> list[str]:
@@ -523,7 +581,11 @@ def _dispatch(ns: argparse.Namespace, root: Path) -> list[str]:
     if ns.cmd == "export":
         return _cmd_export(ns, root)
     if ns.cmd == "music":
-        return _cmd_music_gen(ns, root) if ns.music_cmd == "gen" else _cmd_music_analyze(ns, root)
+        if ns.music_cmd == "gen":
+            return _cmd_music_gen(ns, root)
+        if ns.music_cmd == "analyze":
+            return _cmd_music_analyze(ns, root)
+        return _cmd_music_compose(ns, root)
     if ns.cmd == "review":
         return review_summary(root)[0]
     if ns.cmd == "taste":

@@ -117,13 +117,17 @@ def config_lines(config: Config | None = None) -> list[str]:
     is an actual interpreter launch — with a timeout, because a wrong path can hang on NFS.
     """
     try:
-        cfg = config if config is not None else load_config()
+        cfg = config if config is not None else load_config(required=())
     except ConfigError as exc:
         return [f"FAIL config: {exc}"]
     lines = [f"OK config: {cfg.path}"]
     for key in ("ace_step_dir", "ace_python", "ace_site_packages", "whisper_python"):
-        lines.append(_exists_line(key, getattr(cfg, key)))
-    lines.append(faster_whisper_line(cfg.whisper_python))
+        value = getattr(cfg, key)
+        lines.append(f"FAIL {key}: missing" if not value else _exists_line(key, value))
+    lines.append(
+        faster_whisper_line(cfg.whisper_python) if cfg.whisper_python
+        else "FAIL faster_whisper: whisper_python missing"
+    )
     return lines
 
 
