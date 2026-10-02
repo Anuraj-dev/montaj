@@ -361,7 +361,7 @@ class Renderer:
             lines = tuple(self._line(ln) for ln in block.lines)
             flat.extend(lines)
             blocks.append(TextBlock(block.from_, block.to, block.fade_in, block.fade_out, block.blur, lines))
-        subs = tuple(Sub(s.from_, s.to, s.text) for s in self.tl.subs)
+        subs = tuple(Sub(s.from_, s.to, s.text, size=s.size, color=s.color) for s in self.tl.subs)
         device = self.cv.device
         scale = float(self.cv.k)
         lines = tuple(_move_line(ln, device) for ln in raster_lines(flat, scale=scale, cache_dir=cache)) if flat else ()

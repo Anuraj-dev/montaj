@@ -87,6 +87,8 @@ class ResolvedSub:
     from_: float
     to: float
     text: str
+    size: float | None = None
+    color: str | None = None
 
 
 @dataclass(frozen=True)
@@ -495,7 +497,13 @@ def resolve(spec: Spec, spec_dir: Path) -> Timeline:
 
     texts = _resolve_texts(spec, times, spec.video.fps)
     subs = [
-        ResolvedSub(from_=times[f"subs[{i}].from"], to=times[f"subs[{i}].to"], text=sub.text)
+        ResolvedSub(
+            from_=times[f"subs[{i}].from"],
+            to=times[f"subs[{i}].to"],
+            text=sub.text,
+            size=sub.size,
+            color=sub.color,
+        )
         for i, sub in enumerate(spec.subs)
     ]
 

@@ -142,6 +142,8 @@ class Sub:
     start: float
     end: float
     text: str
+    size: float | None = None
+    color: str | None = None
 
 
 @dataclass(frozen=True)
@@ -246,6 +248,38 @@ def line_markup(line: TextLine, *, bp: str | None = None, idx: int = 0) -> str:
 def _canon(line: TextLine) -> str:
     # Animation fields do not change pixels. y does: it sets the subpixel phase.
     return line_markup(line, idx=0)
+
+
+def sub_markup(sub: Sub) -> str:
+    """One `.sub` line. Omitted size and colour keep text.css `.sub` (44px, rgba cream)."""
+    style: list[str] = []
+    if sub.size is not None:
+        style.append(f"font-size:{_num(sub.size)}px")
+    if sub.color:
+        style.append(f"color:{_NAMED.get(sub.color, sub.color)}")
+    attr = f' style="{";".join(style)}"' if style else ""
+    return f'<div class="sub" id="s"{attr}>{html.escape(sub.text)}</div>'
+
+
+def _sub_cache_key(sub: Sub, scale: float, css: bytes, fonts: bytes) -> str:
+    """Legacy key is kind `sub` plus the raw text when size and colour are omitted.
+
+    Styled subs use kind `sub-style` and a JSON payload, so a lyric cannot
+    impersonate another subtitle's size or colour.
+    """
+    if sub.size is None and not sub.color:
+        return _key("sub", sub.text, scale, css, fonts)
+    payload = json.dumps(
+        {
+            "text": sub.text,
+            "size": None if sub.size is None else _num(float(sub.size)),
+            "color": sub.color or None,
+        },
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    return _key("sub-style", payload, scale, css, fonts)
 
 
 def _css_bytes() -> bytes:
@@ -770,7 +804,7 @@ def raster_subs(subs, *, scale: float, cache_dir, chromium=None) -> list[RasterI
     subs = tuple(subs)
     cache_dir = Path(cache_dir)
     css, fonts = _css_bytes(), _font_digest()
-    keys = [_key("sub", s.text, scale, css, fonts) for s in subs]
+    keys = [_sub_cache_key(s, scale, css, fonts) for s in subs]
     out: list[RasterImage | None] = [_load_image(cache_dir / key) for key in keys]
     missing = [i for i, hit in enumerate(out) if hit is None]
     if not missing:
@@ -778,7 +812,7 @@ def raster_subs(subs, *, scale: float, cache_dir, chromium=None) -> list[RasterI
     with _Browser(scale, chromium) as br:
         for i in missing:
             sub = subs[i]
-            inner = f'<div class="sub" id="s">{html.escape(sub.text)}</div>'
+            inner = sub_markup(sub)
             br.show(_page(inner, bg="transparent"))
             measured = _measure(br)
             if not measured:

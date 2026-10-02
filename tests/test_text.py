@@ -10,7 +10,7 @@ from montaj.render.canvas import Canvas
 from montaj.render.core import outc
 from montaj.render import text as text_mod
 from montaj.render.text import (
-    OX, OY, RasterLine, RasterSet, Sub, TextBlock, TextLine, Unit, draw_text, line_markup,
+    OX, OY, RasterImage, RasterLine, RasterSet, Sub, TextBlock, TextLine, Unit, draw_text, line_markup,
     raster_caption, raster_line, raster_lines, raster_subs, sine,
 )
 
@@ -372,3 +372,83 @@ def test_required_font_failure_is_not_cached(tmp_path, monkeypatch):
     with pytest.raises(RuntimeError, match="required fonts failed to load"):
         raster_lines([line], scale=1, cache_dir=tmp_path)
     assert list(tmp_path.rglob("meta.json")) == []
+
+
+def test_default_sub_markup_keeps_the_css_sub():
+    from montaj.render.text import sub_markup
+
+    assert sub_markup(Sub(0, 1, "Hello")) == '<div class="sub" id="s">Hello</div>'
+    assert "font-size:88px" in sub_markup(Sub(0, 1, "Hello", size=88))
+    assert "color:#ff0000" in sub_markup(Sub(0, 1, "Hi", color="#ff0000"))
+    assert "color:#fbf1dc" in sub_markup(Sub(0, 1, "Hi", color="cream"))
+
+
+def _peak_rgb(image) -> torch.Tensor:
+    red = image.fill[0].reshape(-1)
+    idx = int(red.argmax())
+    alpha = image.fill[3].reshape(-1)[idx].clamp(min=1e-6)
+    return image.fill[:3].reshape(3, -1)[:, idx] / alpha
+
+
+def test_styled_sub_cache_does_not_collide_with_text(tmp_path):
+    """A lyric that looks like the style encoding must not share a cache entry with a styled sub."""
+    css, fonts = text_mod._css_bytes(), text_mod._font_digest()
+    spoof = "Hello\nsize=88"
+    subs = [
+        Sub(0, 30, spoof),
+        Sub(0, 30, "Hello", size=88),
+        Sub(0, 30, "Hello", size=88, color="#ff0000"),
+        Sub(0, 30, spoof, color="#ff0000"),
+        Sub(0, 30, "Hello"),
+    ]
+    sprites = raster_subs(subs, scale=1, cache_dir=tmp_path)
+    dirs = {p.name for p in tmp_path.iterdir() if p.is_dir()}
+    assert len(dirs) == len(subs)
+    assert text_mod._key("sub", spoof, 1.0, css, fonts) in dirs
+    assert text_mod._key("sub", "Hello", 1.0, css, fonts) in dirs
+    assert not torch.equal(sprites[0].fill, sprites[1].fill)
+    assert not torch.equal(sprites[2].fill, sprites[3].fill)
+
+
+def test_sub_size_and_color_change_the_raster(tmp_path):
+    subs = [
+        Sub(0, 30, "Hello"),
+        Sub(0, 30, "Hello", size=88),
+        Sub(0, 30, "Hello", color="#ff0000"),
+    ]
+    sprites = raster_subs(subs, scale=1, cache_dir=tmp_path)
+    assert len(list(tmp_path.iterdir())) == 3
+    assert sprites[1].box[3] > sprites[0].box[3] + 20
+    assert not torch.equal(sprites[0].fill, sprites[1].fill)
+    assert _peak_rgb(sprites[2])[1] < 0.2
+    assert _peak_rgb(sprites[0])[1] > 0.7
+    again = raster_subs([subs[0]], scale=1, cache_dir=tmp_path)
+    assert len(list(tmp_path.iterdir())) == 3
+    assert torch.equal(again[0].fill, sprites[0].fill)
+
+
+def test_renderer_forwards_sub_size_and_color(tmp_path, monkeypatch):
+    from montaj.render.canvas import Canvas
+    from montaj.render.frame import Renderer
+    from montaj.render import frame as frame_mod
+    from montaj.spec import load_spec
+    from montaj.timeline import resolve
+
+    seen: list = []
+
+    def fake_raster_subs(subs, *, scale, cache_dir, chromium=None):
+        seen.append(tuple(subs))
+        return [RasterImage(torch.zeros(4, 1, 1), (0.0, 0.0, 1.0, 1.0), True) for _ in subs]
+
+    monkeypatch.setattr(frame_mod, "raster_subs", fake_raster_subs)
+    (tmp_path / "assets").mkdir()
+    spec_path = tmp_path / "montaj.yaml"
+    spec_path.write_text(
+        "video:\n  size: 1080x1920\n  fps: 30\n  look: warm-film\n"
+        "assets: assets\nshots:\n  - {blank: true, hold: 30f}\n"
+        "subs:\n  - {from: 0s, to: 1s, text: hello, size: 80, color: '#112233'}\n"
+    )
+    tl = resolve(load_spec(spec_path), tmp_path)
+    Renderer(tl, tmp_path, Canvas(32, 32, device="cpu"))._ensure_rasters()
+    assert seen and seen[0][0].size == 80
+    assert seen[0][0].color == "#112233"

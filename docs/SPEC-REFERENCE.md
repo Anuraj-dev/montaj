@@ -5,13 +5,13 @@ Photo fields (`crop`, `focus`, swirl `center`, wall `at`) are source-image pixel
 - `video.size` — string, required — output `WxH`, both numbers even. Preview halves each side, rounded down to even.
 - `video.fps` — integer, required — frames per second.
 - `video.bpm` — number, default none — beats per minute. Required when any duration uses `b`.
-- `video.look` — string, required — finish preset applied to every frame. See looks below.
+- `video.look` — `warm-film` or `golden-film`, required — finish preset applied to every frame. See looks below.
 - `video.background` — `#rrggbb`, default `#000000` — colour that shows through a fade from or to nothing.
 - `video.intro` — mapping, default none — opening treatment on the first frames.
-- `video.intro.type` — string, required with intro — `white-lift`: a white bloom that settles onto the picture, plus a short lift from white.
+- `video.intro.type` — `white-lift`, required with intro — a white bloom that settles onto the picture, plus a short lift from white.
 - `video.intro.dur` — duration, required with intro — how long the opening bloom lasts.
 - `video.outro` — mapping, default none — ending treatment. Starts at `n_frames - dur`.
-- `video.outro.type` — string, required with outro — `glow`: a bloom and warm rim that grow and then stay. `fade`: everything fades to black over the last `dur`.
+- `video.outro.type` — `glow` or `fade`, required with outro — `glow`: a bloom and warm rim that grow and then stay. `fade`: everything fades to black over the last `dur`.
 - `video.outro.dur` — duration, required with outro — how long the ending lasts.
 - `video.motion_blur` — integer, default `1` — sub-frames averaged into each frame. `1` is off. Preview uses at most 2. Text and subtitles are composited once at the integer frame, after that average.
 - `assets` — string, default `assets` — photo folder relative to the spec file. A photo is the file stem (`jpg`, `jpeg`, `png` or `webp`).
@@ -41,8 +41,8 @@ Photo fields (`crop`, `focus`, swirl `center`, wall `at`) are source-image pixel
 - `shots[].crop` — `[x0, y0, x1, y1]`, default the full image — the part of the photo that is shown.
 - `shots[].focus` — `[x, y]`, default the crop centre — the photo point placed at the screen centre.
 - `shots[].zoom` — number, default cover — design pixels per photo pixel. Cover fits the crop with a hair of overscan.
-- `shots[].in` — mapping, default a cut — how this shot arrives from the previous one. See transitions.
-- `shots[].in.type` — `cut`, `fade`, `swirl` or `whip`, default `cut` — which transition.
+- `shots[].in` — mapping, default none — how this shot arrives from the previous one. Omit `in` for a cut. See transitions.
+- `shots[].in.type` — `cut`, `fade`, `swirl` or `whip`, required inside `in` — which transition.
 - `shots[].in.dur` — duration, required except for a cut — length of the transition. It has to fit in the shots it overlaps.
 - `shots[].in.center` — `[x, y]`, default the outgoing shot's focus — where a swirl opens, in the outgoing photo.
 - `shots[].in.axis` — `x` or `y`, default `x` — which way a whip travels.
@@ -76,7 +76,7 @@ Photo fields (`crop`, `focus`, swirl `center`, wall `at`) are source-image pixel
 - `fx[].leak` — number, leak or flash or hit or burst — strength of a warm light leak around `at`.
 - `fx[].flash` — number, leak or flash or hit or burst — strength of a white flash at `at`, fading over 6 frames.
 - `fx[].hit` — number, leak or flash or hit or burst — golden radial flash (and optional punch) at `at`.
-- `fx[].burst` — integer, leak or flash or hit or burst — sparkle-particle count. Needs `pos`. Seed is `100` plus the burst's index among bursts.
+- `fx[].burst` — whole number, leak or flash or hit or burst — sparkle-particle count. An integral float such as `3.0` is accepted. Needs `pos`. Seed is `100` plus the burst's index among bursts.
 - `fx[].pos` — `[x, y]`, required with a burst — burst origin in design px.
 - `fx[].at` — time expression, required — when it happens, from the start of the film.
 - `fx[].dir` — `1` or `-1`, required with a leak — which side the leak comes in from. Not used on a flash, hit or burst.
@@ -97,11 +97,11 @@ Photo fields (`crop`, `focus`, swirl `center`, wall `at`) are source-image pixel
 - `text[].lines[].style` — `serif`, `script`, `caps` or `deva`, default `serif`.
 - `text[].lines[].italic` — boolean, default false — serif only.
 - `text[].lines[].gold` — boolean, default false — gold gradient fill with a travelling sweep.
-- `text[].lines[].color` — `cream`, `gold`, `ink` or `#rrggbb`, default the style's colour.
-- `text[].lines[].size` — number, default the style's — font size in design px.
-- `text[].lines[].weight` — number, default the style's — font weight.
-- `text[].lines[].tracking` — number, default the style's — letter-spacing in em.
-- `text[].lines[].line_height` — number, default the style's.
+- `text[].lines[].color` — `cream`, `gold`, `ink` or `#rrggbb`, default serif/deva cream `#fbf1dc`, script/caps gold `#f0c77e`.
+- `text[].lines[].size` — number, default serif/script `84`, caps `26`, deva `62` — font size in design px.
+- `text[].lines[].weight` — number, default serif `300`, script/deva `400`, caps `600`.
+- `text[].lines[].tracking` — number, default serif `0.01`, caps `0.42`, script/deva `0` — letter-spacing in em.
+- `text[].lines[].line_height` — number, default serif `1.1`, deva `1.5`; script and caps leave it unset.
 - `text[].lines[].y` — number, required — design-px top of the line box.
 - `text[].lines[].at` — time expression, required — when this line starts revealing.
 - `text[].lines[].by` — `word` or `char`, default `word` — reveal unit.
@@ -116,6 +116,8 @@ Photo fields (`crop`, `focus`, swirl `center`, wall `at`) are source-image pixel
 - `subs[].from` — time expression, required — subtitle window start.
 - `subs[].to` — time expression, required — subtitle window end.
 - `subs[].text` — string, required — the lyric line.
+- `subs[].size` — number, default `44` — font size in design px of a 1080-wide frame.
+- `subs[].color` — `cream`, `gold`, `ink` or `#rrggbb`, default `rgba(251,241,220,.92)` — `.sub` fill. Omit it to keep that translucent cream.
 - `tracks` — mapping, default none — slow global levels. Keys are piecewise curves like wall camera keys. Before the first key: first value; after the last: last value.
 - `tracks.dust` — list of keys, default none — mote level.
 - `tracks.glow` — list of keys, default none — strength of the two drifting light leaks.
@@ -133,8 +135,8 @@ Transitions (`shots[].in`):
 
 Looks (`video.look`):
 
-- `warm-film` — a little sharpen, softer contrast, lifted blacks, a vignette, and amber light leaks.
-- `golden-film` — the Arshiya look: leaks, dust, gold hits, letterbox bars, grain, then a fade to black.
+- `warm-film` — sharpen, softer contrast, lifted blacks, a vignette, and amber leaks. Uses `shots[].flash`, `fx[].flash`, `fx[].leak`, `video.intro`, and a glow outro. Ignores `fx[].hit`, `fx[].burst`, and `tracks` (`dust`, `glow`, `bars`). `outro: {type: fade}` still fades the frame to black.
+- `golden-film` — `tracks.glow` leaks, `tracks.dust`, `fx[].hit`, `fx[].burst`, `tracks.bars`, and grain. Ignores `shots[].flash`, `fx[].flash`, `fx[].leak`, `video.intro`, and a glow outro. Does not fade to black unless the spec sets `outro: {type: fade}`.
 
 Easing (the curve into a camera key):
 

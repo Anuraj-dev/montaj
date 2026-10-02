@@ -296,6 +296,155 @@ def test_birthday_recipe_crops_load(tmp_path: Path):
     assert wall.prints[15].crop == (0, 0, 1024, 890)
 
 
+def _errors(tmp_path: Path, shots: str, *, video: str | None = None, extra: str = "") -> list[str]:
+    p = _write(tmp_path, shots, ["a"], video=video, extra=extra)
+    with pytest.raises(SpecError) as ei:
+        load_spec(p)
+    assert ei.value.errors
+    assert all(_LINE.match(e) for e in ei.value.errors)
+    return ei.value.errors
+
+
+def test_unknown_look_names_the_presets(tmp_path: Path):
+    errs = _errors(tmp_path, "  - {photo: a, hold: 10f}\n", video="size: 1080x1920\n  fps: 30\n  look: noir")
+    assert "video.look: unknown 'noir' (use warm-film or golden-film)" in errs
+
+
+def test_look_names_match_finish_presets():
+    from montaj.render.finish import LOOKS
+    from montaj.spec import LOOK_NAMES
+
+    assert set(LOOK_NAMES) == set(LOOKS)
+
+
+def test_intro_and_outro_types_are_closed(tmp_path: Path):
+    intro = _errors(
+        tmp_path,
+        "  - {photo: a, hold: 10f}\n",
+        video="size: 1080x1920\n  fps: 30\n  look: warm-film\n  intro: {type: spin, dur: 10f}",
+    )
+    assert "video.intro.type: unknown 'spin' (use white-lift)" in intro
+    outro = _errors(
+        tmp_path,
+        "  - {photo: a, hold: 10f}\n",
+        video="size: 1080x1920\n  fps: 30\n  look: warm-film\n  outro: {type: wipe, dur: 10f}",
+    )
+    assert "video.outro.type: unknown 'wipe' (use glow or fade)" in outro
+    ok = _write(
+        tmp_path,
+        "  - {photo: a, hold: 30f}\n",
+        ["a"],
+        video=(
+            "size: 1080x1920\n  fps: 30\n  look: warm-film\n"
+            "  intro: {type: white-lift, dur: 8f}\n  outro: {type: fade, dur: 8f}"
+        ),
+    )
+    spec = load_spec(ok)
+    assert spec.video.intro is not None and spec.video.intro.type == "white-lift"
+    assert spec.video.outro is not None and spec.video.outro.type == "fade"
+
+
+def test_bool_burst_and_sub_size_are_rejected(tmp_path: Path):
+    burst_true = _errors(
+        tmp_path,
+        "  - {photo: a, hold: 10f}\n",
+        extra="fx:\n  - {burst: true, at: 1s, pos: [1, 2]}\n",
+    )
+    assert any("fx[0].burst" in e and "boolean" in e for e in burst_true)
+    burst_false = _errors(
+        tmp_path,
+        "  - {photo: a, hold: 10f}\n",
+        extra="fx:\n  - {burst: false, at: 1s, pos: [1, 2]}\n",
+    )
+    assert any("fx[0].burst" in e and "boolean" in e for e in burst_false)
+    size_true = _errors(
+        tmp_path,
+        "  - {photo: a, hold: 30f}\n",
+        extra="subs:\n  - {from: 0s, to: 1s, text: hi, size: true}\n",
+    )
+    assert any("subs[0].size" in e and "boolean" in e for e in size_true)
+    size_false = _errors(
+        tmp_path,
+        "  - {photo: a, hold: 30f}\n",
+        extra="subs:\n  - {from: 0s, to: 1s, text: hi, size: false}\n",
+    )
+    assert any("subs[0].size" in e and "boolean" in e for e in size_false)
+
+
+def test_burst_must_be_a_whole_number(tmp_path: Path):
+    errs = _errors(
+        tmp_path,
+        "  - {photo: a, hold: 10f}\n",
+        extra="fx:\n  - {burst: 1.5, at: 1s, pos: [1, 2]}\n",
+    )
+    assert any(e.startswith("fx[0].burst: need a whole number") for e in errs)
+    p = _write(
+        tmp_path,
+        "  - {photo: a, hold: 10f}\n",
+        ["a"],
+        extra="fx:\n  - {burst: 3.0, at: 1s, pos: [10, 20]}\n",
+    )
+    spec = load_spec(p)
+    assert spec.fx[0].burst == 3
+
+
+def test_shot0_non_fade_hint_and_missing_source(tmp_path: Path):
+    errs = _errors(tmp_path, "  - {photo: a, hold: 30f, in: {type: swirl, dur: 10f}}\n")
+    assert any("remove in or use type: fade" in e and "use type: cut" not in e for e in errs)
+    missing = _errors(tmp_path, "  - {hold: 10f}\n")
+    assert any("need photo, wall, clip or blank" in e for e in missing)
+    blank = _write(tmp_path, "  - {blank: true, hold: 10f}\n", ["a"])
+    assert load_spec(blank).shots[0].blank is True
+    fade = _write(tmp_path, "  - {photo: a, hold: 30f, in: {type: fade, dur: 10f}}\n", ["a"])
+    assert load_spec(fade).shots[0].in_.type == "fade"
+
+
+def test_sub_size_and_color_validate(tmp_path: Path):
+    bad_size = _errors(
+        tmp_path,
+        "  - {photo: a, hold: 30f}\n",
+        extra="subs:\n  - {from: 0s, to: 1s, text: hi, size: 0}\n",
+    )
+    assert any("subs[0].size" in e and "finite" in e and "> 0" in e for e in bad_size)
+    bad_color = _errors(
+        tmp_path,
+        "  - {photo: a, hold: 30f}\n",
+        extra="subs:\n  - {from: 0s, to: 1s, text: hi, color: blue}\n",
+    )
+    assert any("subs[0].color" in e and "#rrggbb" in e for e in bad_color)
+    p = _write(
+        tmp_path,
+        "  - {photo: a, hold: 30f}\n",
+        ["a"],
+        extra="subs:\n  - {from: 0s, to: 1s, text: hi, size: 60, color: cream}\n",
+    )
+    spec = load_spec(p)
+    assert spec.subs[0].size == 60
+    assert spec.subs[0].color == "cream"
+
+
+def test_sub_size_changes_segment_hash_and_reaches_the_timeline(tmp_path: Path):
+    from montaj.project import file_sha, segment_hash
+    from montaj.timeline import resolve
+
+    p = _write(
+        tmp_path,
+        "  - {photo: a, hold: 30f}\n",
+        ["a"],
+        extra="subs:\n  - {from: 0s, to: 1s, text: hello, size: 44, color: '#112233'}\n",
+    )
+    spec = load_spec(p)
+    tl = resolve(spec, p.parent)
+    assert tl.subs[0].size == 44
+    assert tl.subs[0].color == "#112233"
+    shas = {"a": file_sha(p.parent / "assets" / "a.jpg")}
+    h0 = segment_hash(tl, tl.segments[0], shas, "e1")
+    edited = spec.model_copy(deep=True)
+    edited.subs[0].size = 80
+    h1 = segment_hash(resolve(edited, p.parent), tl.segments[0], shas, "e1")
+    assert h0 != h1
+
+
 def test_wall_print_missing(tmp_path: Path):
     wall = """
   - hold: 10f

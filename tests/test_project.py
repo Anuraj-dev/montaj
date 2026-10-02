@@ -81,7 +81,7 @@ def test_hash_video_block_and_engine_version(tmp_path: Path):
     b = segment_hash(tl, tl.segments[0], shas, "e2")
     assert a != b
     spec2 = tl.spec.model_copy(deep=True)
-    spec2.video.look = "other"
+    spec2.video.look = "golden-film"
     tl2 = resolve(spec2, tmp_path)
     assert segment_hash(tl2, tl2.segments[0], shas, "e1") != a
 
