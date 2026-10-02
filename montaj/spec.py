@@ -14,6 +14,9 @@ from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, ValidationEr
 EASE = ("linear", "smooth", "cubic", "outc", "inc", "expo", "ramp", "sine")
 EASE_HINT = "use linear, smooth, cubic, outc, inc, expo, ramp or sine"
 TRANS_TYPES = ("cut", "fade", "swirl", "whip")
+LOOK_NAMES = ("warm-film", "golden-film")
+INTRO_TYPES = ("white-lift",)
+OUTRO_TYPES = ("glow", "fade")
 TEXT_STYLES = ("serif", "script", "caps", "deva")
 TEXT_BY = ("word", "char")
 TEXT_REVEAL = ("rise", "pop")
@@ -34,6 +37,16 @@ def _photo_id(v: object) -> object:
 
 
 PhotoId = Annotated[str, BeforeValidator(_photo_id)]
+
+
+def _reject_bool(v: object) -> object:
+    """Pydantic turns `true` into `1.0` before a later numeric check can see the bool."""
+    if isinstance(v, bool):
+        raise ValueError("need a number, not a boolean")
+    return v
+
+
+RealNum = Annotated[float, BeforeValidator(_reject_bool)]
 
 
 def _int_px(v: object) -> object:
@@ -231,6 +244,8 @@ class Sub(Frozen):
     from_: TimeExpr = Field(alias="from")
     to: TimeExpr
     text: str
+    size: RealNum | None = None
+    color: str | None = None
 
 
 class TrackKey(Frozen):
@@ -256,7 +271,7 @@ class Fx(Frozen):
     leak: float | None = None
     flash: float | None = None
     hit: float | None = None
-    burst: float | None = None
+    burst: RealNum | None = None
     at: TimeExpr
     dir: int | None = None
     pos: tuple[float, float] | None = None
@@ -319,6 +334,8 @@ def _from_pydantic(exc: ValidationError) -> list[str]:
             hint = "use 22f, 4b or 1.5s"
         elif "whole pixel" in msg:
             hint = "use integer source-px"
+        elif "not a boolean" in msg:
+            hint = "use a number"
         lines.append(_line(path, msg, hint))
     return lines
 
@@ -733,6 +750,29 @@ def _check_color(path: str, color: str | None, errors: list[str]) -> None:
         errors.append(_line(path, f"unknown colour {color!r}", "use cream, gold, ink or #rrggbb"))
 
 
+def _choices(names: tuple[str, ...]) -> str:
+    return " or ".join(names)
+
+
+def _whole_number(v: float) -> bool:
+    return isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v) and v == int(v)
+
+
+def _check_finish(spec: Spec, errors: list[str]) -> None:
+    if spec.video.look not in LOOK_NAMES:
+        errors.append(_line("video.look", f"unknown {spec.video.look!r}", f"use {_choices(LOOK_NAMES)}"))
+    intro = spec.video.intro
+    if intro is not None and intro.type not in INTRO_TYPES:
+        errors.append(
+            _line("video.intro.type", f"unknown {intro.type!r}", f"use {_choices(INTRO_TYPES)}")
+        )
+    outro = spec.video.outro
+    if outro is not None and outro.type not in OUTRO_TYPES:
+        errors.append(
+            _line("video.outro.type", f"unknown {outro.type!r}", f"use {_choices(OUTRO_TYPES)}")
+        )
+
+
 def _check_ease(path: str, ease: str, errors: list[str]) -> None:
     if ease not in EASE:
         errors.append(_line(path, f"unknown {ease!r}", EASE_HINT))
@@ -827,7 +867,7 @@ def validate_spec(
                 _line(f"shots[{i}]", "photo, wall, clip and blank are mutually exclusive", "remove extra")
             )
         elif n_src == 0:
-            errors.append(_line(f"shots[{i}]", "need photo, wall or clip", "add one"))
+            errors.append(_line(f"shots[{i}]", "need photo, wall, clip or blank", "add one"))
         if not has_p:
             for name in ("drift", "frame", "morph", "tone", "pulse"):
                 if getattr(sh, name) is not None:
@@ -921,7 +961,7 @@ def validate_spec(
             continue
         if i == 0 and tr.type != "fade":
             errors.append(
-                _line(f"shots[{i}].in", "no previous shot to transition from", "remove in or use type: cut")
+                _line(f"shots[{i}].in", "no previous shot to transition from", "remove in or use type: fade")
             )
         if tr.type in ("fade", "swirl"):
             if h is not None and d > h:
@@ -952,6 +992,7 @@ def validate_spec(
                 )
 
     _reject_overlap_windows(spec, holds, parsed, errors)
+    _check_finish(spec, errors)
 
     for i, fx in enumerate(spec.fx):
         kinds = [fx.leak is not None, fx.flash is not None, fx.hit is not None, fx.burst is not None]
@@ -963,6 +1004,14 @@ def validate_spec(
             errors.append(_line(f"fx[{i}].dir", "dir is for leak", "remove dir"))
         if (fx.hit is not None or fx.burst is not None) and fx.dir is not None:
             errors.append(_line(f"fx[{i}].dir", "dir is for leak", "remove dir"))
+        if fx.burst is not None and not _whole_number(fx.burst):
+            errors.append(
+                _line(
+                    f"fx[{i}].burst",
+                    f"need a whole number, got {_fmt_num(fx.burst)}",
+                    "use an integer",
+                )
+            )
         if fx.burst is not None and fx.pos is None:
             errors.append(_line(f"fx[{i}].pos", "required for burst", "set pos: [x, y]"))
         at_f = _parse_time(fx.at, markers, fps, bpm, f"fx[{i}].at", errors)
@@ -1014,6 +1063,15 @@ def _validate_text(
             val = _parse_time(raw, markers, fps, bpm, f"subs[{i}].{field}", errors)
             if val is not None:
                 times[f"subs[{i}].{field}"] = val
+        if sub.size is not None and (not math.isfinite(sub.size) or sub.size <= 0):
+            errors.append(
+                _line(
+                    f"subs[{i}].size",
+                    f"must be finite and > 0, got {_fmt_num(sub.size)}",
+                    "use a design-px size",
+                )
+            )
+        _check_color(f"subs[{i}].color", sub.color, errors)
 
 
 def _validate_tracks(

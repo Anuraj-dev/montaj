@@ -109,7 +109,7 @@ def test_photo_wall_clip_exclusive(tmp_path: Path):
     _jpeg(tmp_path / "assets", "a")
     (tmp_path / "assets" / "intro.mp4").write_bytes(b"x")
     _err(tmp_path, "  - {photo: a, clip: intro, hold: 10f}\n", "mutually exclusive", stems=["a"])
-    _err(tmp_path, "  - {hold: 10f}\n", "need photo, wall or clip")
+    _err(tmp_path, "  - {hold: 10f}\n", "need photo, wall, clip or blank")
 
 
 def test_zoom_and_drift(tmp_path: Path):
