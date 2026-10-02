@@ -31,7 +31,7 @@ intent costs few tokens and every re-render / review costs none.
 - The renderer reads only a `FramePlan`, the shots it names, and asset files — the segment cache is correct
   only while that holds. Pass state as arguments; module-level mutable globals are a cache bug.
 - Units: photo coordinates in source px; screen values in design px (1080 wide), scaled by `Canvas.k`.
-- Parity oracle: `~/Anuraj-dev/claude-test/bday-video/v2/film2.py` (photos in `v2/src/`). Port behaviour
+- Parity oracle: `~/Anuraj-dev/montaj-projects/_oracle/v2/film2.py` (photos in `v2/src/`). Port behaviour
   exactly; improve only after a parity test pins the original.
 - Known traps live in `montaj doctor` output and `docs/research/prior-art.md`; add new traps there.
 

@@ -14,7 +14,7 @@ from montaj.spec import load_spec, round_frame
 from montaj.timeline import resolve
 
 ROOT = Path(__file__).resolve().parents[1]
-FILM_ASSETS = Path.home() / "Anuraj-dev/claude-test/bday-video/assets"
+FILM_ASSETS = Path.home() / "Anuraj-dev/montaj-projects/_oracle/assets"
 FPS = 30
 BEAT = 60 / 76
 DUR = 165.0

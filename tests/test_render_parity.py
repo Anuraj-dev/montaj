@@ -18,7 +18,7 @@ from montaj.render import transitions as mt
 from montaj.render import wall as mw
 from montaj.render.canvas import Canvas
 
-V2 = os.path.expanduser("~/Anuraj-dev/claude-test/bday-video/v2")
+V2 = os.path.expanduser("~/Anuraj-dev/montaj-projects/_oracle/v2")
 W, H = 1080, 1920
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SRC = os.path.join(V2, "src")

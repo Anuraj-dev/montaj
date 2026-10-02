@@ -28,7 +28,7 @@ from montaj.render.shots import (
 )
 from tests.oracle_html import expect_psnr, render_html, render_page, stage_html
 
-PHOTO = Path("/home/raja/Anuraj-dev/claude-test/bday-video/assets/photos/shy2.jpg")
+PHOTO = Path("/home/raja/Anuraj-dev/montaj-projects/_oracle/assets/photos/shy2.jpg")
 # Repo root from this file, so the face still resolves after the worktree is removed.
 FONT = Path(__file__).resolve().parents[1] / "montaj/fonts/great-vibes-latin-400-normal.woff2"
 CAP = "Arshiya"

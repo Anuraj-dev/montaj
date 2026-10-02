@@ -20,7 +20,7 @@ import torch
 pytestmark = pytest.mark.gpu
 
 ROOT = Path(__file__).resolve().parents[1]
-V2 = Path.home() / "Anuraj-dev/claude-test/bday-video/v2"
+V2 = Path.home() / "Anuraj-dev/montaj-projects/_oracle/v2"
 SRC = V2 / "src"
 # f=500 still on the 1.606 close-up, 560..670 on the 0.42 wide hold, 700 zooming back.
 FRAMES = (500, 530, 560, 620, 670, 700)

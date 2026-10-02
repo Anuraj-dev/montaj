@@ -20,7 +20,7 @@ from montaj.review.summary import summary
 
 REPO = Path(__file__).resolve().parents[1]
 RECIPE = REPO / "recipes" / "birthday-short.yaml"
-SRC = Path.home() / "Anuraj-dev/claude-test/bday-video/v2/src"
+SRC = Path.home() / "Anuraj-dev/montaj-projects/_oracle/v2/src"
 
 
 def _jpeg(folder: Path, stem: str) -> None:

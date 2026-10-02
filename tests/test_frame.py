@@ -16,7 +16,7 @@ import torch
 pytestmark = pytest.mark.gpu
 
 ROOT = Path(__file__).resolve().parents[1]
-V2 = Path.home() / "Anuraj-dev/claude-test/bday-video/v2"
+V2 = Path.home() / "Anuraj-dev/montaj-projects/_oracle/v2"
 SRC = V2 / "src"
 
 # Integer frames that land on each moment film2 is supposed to match.

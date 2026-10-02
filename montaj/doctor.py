@@ -20,7 +20,7 @@ TRAPS: tuple[str, ...] = (
     "TRAP chromium-cpu: headless Chromium renders on CPU (SwiftShader) whatever GPU flags say - don't retry",
     "TRAP ace-step-python: ACE-Step venv bin/python symlink is dangling; run uv CPython 3.12 with its site-packages",
     "TRAP ace-step-vram: 8 GB VRAM - ACE-Step needs offload_to_cpu + offload_dit_to_cpu, and no render at the same time",
-    "TRAP ace-step-path: ACE-Step lives at design-test/voice-bot/tools/ACE-Step-1.5 (19 GB) - reference via config, don't move",
+    "TRAP ace-step-path: ACE-Step lives at ~/.local/share/montaj/ACE-Step-1.5 (18 GB) - reference via config, don't move",
     "TRAP gpu-lock: music gen/analyze and render share the one GPU - montaj locks ~/.cache/montaj/gpu.lock, don't run them side by side",
     "TRAP still-photos: no warp/drift/depth-parallax on stills - motion lives in transitions, cuts on a beat grid",
 )
