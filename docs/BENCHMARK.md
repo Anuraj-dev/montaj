@@ -112,3 +112,22 @@ birthday montage from the 29 Arshiya photos, brief answered up front, no human r
 Targets (PLAN.md): input-eq ≤ 0.3M ✅ (0.12–0.24M vs 1.0–2.7M before Montaj), turns ≤ 20 ✅ on v2 (16, 11),
 starting context ≤ 55k ✅ (25–28k). Feedback round via review.json: one user message, 7 agent turns, 0.09M (PLAN target ≤ 3 turns counts user turns ✅).
 Not yet measured: a run with music (`music analyze` / `gen`).
+
+## Music benchmark (M4, 2026-10-02)
+Same skill (v2), fresh one-shot sessions, one prompt: a 30 s 9:16 birthday music video from the 29 Arshiya photos,
+an original generated song with English lyrics naming her, cuts on its beat, lyrics as subtitles, end on
+"Happy Birthday, Arshiya", no human review. grok ran alone for its first 13 min; then all three shared the GPU lock.
+Input-eq uses the M4 formula (uncached input + 0.1·cache read + 5·output); codex reports no dollar cost.
+
+| Model | Wall | Calls | Input-eq | Cost | Result |
+|---|---|---|---|---|---|
+| grok-4.7 | 20.9m | 53 model calls | 0.80M | $0.90 | `OK check` (−14.0 LUFS). 7 stills on 76 BPM markers, 2 song candidates. Vocals start at 12 s, so subtitles appear late. Gold script title over the closing photo. |
+| gpt-6.1-sol medium | 13.1m | 72 commands | 0.42M | n/a | `OK check` (−13.9 LUFS). 9 photos in tilted frame cards, golden-film look, 18 Mbps file (grain). Clean gold title on black at the end; subtitles small and dim. |
+| gpt-5.6-luna xhigh fast | 13.6m | 82 commands | 0.44M | n/a | `OK check` (−14.0 LUFS). 8 photos, 4-beat holds, opening title. Used drift/zoom on stills (against taste). Title sits over a face and is hard to read, then clears 1.5 s before the end. |
+
+- **All three finished the full loop unattended**, including song generation, beat analysis and subtitles. Each used
+  1.5–3× the tokens of the silent Claude runs (0.12–0.24M), mostly cached reads.
+- **Sol gave the best ending and lowest tokens; grok the calmest cut but the most tokens; Luna the most motion
+  and the weakest title.**
+- **Skill gaps to fix:** say to keep the title on a dark or plain backdrop until the last frame; place subtitles
+  from the first sung word and set a minimum size; restate "no drift on stills" where shots are described.
