@@ -1,13 +1,17 @@
 """Evaluate one FramePlan into a finished RGB frame.
 
-The renderer reads only the plan, the shots it names, and asset files. Photos are
-loaded once. An M1 still (no drift, tone, frame, morph, or pulse) is time-flat, so
-its composite is cached. M2 framing is a function of t. Text rasters are built on
-the first frame that needs them, one batch per kind, under ``<project>/build/text/``.
+The renderer reads only the plan, the shots it names, and asset files. Photos,
+backgrounds, cards, stills, walls, clips and captions are cached on the Renderer
+up to a fixed cap and loaded again on a miss; a reload reads the same bytes as
+the first load. `begin_segment` drops entries the segment's frames cannot read,
+so a wall keeps its prints only while it is on screen. An M1 still (no drift, tone, frame, morph, or pulse) is time-flat,
+so its composite is cached. M2 framing is a function of t. Text rasters are built
+on the first frame that needs them, one batch per kind, under ``<project>/build/text/``.
 """
 from __future__ import annotations
 
 import math
+from collections import OrderedDict
 from pathlib import Path
 
 import torch
@@ -50,6 +54,78 @@ from montaj.timeline import Blank, Clip, Scene, Still, Timeline, Trans, Wall
 
 # film.html 155: an omitted morph centre is (cx ?? .5, cy ?? .45). The spec leaves it unset.
 _MORPH_CENTER = (0.5, 0.45)
+
+# A transition composites two shots, and motion blur samples that pair again, so
+# the whole set has to stay resident for the frame. A framed morph holds its photo,
+# the morph photo, and a background and a card for each: 4 photos, 4 backgrounds,
+# 4 cards. Caps are that set plus one more shot — 8, 6, 6 — so a swirl re-read or
+# a card-print variant touched in the same frame does not push the pair out.
+# Stills are the two M1 endpoints plus the same slack (4). Walls and clip sources
+# are the two endpoints (2). Captions are the sprites those cards paste (8).
+_PHOTO_CAP = 8
+_BG_CAP = 6
+_CARD_CAP = 6
+_STILL_CAP = 4
+_WALL_CAP = 2
+_CLIP_CAP = 2
+_CAPTION_CAP = 8
+
+
+class _LRU:
+    """Per-renderer bound. Evicted entries are not kept anywhere else in the cache."""
+
+    def __init__(self, cap: int):
+        self.cap = cap
+        self._data: OrderedDict = OrderedDict()
+
+    def get(self, key, default=None):
+        if key not in self._data:
+            return default
+        self._data.move_to_end(key)
+        return self._data[key]
+
+    def __setitem__(self, key, value) -> None:
+        if key in self._data:
+            self._data.move_to_end(key)
+            self._data[key] = value
+            return
+        while len(self._data) >= self.cap:
+            self._data.popitem(last=False)
+        self._data[key] = value
+
+    def __len__(self) -> int:
+        return len(self._data)
+
+    def __contains__(self, key) -> bool:
+        return key in self._data
+
+    def __iter__(self):
+        return iter(self._data)
+
+    def __delitem__(self, key) -> None:
+        del self._data[key]
+
+
+def _cache_caps(overrides: dict[str, int] | None) -> dict[str, int]:
+    caps = {
+        "photos": _PHOTO_CAP,
+        "bgs": _BG_CAP,
+        "cards": _CARD_CAP,
+        "stills": _STILL_CAP,
+        "walls": _WALL_CAP,
+        "clips": _CLIP_CAP,
+        "captions": _CAPTION_CAP,
+    }
+    if not overrides:
+        return caps
+    unknown = sorted(set(overrides) - set(caps))
+    if unknown:
+        raise ValueError(f"cache cap: unknown {', '.join(unknown)}")
+    for name, cap in overrides.items():
+        if isinstance(cap, bool) or not isinstance(cap, int) or cap < 1:
+            raise ValueError(f"cache cap {name}: need an integer ≥ 1, got {cap!r}")
+        caps[name] = cap
+    return caps
 
 
 def _rgb(raw: str) -> tuple[float, float, float]:
@@ -100,23 +176,78 @@ def _move_image(image: RasterImage, device) -> RasterImage:
 class Renderer:
     """`frame(f)` samples the plan's scene across the motion-blur shutter, then finishes it."""
 
-    def __init__(self, tl: Timeline, spec_dir: Path, cv: Canvas):
+    def __init__(self, tl: Timeline, spec_dir: Path, cv: Canvas, *, cache_caps: dict[str, int] | None = None):
         self.tl = tl
         self.cv = cv
         self._dir = Path(spec_dir)
         self._assets = self._dir / tl.spec.assets
-        self._photos: dict[tuple, Photo] = {}
-        self._walls: dict[int, object] = {}
-        self._stills: dict[int, torch.Tensor] = {}
-        self._clips: dict[str, ClipSource] = {}
-        self._bgs: dict[tuple, torch.Tensor] = {}
-        self._cards: dict[tuple, object] = {}
+        caps = _cache_caps(cache_caps)
+        self._photos: _LRU = _LRU(caps["photos"])
+        self._walls: _LRU = _LRU(caps["walls"])
+        self._stills: _LRU = _LRU(caps["stills"])
+        self._clips: _LRU = _LRU(caps["clips"])
+        self._bgs: _LRU = _LRU(caps["bgs"])
+        self._cards: _LRU = _LRU(caps["cards"])
         self._bg: torch.Tensor | None = None
         self._rasters_ready = False
         self._blocks: tuple = ()
         self._subs: tuple = ()
         self._rasters: RasterSet | None = None
-        self._captions: dict[str, torch.Tensor] = {}
+        self._captions: _LRU = _LRU(caps["captions"])
+        self._shot: int | None = None
+        self._owners: dict[str, dict[tuple, set[int]]] = {"photos": {}, "bgs": {}, "cards": {}}
+
+    def begin_segment(self, shots) -> None:
+        """Drop cached resources this segment's frames cannot read.
+
+        `shots` is the segment's own index plus every neighbour those frames
+        composite. What remains is still bounded by the LRU caps. A reload later
+        reads the same bytes.
+        """
+        needed = frozenset(int(i) for i in shots)
+        self._drop_indexed(self._walls, needed)
+        self._drop_indexed(self._stills, needed)
+        self._drop_clips(needed)
+        self._drop_captions(needed)
+        self._drop_owned("photos", self._photos, needed)
+        self._drop_owned("bgs", self._bgs, needed)
+        self._drop_owned("cards", self._cards, needed)
+
+    def _note(self, kind: str, key: tuple) -> None:
+        shot = self._shot
+        if shot is None:
+            return
+        self._owners[kind].setdefault(key, set()).add(shot)
+
+    def _drop_indexed(self, cache: _LRU, needed: frozenset[int]) -> None:
+        for key in [key for key in cache if key not in needed]:
+            del cache[key]
+
+    def _drop_owned(self, kind: str, cache: _LRU, needed: frozenset[int]) -> None:
+        owners = self._owners[kind]
+        for key in list(owners):
+            if key not in cache:
+                del owners[key]
+        for key in [key for key in cache if owners.get(key, set()).isdisjoint(needed)]:
+            del cache[key]
+            owners.pop(key, None)
+
+    def _drop_clips(self, needed: frozenset[int]) -> None:
+        stems = {self.tl.shots[i].spec.clip for i in needed if self.tl.shots[i].spec.clip}
+        for key in [key for key in self._clips if key not in stems]:
+            src = self._clips.get(key)
+            del self._clips[key]
+            if src is not None:
+                src.close()
+
+    def _drop_captions(self, needed: frozenset[int]) -> None:
+        texts: set[str] = set()
+        for i in needed:
+            frame = self.tl.shots[i].spec.frame
+            if frame is not None and frame.caption:
+                texts.add(frame.caption)
+        for key in [key for key in self._captions if key not in texts]:
+            del self._captions[key]
 
     def _photo(self, stem: str, crop: tuple[int, int, int, int] | None, card: bool) -> Photo:
         # Stills are flat; wall prints are cards. The same file is often both.
@@ -125,6 +256,7 @@ class Renderer:
         if hit is None:
             hit = Photo(self.cv, str(find_photo(self._assets, stem)), crop=crop, card=card)
             self._photos[key] = hit
+        self._note("photos", key)
         return hit
 
     def _load_photo(self, stem: str, crop: tuple[int, ...] | None, card: bool) -> Photo:
@@ -132,6 +264,7 @@ class Renderer:
         return self._photo(str(stem), box, bool(card))
 
     def _wall(self, index: int):
+        self._shot = index
         hit = self._walls.get(index)
         if hit is None:
             spec = self.tl.shots[index].spec.wall
@@ -142,6 +275,7 @@ class Renderer:
         return hit
 
     def _still_image(self, index: int) -> torch.Tensor:
+        self._shot = index
         hit = self._stills.get(index)
         if hit is None:
             sh = self.tl.shots[index].spec
@@ -169,6 +303,7 @@ class Renderer:
         sh = self.tl.shots[scene.shot].spec
         if sh.photo is None:
             return (self.cv.W / 2, self.cv.H / 2)
+        self._shot = scene.shot
         photo = self._photo(sh.photo, sh.crop, False)
         x0, y0, x1, y1 = photo.crop
         focus = sh.focus if sh.focus is not None else ((x0 + x1) / 2, (y0 + y1) / 2)
@@ -236,15 +371,27 @@ class Renderer:
         if hit is None:
             hit = frame_background(self.cv, photo)
             self._bgs[key] = hit
+        self._note("bgs", key)
+        return hit
+
+    def _sprite(self, caption: str) -> torch.Tensor:
+        hit = self._captions.get(caption)
+        if hit is None:
+            premul, _size = raster_caption(
+                caption, font_css=None, scale=float(self.cv.k), cache_dir=self._dir / "build" / "text",
+            )
+            hit = _straight(premul).to(self.cv.device)
+            self._captions[caption] = hit
         return hit
 
     def _frame_card(self, stem: str, photo: Photo, caption: str | None):
         key = (stem, photo.crop, caption)
         hit = self._cards.get(key)
         if hit is None:
-            sprite = self._captions.get(caption) if caption else None
+            sprite = self._sprite(caption) if caption else None
             hit = frame_card(self.cv, photo, caption, sprite)
             self._cards[key] = hit
+        self._note("cards", key)
         return hit
 
     def _layer(self, sh, stem: str, photo: Photo, fx: float, fy: float, z: float, px: float, py: float,
@@ -293,6 +440,7 @@ class Renderer:
         return base
 
     def _m2_still(self, index: int, span: tuple[int, int] | None, t: float) -> torch.Tensor:
+        self._shot = index
         shot = self.tl.shots[index]
         sh = shot.spec
         # Drift and a frame card own the framing. Tone, morph, or pulse alone keep M1 focus/zoom.
@@ -372,8 +520,7 @@ class Renderer:
         if blocks or subs:
             self._rasters = RasterSet(lines, sub_r)
         for caption in captions:
-            premul, _size = raster_caption(caption, font_css=None, scale=scale, cache_dir=cache)
-            self._captions[caption] = _straight(premul).to(device)
+            self._sprite(caption)
         self._rasters_ready = True
 
     def _overlay(self, f: int):

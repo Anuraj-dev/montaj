@@ -15,7 +15,7 @@ from montaj.project import file_sha, find_clip, find_photo, segment_hash
 from montaj.render.canvas import Canvas
 from montaj.render.frame import Renderer
 from montaj.spec import Spec, _dur_frames, load_spec
-from montaj.timeline import Segment, resolve
+from montaj.timeline import Clip, Segment, Still, Trans, Wall, resolve
 
 # Bump when a pixel changes. Concatenated onto __version__ inside every segment hash.
 RENDER_REV = "+4"  # duration hash, photo/clip shas, sine fades, zoom, clip tail, warm fade
@@ -92,6 +92,22 @@ def _u8(frame: torch.Tensor):
     return (frame * 255.0 + 0.5).byte().permute(1, 2, 0).contiguous().cpu().numpy()
 
 
+def _shots_in(scene) -> set[int]:
+    if isinstance(scene, (Still, Wall, Clip)):
+        return {scene.shot}
+    if isinstance(scene, Trans):
+        return _shots_in(scene.a) | _shots_in(scene.b)
+    return set()
+
+
+def _segment_shots(tl, seg: Segment) -> frozenset[int]:
+    """Shots this segment's frames can read: its own shot, plus transition neighbours."""
+    shots = {seg.index}
+    for f in range(seg.start, seg.end):
+        shots |= _shots_in(tl.plan(f).scene)
+    return frozenset(shots)
+
+
 def _encode_segment(renderer: Renderer, seg: Segment, dest: Path, fps: float, log: Path) -> None:
     """Encode to a per-attempt temp file, then `os.replace` it onto the cache file.
 
@@ -145,6 +161,8 @@ def render(spec_path: Path, mode: str = "preview") -> RenderResult:
             renderer = Renderer(tl, spec_dir, cv)
             try:
                 for seg in tl.segments:
+                    # A cache hit still has to let the previous segment's wall go.
+                    renderer.begin_segment(_segment_shots(tl, seg))
                     digest = segment_hash(tl, seg, shas, version)
                     dest = seg_dir / f"{digest}.mp4"
                     chunks.append(dest)
