@@ -15,7 +15,7 @@ import torch
 from PIL import Image, ImageDraw
 
 from montaj.render.canvas import Canvas
-from montaj.render.clip import _CACHE_FRAMES, ClipSource
+from montaj.render.clip import _CACHE_FRAMES, ClipSource, window_key
 from montaj.render.core import Photo
 from montaj.render.frame import Renderer
 from montaj.spec import load_spec
@@ -70,7 +70,7 @@ def _assert_uint8_cpu(frames: list[torch.Tensor]) -> None:
         assert tensor.device.type == "cpu"
 
 
-def test_clip_longer_than_the_cap_keeps_only_cap_frames(tmp_path: Path, monkeypatch) -> None:
+def test_clip_longer_than_the_cap_keeps_only_cap_frames(tmp_path: Path) -> None:
     n = _CACHE_FRAMES + 12
     w, h = 32, 24
     src = tmp_path / "long.mkv"
@@ -80,16 +80,6 @@ def test_clip_longer_than_the_cap_keeps_only_cap_frames(tmp_path: Path, monkeypa
     )
     ref = _oracle_frames(src, n, w, h)
     assert len(ref) == n and not torch.equal(ref[0], ref[_CACHE_FRAMES])
-
-    decoded: list[int] = []
-    orig = ClipSource._decode
-
-    def spy(self, clip_in, w, h, nframes):
-        got = orig(self, clip_in, w, h, nframes)
-        decoded.append(len(got))
-        return got
-
-    monkeypatch.setattr(ClipSource, "_decode", spy)
 
     jumped = ClipSource(src, 30)
     last = jumped.frame(float(n - 1), 0.0, 0.0, w, h, nframes=n)
@@ -116,7 +106,6 @@ def test_clip_longer_than_the_cap_keeps_only_cap_frames(tmp_path: Path, monkeypa
     for i, frame in enumerate(got):
         assert frame.dtype == torch.uint8 and torch.equal(frame, ref[i])
     assert len(_resident(whole)) <= _CACHE_FRAMES
-    assert all(k <= _CACHE_FRAMES for k in decoded)
 
 
 def test_two_clip_windows_share_one_frame_budget(tmp_path: Path, monkeypatch) -> None:
@@ -392,3 +381,193 @@ def test_segment_lifetime_releases_a_wall_and_reloads_on_the_next_use(tmp_path: 
     assert inits["n"] > len(seen)
     assert captions["n"] >= 2
     assert opens["n"] == 2
+
+
+def _live_decoders(renderer: Renderer) -> int:
+    """ffmpeg processes still running inside this renderer's clip windows."""
+    n = 0
+    for stem in list(renderer._clips):
+        src = renderer._clips.get(stem)
+        if src is None:
+            continue
+        for entry in src._cache.values():
+            proc = getattr(entry, "_proc", None)
+            if proc is not None and proc.poll() is None:
+                n += 1
+    return n
+
+
+def _needed_window_keys(renderer: Renderer, shots) -> dict[str, set[tuple]]:
+    needed: dict[str, set[tuple]] = {}
+    for index in shots:
+        req = renderer._clip_request(index)
+        if req is None:
+            continue
+        stem, clip_in, nframes = req
+        needed.setdefault(stem, set()).add(window_key(clip_in, renderer.cv.W, renderer.cv.H, nframes))
+    return needed
+
+
+def _inactive_windows(renderer: Renderer, shots) -> list[tuple]:
+    """Windows this segment will not read: `(stem, key, proc, was_live)`."""
+    needed = _needed_window_keys(renderer, shots)
+    found = []
+    for stem in list(renderer._clips):
+        src = renderer._clips.get(stem)
+        if src is None:
+            continue
+        for key, entry in list(src._cache.items()):
+            if key in needed.get(stem, ()):
+                continue
+            proc = getattr(entry, "_proc", None)
+            was_live = proc is not None and proc.poll() is None
+            found.append((stem, key, proc, was_live))
+    return found
+
+
+def _assert_windows_closed(renderer: Renderer, inactive: list[tuple]) -> None:
+    for stem, key, proc, _was_live in inactive:
+        src = renderer._clips.get(stem) if stem in renderer._clips else None
+        assert src is None or key not in src._cache, (stem, key)
+        if proc is not None:
+            assert proc.poll() is not None, (stem, key)
+
+
+def _reuse_film(tmp: Path) -> Path:
+    """One stem, a different clip_in on every shot.
+
+    The fade is as long as the hold, so a rendered segment does not finish the incoming
+    window. The unread tail is longer than a pipe buffer: ffmpeg stays blocked instead
+    of exiting after the few frames the segment actually shows.
+    """
+    assets = tmp / "assets"
+    assets.mkdir(parents=True)
+    _ffmpeg(
+        "-v", "error", "-y", "-f", "lavfi", "-i", "testsrc=size=32x24:rate=30:duration=8",
+        "-frames:v", "240", "-c:v", "ffv1", "-pix_fmt", "rgb24", str(assets / "reel.mkv"),
+    )
+    shots = []
+    for i in range(8):
+        inn = "" if i == 0 else ", in: {type: fade, dur: 20f}"
+        shots.append(f"  - {{clip: reel, hold: 20f, clip_in: {i * 0.2:.1f}s{inn}}}")
+    path = tmp / "montaj.yaml"
+    path.write_text(
+        "video:\n  size: 32x48\n  fps: 30\n  look: warm-film\n"
+        "  background: \"#102030\"\n  motion_blur: 1\n"
+        "assets: assets\nshots:\n" + "\n".join(shots) + "\n"
+    )
+    return path
+
+
+def test_skipped_segments_close_clip_readers_the_segment_does_not_need(tmp_path: Path, monkeypatch) -> None:
+    """Cache hits still name their shots. Windows of one stem that those shots do not read are closed."""
+    # Above the frames one segment reads, below the decoded window, so readers stream and stay open.
+    monkeypatch.setattr("montaj.render.clip._CACHE_FRAMES", 8)
+    path = _reuse_film(tmp_path)
+    tl, renderer = _open(path, _TIGHT)
+    from montaj.pipeline import _segment_shots
+
+    assert len({shot.spec.clip_in for shot in tl.shots}) == 8
+    assert all(shot.spec.clip == "reel" for shot in tl.shots)
+    saw_two = False
+    closed_on_skip = False
+    for seg in tl.segments:
+        shots = _segment_shots(tl, seg)
+        inactive = _inactive_windows(renderer, shots)
+        # Odd segments are cache hits: prepare, then do not render.
+        if seg.index % 2 == 1 and inactive:
+            closed_on_skip = True
+        renderer.begin_segment(shots)
+        _assert_windows_closed(renderer, inactive)
+        if seg.index % 2 == 0:
+            for f in range(seg.start, seg.end):
+                renderer.frame(f)
+                live = _live_decoders(renderer)
+                assert live <= 2, (seg.index, f, live)
+                saw_two = saw_two or live == 2
+        live = _live_decoders(renderer)
+        assert live <= 2, (seg.index, live)
+        saw_two = saw_two or live == 2
+    assert saw_two
+    assert closed_on_skip
+    # The last skipped segment keeps its own live reader. Preparing an earlier
+    # segment that does not read it must reap that process. A live cap of two
+    # would leave this single reader alone.
+    shots = _segment_shots(tl, tl.segments[0])
+    inactive = _inactive_windows(renderer, shots)
+    assert any(was_live for _stem, _key, _proc, was_live in inactive)
+    renderer.begin_segment(shots)
+    _assert_windows_closed(renderer, inactive)
+
+
+def _render_some(renderer: Renderer, tl, segments, into: dict[int, torch.Tensor]) -> None:
+    from montaj.pipeline import _segment_shots
+
+    for seg in segments:
+        renderer.begin_segment(_segment_shots(tl, seg))
+        for f in range(seg.start, seg.end):
+            into[f] = renderer.frame(f)
+
+
+def _play(renderer: Renderer, tl, steps: list[tuple[int, bool]], into: dict[int, torch.Tensor]) -> None:
+    """`steps` is `(segment index, render)`. A false step only prepares the segment."""
+    from montaj.pipeline import _segment_shots
+
+    for index, render in steps:
+        seg = tl.segments[index]
+        renderer.begin_segment(_segment_shots(tl, seg))
+        if not render:
+            continue
+        for f in range(seg.start, seg.end):
+            into[f] = renderer.frame(f)
+
+
+def test_shuffled_and_skipped_segments_match_a_chronological_render(tmp_path: Path, monkeypatch) -> None:
+    """Segment order and skipped prepares do not change pixels. A wall and a same-source fade are in the mix."""
+    path = _lifetime_film(tmp_path)
+    # The reference keeps every cache. The renders under test use the tight ones.
+    monkeypatch.setattr("montaj.render.clip._CACHE_FRAMES", 10_000)
+    wide_caps = {name: 10_000 for name in _TIGHT}
+    tl, reference = _open(path, wide_caps)
+    assert any(shot.kind == "wall" for shot in tl.shots)
+    clip_shots = [shot for shot in tl.shots if shot.kind == "clip"]
+    assert len(clip_shots) == 2 and clip_shots[0].spec.clip == clip_shots[1].spec.clip
+    assert clip_shots[1].spec.in_ is not None and clip_shots[1].spec.in_.type == "fade"
+    ref = {i: frame for i, frame in enumerate(_render_segments(reference, tl, prepare=True))}
+
+    monkeypatch.setattr("montaj.render.clip._CACHE_FRAMES", 8)
+    order = [5, 1, 4, 0, 3, 2]
+    assert sorted(order) == list(range(len(tl.segments)))
+    _, shuffled = _open(path, _TIGHT)
+    got: dict[int, torch.Tensor] = {}
+    _render_some(shuffled, tl, [tl.segments[i] for i in order], got)
+    for f, frame in ref.items():
+        assert torch.equal(got[f], frame), f
+
+    # Render A, prepare B without rendering it, then render C. Skips are interspersed.
+    steps = [
+        (0, True),
+        (1, False),
+        (2, True),
+        (4, True),
+        (5, False),
+        (3, True),
+        (5, True),
+        (1, True),
+    ]
+    rendered = [index for index, render in steps if render]
+    assert sorted(rendered) == list(range(len(tl.segments)))
+    saw_skip = False
+    render_after_skip = False
+    for _index, render in steps:
+        if not render:
+            saw_skip = True
+        elif saw_skip:
+            render_after_skip = True
+    assert saw_skip and render_after_skip
+    _, mixed = _open(path, _TIGHT)
+    again: dict[int, torch.Tensor] = {}
+    _play(mixed, tl, steps, again)
+    assert len(again) == len(ref)
+    for f, frame in ref.items():
+        assert torch.equal(again[f], frame), f

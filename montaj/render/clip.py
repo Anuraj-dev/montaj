@@ -1,16 +1,15 @@
-"""Video clips. One lazy ffmpeg decode per shot window. Contract: cover, centred, no drift.
+"""Video clips. One forward ffmpeg reader per shot window.
 
 The decoded span is `[clip_in, clip_in + hold)` — pass `hold` in seconds or `nframes`.
 Frames stay uint8 on CPU. `frame` converts that one frame to float on the caller's device.
 `clip_in` is `-ss` before `-i`, so decoded frame 0 is that far into the file.
 Timeline frame `t` is `floor(t − shot_start)`, clamped to the window.
 
-A hold longer than `_CACHE_FRAMES` is read forward from that same seek. The source
-keeps at most that many uint8 frames across every reader; a fade trims the oldest
-frame of the fuller window so both stay open. A hold that would fit on its own is
-streamed the same way when another reader already fills the budget. An index that
-was trimmed is decoded again from the same seek. `frames()` still returns the whole
-hold — the caller owns that tuple.
+The source keeps at most `_CACHE_FRAMES` uint8 frames and `_MAX_LIVE` ffmpeg processes.
+A fade trims the oldest frame of the fuller window so both stay open. A finished hold
+that still has every frame is dropped whole, oldest first, so a stack of short holds
+keeps the newest. An index that was trimmed is decoded again from the same seek.
+`frames()` returns a caller-owned tuple; the source keeps only the reader.
 """
 from __future__ import annotations
 
@@ -26,10 +25,14 @@ import numpy as np
 import torch
 
 FFMPEG = os.environ.get("MONTAJ_FFMPEG", "ffmpeg")
-# Resident decoded frames across every window this source has open. A single
-# hold longer than this is not kept whole; the reader retains only the tail
-# it still needs.
+# Resident decoded frames across every window this source has open.
 _CACHE_FRAMES = 96
+# One frame composites two shots. A third live reader is closed.
+_MAX_LIVE = 2
+
+
+def window_key(clip_in: float, w: int, h: int, count: int) -> tuple:
+    return (round(float(clip_in), 6), int(w), int(h), int(count))
 
 
 def _read_one(stdout, w: int, h: int) -> torch.Tensor | None:
@@ -67,6 +70,27 @@ class _ClipWindow:
     def __iter__(self):
         return iter(self._frames.values())
 
+    def __getitem__(self, index: int) -> torch.Tensor:
+        return self._frames[index]
+
+    def live(self) -> bool:
+        proc = self._proc
+        return proc is not None and proc.poll() is None
+
+    def complete(self) -> bool:
+        """Finished, and every decoded frame is still here, including frame 0.
+
+        Those holds leave the cache as a unit. A trimmed tail is not one of them:
+        the fade still needs the frames it just read.
+        """
+        produced = self._produced
+        return (
+            produced is not None
+            and produced > 0
+            and len(self._frames) == produced
+            and 0 in self._frames
+        )
+
     def close(self) -> None:
         self._frames.clear()
         self._close_proc(check=False)
@@ -89,6 +113,9 @@ class _ClipWindow:
         self._filled = 0
         self._produced = None
         self._proc, self._err, self._thread = self._spawn()
+        source = self._source()
+        if source is not None:
+            source._bound_live(self)
 
     def _close_proc(self, check: bool) -> None:
         proc = self._proc
@@ -166,13 +193,11 @@ class ClipSource:
         self.path = Path(path)
         self.fps = float(fps)
         self._cap = _CACHE_FRAMES
-        self._cache: OrderedDict[tuple, tuple[torch.Tensor, ...] | _ClipWindow] = OrderedDict()
+        self._cache: OrderedDict[tuple, _ClipWindow] = OrderedDict()
 
     def close(self) -> None:
         for entry in list(self._cache.values()):
-            closer = getattr(entry, "close", None)
-            if callable(closer):
-                closer()
+            entry.close()
         self._cache.clear()
 
     def __del__(self) -> None:
@@ -192,23 +217,20 @@ class ClipSource:
         return count
 
     def _key(self, clip_in: float, w: int, h: int, count: int) -> tuple:
-        return (round(float(clip_in), 6), int(w), int(h), count)
+        return window_key(clip_in, w, h, count)
+
+    def keep_windows(self, keys) -> None:
+        """Close readers whose window this segment will not read."""
+        wanted = set(keys)
+        for key in [key for key in self._cache if key not in wanted]:
+            self._cache.pop(key).close()
+        self._bound_live(None)
 
     def frames(self, clip_in: float, w: int, h: int, nframes: int | None = None, *,
                hold: float | None = None) -> tuple[torch.Tensor, ...]:
-        """uint8 CPU tensors (3, H, W) for the hold. A hold within the cap is cached whole."""
+        """uint8 CPU tensors (3, H, W) for the hold. The caller owns the tuple."""
         count = self._count(nframes, hold)
         key = self._key(clip_in, w, h, count)
-        if count <= self._cap:
-            hit = self._cache.get(key)
-            if isinstance(hit, tuple):
-                self._cache.move_to_end(key)
-                return hit
-            decoded = self._decode(float(clip_in), int(w), int(h), count)
-            self._cache[key] = decoded
-            self._cache.move_to_end(key)
-            self._trim()
-            return decoded
         window = self._window(key, float(clip_in), int(w), int(h), count)
         out: list[torch.Tensor] = []
         for i in range(count):
@@ -237,35 +259,39 @@ class ClipSource:
     def _resident_count(self) -> int:
         return sum(len(entry) for entry in self._cache.values())
 
-    def _release(self, old) -> None:
-        closer = getattr(old, "close", None)
-        if callable(closer):
-            closer()
+    def _bound_live(self, current: _ClipWindow | None) -> None:
+        while True:
+            live = [key for key, entry in self._cache.items() if entry.live()]
+            if len(live) <= _MAX_LIVE:
+                return
+            victim = next((key for key in live if self._cache[key] is not current), None)
+            if victim is None:
+                return
+            self._cache.pop(victim).close()
 
     def _trim(self) -> None:
-        """Share `_cap` across windows by dropping oldest frames, not whole readers.
+        """Share `_cap` across windows.
 
-        A short hold is one tuple. Those still leave as a unit, oldest first, so a
-        stack of small holds keeps the newest. Two long windows of one fade each
-        keep the frames they just read.
+        A finished hold that still contains every frame, including frame 0, leaves
+        whole — except the one just used, which a fade may still be reading. Live
+        windows give up their oldest frame instead, so two readers of one source
+        each keep the frames they just decoded.
         """
         while self._resident_count() > self._cap:
-            windows = [entry for entry in self._cache.values()
-                       if isinstance(entry, _ClipWindow) and len(entry) > 1]
+            newest = next(reversed(self._cache)) if self._cache else None
+            victim = next(
+                (key for key, entry in self._cache.items() if key != newest and entry.complete()),
+                None,
+            )
+            if victim is not None:
+                self._cache.pop(victim).close()
+                continue
+            windows = [entry for entry in self._cache.values() if len(entry) > 1]
             if windows:
                 max(windows, key=len).drop_oldest()
                 continue
-            dropped = False
-            for key, entry in list(self._cache.items()):
-                if isinstance(entry, tuple):
-                    self._cache.pop(key)
-                    dropped = True
-                    break
-            if dropped:
-                continue
             if len(self._cache) > 1:
-                _key, old = self._cache.popitem(last=False)
-                self._release(old)
+                self._cache.popitem(last=False)[1].close()
                 continue
             break
 
@@ -286,39 +312,6 @@ class ClipSource:
         thread.start()
         return proc, err, thread
 
-    def _decode(self, clip_in: float, w: int, h: int, nframes: int) -> tuple[torch.Tensor, ...]:
-        """Read at most `nframes` from the pipe. `-frames:v` stops ffmpeg at the hold."""
-        proc, err, thread = self._spawn(clip_in, w, h, nframes)
-        frames: list[torch.Tensor] = []
-        try:
-            assert proc.stdout is not None
-            while len(frames) < nframes:
-                frame = _read_one(proc.stdout, w, h)
-                if frame is None:
-                    break
-                frames.append(frame)
-        finally:
-            if proc.stdout is not None and not proc.stdout.closed:
-                proc.stdout.close()
-            code = proc.wait()
-            thread.join(timeout=5)
-        if code != 0:
-            tail = b"".join(err).decode(errors="replace")[-400:]
-            raise RuntimeError(f"ffmpeg clip decode failed: {tail}")
-        if not frames:
-            raise RuntimeError(f"clip {self.path} decoded to 0 frames")
-        return tuple(frames)
-
-    def _stream(self, count: int, key: tuple) -> bool:
-        """A hold that fits the cap is still streamed when caching it whole would push another reader out."""
-        cached = self._cache.get(key)
-        if isinstance(cached, (tuple, _ClipWindow)):
-            return isinstance(cached, _ClipWindow)
-        if count > self._cap:
-            return True
-        resident = self._resident_count()
-        return resident > 0 and resident + count > self._cap
-
     def frame(self, t: float, shot_start: float, clip_in: float, w: int, h: int,
               nframes: int | None = None, *, hold: float | None = None, device="cpu") -> torch.Tensor:
         """`floor(t − shot_start)` clamped to the hold, float on `device`."""
@@ -326,14 +319,10 @@ class ClipSource:
         key = self._key(clip_in, w, h, count)
         i = math.floor(t - shot_start)
         i = max(0, min(i, count - 1))
-        if self._stream(count, key):
-            window = self._window(key, float(clip_in), int(w), int(h), count)
-            self._cache.move_to_end(key)
-            tensor = window.at(i)
-            self._cache.move_to_end(key)
-            self._trim()
-            return tensor.to(device=device).to(dtype=torch.float32) / 255
-        frames = self.frames(clip_in, w, h, nframes=count)
-        i = max(0, min(i, len(frames) - 1))
+        window = self._window(key, float(clip_in), int(w), int(h), count)
+        self._cache.move_to_end(key)
+        tensor = window.at(i)
+        self._cache.move_to_end(key)
+        self._trim()
         # uint8 crosses to the device; the float conversion happens there.
-        return frames[i].to(device=device).to(dtype=torch.float32) / 255
+        return tensor.to(device=device).to(dtype=torch.float32) / 255
