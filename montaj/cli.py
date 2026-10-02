@@ -286,13 +286,22 @@ def _cmd_render(ns: argparse.Namespace, root: Path) -> list[str]:
     ]
 
 
+def _seconds(raw: str) -> float:
+    """A `--at` time: `4.5` or `4.5s`, like a spec duration in seconds."""
+    text = raw.strip()
+    try:
+        return float(text[:-1] if text.endswith("s") else text)
+    except ValueError:
+        raise ValueError(f"--at {text!r}: use seconds like 4.5 or 4.5s") from None
+
+
 def _cmd_sheet(ns: argparse.Namespace, root: Path) -> list[str]:
     video = _video(root, ns.video)
     log = root / "build" / "sheet.log"
     info = probe(video, log=log)
     at = None
     if ns.at:
-        at = [float(part) for part in str(ns.at).split(",") if part.strip()]
+        at = [_seconds(part) for part in str(ns.at).split(",") if part.strip()]
     # Pass the times in, so sheet does not probe into the process cwd's build/.
     # sheet() keeps at most MAX_TILES. Count the same list it will draw.
     times = pick_times(video, at, n=MAX_TILES, info=info)[:MAX_TILES]

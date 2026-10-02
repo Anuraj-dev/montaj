@@ -401,6 +401,17 @@ def test_sheet_at_caps_count_at_twelve(tmp_path: Path, capsys: pytest.CaptureFix
     assert out.strip() == "OK build/sheet.jpg 12 frames"
 
 
+def test_sheet_at_accepts_seconds_suffix_and_rejects_junk(tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    proj = tmp_path / "proj"
+    _clip(proj / "out" / "preview.mp4", black=False)
+    code, out, err = _run(["-C", str(proj), "sheet", "--at", "0.1s, 0.2"], capsys)
+    assert code == 0 and err == "", out
+    assert out.strip() == "OK build/sheet.jpg 2 frames"
+    code, out, _ = _run(["-C", str(proj), "sheet", "--at", "4b"], capsys)
+    assert code == 1 and out.startswith("ERR sheet: --at '4b'"), out
+
+
 def test_intended_freeze_includes_a_blank_hold(tmp_path: Path) -> None:
     proj = _project(
         tmp_path,
