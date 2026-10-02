@@ -131,7 +131,7 @@ def render(spec_path: Path, mode: str = "preview") -> RenderResult:
         loudnorm = spec.audio.loudnorm
         if spec.audio.fade_out:
             frames = _dur_frames(
-                spec.audio.fade_out, spec.video.fps, spec.video.bpm, "audio.fade_out", [],
+                spec.audio.fade_out, spec.video.fps, tl.spec.video.bpm, "audio.fade_out", [],
             )
             fade_s = 0.0 if frames is None else frames / float(spec.video.fps)
 
