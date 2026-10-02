@@ -1,10 +1,11 @@
 # Spec reference
 
-Photo fields (`crop`, `focus`, swirl `center`, wall `at`) are source-image pixels. `zoom`, the wall grid and leak size are design pixels of a 1080-wide frame, so a half-size preview matches the final framing. Durations are `22f` (frames), `4b` (beats at `video.bpm`) or `1.5s`; a bare number is an error. A time expression is a duration from film start, or `<marker>[±duration]` (`ch1`, `ch1+2.4s`, `pre2-6f`). Marker names are `[a-z][a-z0-9_]*`. Marker values may be a duration, `word:<i>` (start of word `i` in `audio.markers`), or another marker plus an optional duration offset; cycles are an error.
+Photo fields (`crop`, `focus`, swirl `center`, wall `at`) are source-image pixels. `zoom`, the wall grid and leak size are design pixels of a 1080-wide frame, so a half-size preview matches the final framing. Durations are `22f` (frames), `4b` (beats on the grid) or `1.5s`; a bare number is an error. The beat grid is `video.bpm` plus a phase `beat0` (see below). A plain beat time (`at: 8b`, `until: 16b`, a marker defined as `8b`) means `beat0 + 8` beats; durations (`hold`, `dur`, `stagger`, `in.dur`) and offsets (`ch1+2b`) are spans. A time expression is a duration from film start, or `<marker>[±duration]` (`ch1`, `ch1+2.4s`, `pre2-6f`). Marker names are `[a-z][a-z0-9_]*`. Marker values may be a duration, `word:<i>` (start of word `i` in `audio.markers`), or another marker plus an optional duration offset; cycles are an error.
 
 - `video.size` — string, required — output `WxH`, both numbers even. Preview halves each side, rounded down to even.
 - `video.fps` — integer, required — frames per second.
-- `video.bpm` — number, default none — beats per minute. Required when any duration uses `b`.
+- `video.bpm` — number, default none — beats per minute. If omitted, `audio.markers` `bpm` sets the grid (beats follow the analysed song). Needed, one way or the other, when any duration uses `b`.
+- `video.beat0` — duration (`f` or `s`), default see text — time of the first beat. Default: `0s` when `video.bpm` is set; else `beats[0]` from `audio.markers`.
 - `video.look` — `warm-film` or `golden-film`, required — finish preset applied to every frame. See looks below.
 - `video.background` — `#rrggbb`, default `#000000` — colour that shows through a fade from or to nothing.
 - `video.intro` — mapping, default none — opening treatment on the first frames.
@@ -19,7 +20,7 @@ Photo fields (`crop`, `focus`, swirl `center`, wall `at`) are source-image pixel
 - `shots[].photo` — string, photo or wall or clip — stem of the still. An integer in the YAML is read as a string. Mutually exclusive with `wall` and `clip`.
 - `shots[].clip` — string, photo or wall or clip — stem of a video file in `assets/` (`mp4`, `mov`, `webm`, `mkv`). Mutually exclusive with `photo` and `wall`.
 - `shots[].clip_in` — duration, default `0s` — source offset into the clip.
-- `shots[].hold` — duration, hold or until — how long this shot is on screen. Exactly one of `hold` or `until`.
+- `shots[].hold` — duration, hold or until — how long this shot is on screen. Exactly one of `hold` or `until`. A whole-beat hold (`4b`) ends on a beat of the grid (moving forward if the shot started off-beat), and beat holds never drift from rounding.
 - `shots[].until` — time expression, hold or until — the shot ends at this time from film start. Must fall after the shot's start.
 - `shots[].drift` — mapping, default none — Ken Burns zoom/pan on a photo. Needs `photo`. Mutually exclusive with `zoom`.
 - `shots[].drift.zoom` — `[from, to]`, default `[1, 1]` — scale over the shot's visible span.
@@ -36,7 +37,7 @@ Photo fields (`crop`, `focus`, swirl `center`, wall `at`) are source-image pixel
 - `shots[].morph.at` — duration, required with morph — when the morph starts, from this shot's start.
 - `shots[].morph.dur` — duration, required with morph — how long the circle takes to open.
 - `shots[].morph.center` — `[x, y]`, default none — screen fraction where the circle is centred.
-- `shots[].pulse` — `heartbeat`, default none — beat-locked scale pulse on `video.bpm`, phased from the shot start. Needs `photo` and `video.bpm`.
+- `shots[].pulse` — `heartbeat`, default none — beat-locked scale pulse on the grid tempo, phased from the shot start. Needs `photo` and a grid (`video.bpm` or `audio.markers`).
 - `shots[].blank` — boolean, default false — show only `video.background`. Mutually exclusive with `photo`, `wall` and `clip`. Holds and fades like any other shot.
 - `shots[].crop` — `[x0, y0, x1, y1]`, default the full image — the part of the photo that is shown.
 - `shots[].focus` — `[x, y]`, default the crop centre — the photo point placed at the screen centre.
@@ -82,8 +83,8 @@ Photo fields (`crop`, `focus`, swirl `center`, wall `at`) are source-image pixel
 - `fx[].dir` — `1` or `-1`, required with a leak — which side the leak comes in from. Not used on a flash, hit or burst.
 - `markers` — mapping, default none — name to a time expression from film start, or `word:<i>`.
 - `audio` — mapping, default none — soundtrack. No audio block is a silent film.
-- `audio.track` — string, required with audio — wav/path relative to the spec file.
-- `audio.markers` — string, default none — JSON `{words: [{i, w, s, e}, …]}` relative to the spec file. Needed for `word:` markers.
+- `audio.track` — string, required with audio — wav/path relative to the spec file: their track, a `music gen` candidate, or `music/song.wav` from `montaj music compose`.
+- `audio.markers` — string, default none — JSON `{bpm, beats: [s…], words: [{i, w, s, e}, …]}` from `montaj music analyze`, relative to the spec file. Needed for `word:` markers; supplies the beat grid when `video.bpm` is omitted. `bpm` must be > 0 and `beats` ≥ 0.
 - `audio.fade_out` — duration, default `0s` — afade at the end of the film.
 - `audio.loudnorm` — boolean, default true — loudnorm `-14` LUFS, TP `-1.5`, LRA `11`.
 - `text` — list, default none — overlay blocks. Each line reveals unit by unit.

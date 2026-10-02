@@ -14,14 +14,15 @@ check and review round after that is a `montaj` command that costs no tokens. Ru
 - Look only at Montaj contact sheets (`build/*.jpg`), at most 2 images per iteration. The photos stay on disk.
 - Read `~/Anuraj-dev/montaj/docs/SPEC-REFERENCE.md` (every spec field, one line each) and one recipe. Engine
   source is out of scope: on an engine bug, report the command and its `ERR` line to the user and stop.
-- Films up to 60 s render in under a minute: run `render` and `check` in the foreground. Longer finals and
-  `music gen` take minutes: run them in the background and wait for the notification.
+- A 30 s film renders in under a minute (preview ~10–30 s, final ~40 s): run `render` and `check` in the
+  foreground. Finals of several minutes and `music gen` take minutes: run them in the background and wait for
+  the notification.
 
 ## Steps
 
 1. **Brief.** `montaj taste` prints the user's standing preferences; follow them. Then ask one round of
    questions, all at once: length, aspect, who it is for, on-screen text, motion style, music (none / their
-   track / generate). Done when each question has an answer or a default you stated.
+   track / a generated song / music you compose). Done when each question has an answer or a default you stated.
 
 2. **Project.** `montaj new <project> --recipe <recipe> --photos <folder>`, then look at
    `<project>/build/ingest-sheet.jpg` once. Recipes (`~/Anuraj-dev/montaj/recipes/`):
@@ -31,23 +32,32 @@ check and review round after that is a `montaj` command that costs no tokens. Ru
    `frame:` (polaroid card) or aim `focus` at the face. Done when you can name each stem's content in a few words.
 
 3. **Music** (skip for a silent film).
-   - Their track: copy it into `<project>/music/`, then `montaj music analyze music/<file>.wav` →
-     `music/markers.json` (beats; words with times).
-   - Generate: write `music/lyrics.txt`, then `montaj music gen --caption "<style>" --lyrics music/lyrics.txt
-     --bpm <n> --duration <len>s --lang <code> --n 2` (minutes, background). `--lang` defaults to `hi`; set it
-     to the lyrics' language (`en`, `hi`, …). The user picks a candidate by ear; analyze it.
-   Done when `markers.json` exists and you have read the analyze output.
+   - Their track: copy it into `<project>/music/`, then `montaj music analyze music/<file>.wav --lang <code>`
+     → `music/markers.json` (beats; words with times). Analysis defaults to Hindi (`hi`); an instrumental
+     takes `--no-words` (seconds, no GPU).
+   - Generate a song (ACE-Step): write `music/lyrics.txt`, then `montaj music gen --caption "<style>" --lyrics
+     music/lyrics.txt --bpm <n> --duration <len>s --lang <code> --n 2` (minutes, background). `--lang` defaults
+     to `hi`. The user picks a candidate by ear; analyze it with the same `--lang`.
+   - Compose it yourself: write `music/compose.py` (numpy only; it writes a wav to `sys.argv[1]`), run
+     `montaj music compose music/compose.py` → `music/song.wav`, and read the `OK` line (length, peak, LUFS)
+     since you can't listen. `~/Anuraj-dev/montaj/recipes/music/compose-example.py` is a starting point: keep
+     what helps, write your own arrangement. Picture and sound share your tempo: start the first downbeat at
+     0 s and set the same `video.bpm`.
+   The analyze `OK` line gives `bpm`, `beat0` (first beat) and the first sung word's time. Done when the song
+   exists and you know its tempo.
 
 4. **Spec.** Rewrite `montaj.yaml` from the recipe: keep its look, transitions and timing grammar; replace the
    shots, text and markers.
-   - Cuts land on the beat grid (`4b`, `8b`) or on markers (`until: v3`, `word:12`).
+   - Cuts land on the beat grid (`4b`, `8b`) or on markers (`until: chorus`). With `audio.markers` set and
+     no `video.bpm`, beats follow the analysed song (its tempo and first beat). A word time is a marker:
+     `markers: {chorus: "word:12"}`, then `until: chorus`.
    - Order shots as an arc: calm open, build, peak, quiet end.
    - Text is short and centred; one idea per card. Width budget on a 1080-wide frame: about 24 characters of
      `script` at `size: 100`; scale `size` down in proportion for longer lines.
    - Text reads best on a calm backdrop: a dark or plain moment, a dimmed photo or its own card, not a face. A
      closing title usually holds to the last frame.
    - Subtitles follow the song: start them at the first sung word in `markers.json`; an instrumental intro
-     can carry a title or no text.
+     can carry a title or no text. `subs[].size` / `color` lift them off a busy backdrop.
    - Framing: `focus: [x, y]` (source px) puts a face at the screen centre; `crop` trims.
    `montaj validate` and fix every `ERR` line. Done on `OK montaj.yaml …`.
 

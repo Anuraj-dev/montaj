@@ -207,18 +207,28 @@ slot. warm-film: overlay runs last (M1 output unchanged when there is no text). 
 ## Audio (montaj/audio/, montaj/config.py)
 - `~/.config/montaj/config.toml` (env `MONTAJ_CONFIG` overrides the path): `ace_step_dir`, `ace_python` +
   `ace_site_packages` (ACE-Step runs as `PYTHONPATH=<ace_site_packages> <ace_python>`, the dangling-venv
-  trick), `whisper_python` (a python with `faster_whisper`). `montaj.config.load() -> Config`; missing keys → `ERR config: <key> missing (set it in
-  ~/.config/montaj/config.toml)`. `doctor` reports each.
+  trick), `whisper_python` (a python with `faster_whisper`). Each command demands only the keys it uses (`gen`: the
+  three ACE keys; `analyze`: `whisper_python`; `analyze --no-words` and `compose`: none); a missing key →
+  `ERR … config: <key> missing (set it in ~/.config/montaj/config.toml)`. `doctor` reports each.
 - `montaj music gen --caption TEXT --lyrics FILE [--bpm 76] [--key "D major"] [--lang hi] [--duration 165s] [--n 3]`
   → `music/cand-<seed>.wav` + `.json` (params + seed). Runs `montaj/audio/_ace_worker.py` under `ace_python`
-  with offload_to_cpu + offload_dit_to_cpu. Result: one line per candidate, then `OK music gen <n> candidates`.
+  with offload_to_cpu + offload_dit_to_cpu. Result: one line per candidate with its measured length, then
+  `OK music gen <n> candidates <dur> lang=<l> bpm=<b> key=<k>`.
+- `montaj music compose SCRIPT [--out music/song.wav] [--timeout 600]` (2026-10-02): runs an agent-written script
+  under montaj's interpreter (numpy, no scipy), cwd = project, argv[1] and `MONTAJ_OUT` = the wav path,
+  `MONTAJ_SR=48000`. Any previous output is moved aside and restored on failure. `ERR` when the script fails or
+  the wav is missing, < 1 s or silent (peak < −60 dBFS); `WARN` on clipping. Result:
+  `OK music/song.wav 30.00s 48000Hz 2ch peak -2.2dBFS -18.3LUFS`. CPU only, no GPU lock. Example:
+  `recipes/music/compose-example.py`.
 - `montaj music analyze WAV [--lang hi] [--prompt WORDS] [--bpm N]` → `music/markers.json`:
   `{duration, bpm, beats: [s…], words: [{i, w, s, e}], segments: [{s, e, text, first_word, last_word}], rms: [0.5 s hop]}`.
   Runs `_whisper_worker.py` under `whisper_python` (large-v3-turbo, cuda float16, word_timestamps,
   beam 5). Beats: bpm (given, else autocorrelation of an onset envelope over 60–180) on a grid whose phase
   maximises onset energy. Stdout: one line per segment `12.00-23.74 w1-w15 Jaipur ki dhup mein…`, then
-  `OK music/markers.json <n> words <m> beats`.
-- GPU lock: `render` and `music gen|analyze` hold an exclusive `fcntl` lock on `~/.cache/montaj/gpu.lock`;
+  `OK music/markers.json 30.0s bpm=80.0 beat0=0.41s 50 words first_word=6.62s lang=en`. `--no-words`: beats
+  only, in montaj's own process (ffmpeg decode + the worker's numpy tracker), no GPU lock, no config;
+  `… no words`. The beat grid feeds `b` units when `video.bpm` is omitted (SPEC-REFERENCE `video.beat0`).
+- GPU lock: `render`, `music gen` and `music analyze` (with words) hold an exclusive `fcntl` lock on `~/.cache/montaj/gpu.lock`;
   a second one waits (logs "waiting for GPU") — never runs both on 8 GB.
 - Pipeline: when `audio.track` is set, `render` muxes after concat: `mux(video, track, out, loudnorm,
   fade_out)` (afade out over the last `fade_out`). The film's length wins (001 mux rule). Result line
