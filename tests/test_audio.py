@@ -232,7 +232,7 @@ def test_music_analyze_lines_json_and_markers(
     assert lines == [
         "5.20-6.28 w1-1 Arshiya",
         "12.00-13.74 w2-2 Jaipur ki dhup mein",
-        "OK music/markers.json 2 words 3 beats",
+        "OK music/markers.json 165.0s bpm=76.0 beat0=0.50s 2 words first_word=5.20s lang=hi",
     ]
     markers = json.loads((proj / "music" / "markers.json").read_text())
     assert set(markers) == {"duration", "bpm", "beats", "words", "segments", "rms"}
@@ -245,11 +245,11 @@ def test_music_analyze_lines_json_and_markers(
     assert code == 0 and err == ""
     payload = json.loads("\n".join(lines))
     assert payload["status"] == "OK"
-    assert payload["lines"][-1] == "OK music/markers.json 2 words 3 beats"
+    assert payload["lines"][-1] == "OK music/markers.json 165.0s bpm=76.0 beat0=0.50s 2 words first_word=5.20s lang=hi"
     assert json.loads((proj / "music" / "markers.json").read_text())["bpm"] == 76.0
 
     code, lines, err = _run(["-C", str(proj), "music", "analyze", "song.wav", "--out", "build/m.json"], capsys)
-    assert code == 0 and lines[-1] == "OK build/m.json 2 words 3 beats", lines
+    assert code == 0 and lines[-1] == "OK build/m.json 165.0s bpm=76.0 beat0=0.50s 2 words first_word=5.20s lang=hi", lines
     assert (proj / "build" / "m.json").is_file()
 
 
@@ -288,8 +288,8 @@ def test_music_gen_candidates_and_failure(
          "--n", "2", "--duration", "30s"], capsys,
     )
     assert code == 0 and err == "", lines
-    assert lines[-1] == "OK music gen 2 candidates"
-    assert lines[:-1] == ["music/cand-0000beef.wav seed=0000beef", "music/cand-0001beef.wav seed=0001beef"]
+    assert lines[-1] == "OK music gen 2 candidates 30s lang=hi bpm=76 key=D major"
+    assert lines[:-1] == ["music/cand-0000beef.wav seed=0000beef 0.1s", "music/cand-0001beef.wav seed=0001beef 0.1s"]
     params = json.loads((proj / "music" / "cand-0001beef.json").read_text())
     assert params["caption"] == "romantic ballad" and params["bpm"] == 76.0 and params["duration"] == 30.0
     assert (proj / "music" / "cand-0001beef.wav").is_file()
@@ -320,8 +320,8 @@ def test_music_gen_partial_failure_keeps_files_and_errs(
     assert code == 1 and err == "", lines
     assert lines[-1] == "ERR music gen: 2/3 candidates (cuda hiccup)"
     assert lines[:-1] == [
-        "music/cand-0000beef.wav seed=0000beef",
-        "music/cand-0001beef.wav seed=0001beef",
+        "music/cand-0000beef.wav seed=0000beef 0.1s",
+        "music/cand-0001beef.wav seed=0001beef 0.1s",
     ]
     assert (proj / "music" / "cand-0000beef.wav").is_file()
     assert (proj / "music" / "cand-0001beef.wav").is_file()
