@@ -22,6 +22,7 @@ from montaj.render.golden import (
     leaks,
     mote_params,
     mulberry32,
+    mulberry32_block,
     vignette,
 )
 from tests.oracle_html import expect_psnr, psnr, render_html, stage_html
@@ -65,6 +66,13 @@ def test_mulberry32_matches_node() -> None:
         draw = mulberry32(int(head))
         for got in nums:
             assert abs(draw() - float(got)) < 1e-12
+
+
+@pytest.mark.parametrize("seed", [0, 7, 10, 22, 0x7FFFFFFF, -5, 2**32 + 3])
+def test_mulberry32_block_is_bit_identical(seed: int) -> None:
+    draw = mulberry32(seed)
+    expected = np.array([draw() for _ in range(5000)])
+    assert np.array_equal(mulberry32_block(seed, 5000), expected)
 
 
 def test_mote_and_burst_consume_rng_in_film_order() -> None:

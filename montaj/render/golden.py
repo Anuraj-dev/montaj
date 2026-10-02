@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import math
+from functools import lru_cache
 
 import numpy as np
 import torch
@@ -50,8 +51,27 @@ def mulberry32(seed: int):
     return nxt
 
 
+def mulberry32_block(seed: int, n: int) -> np.ndarray:
+    """The first `n` draws of `mulberry32(seed)` at once, bit-identical.
+
+    The state only ever adds 0x6D2B79F5, so draw `j` is a pure function of `seed + (j + 1)·0x6D2B79F5`.
+    uint32 arrays wrap like JS 32-bit ints; `>>` on uint32 is JS `>>>`.
+    """
+    j = np.arange(1, n + 1, dtype=np.uint64)
+    a = ((np.uint64(int(seed) & 0xFFFFFFFF) + j * np.uint64(0x6D2B79F5)) & np.uint64(0xFFFFFFFF)).astype(np.uint32)
+    t = (a ^ (a >> np.uint32(15))) * (a | np.uint32(1))
+    t = (t + (t ^ (t >> np.uint32(7))) * (t | np.uint32(61))) ^ t
+    return (t ^ (t >> np.uint32(14))).astype(np.float64) / 4294967296
+
+
 def mote_params() -> list[tuple[float, float, float, float, float, float]]:
     """70 motes from mulberry32(22), film.html line 366. Design px on 1080×1920."""
+    return list(_motes())
+
+
+@lru_cache(maxsize=1)
+def _motes() -> tuple[tuple[float, float, float, float, float, float], ...]:
+    """Constant per process (fixed seed), so computed once."""
     r = mulberry32(22)
     out = []
     for _ in range(70):
@@ -61,7 +81,7 @@ def mote_params() -> list[tuple[float, float, float, float, float, float]]:
         ph = r() * 6.28
         dr = r() * 40
         out.append((x, y, s, v, ph, dr))
-    return out
+    return tuple(out)
 
 
 def burst_parts(index: int, n: int) -> list[tuple[float, float, float, float, float]]:
@@ -225,15 +245,18 @@ def vignette(cv, img: torch.Tensor) -> torch.Tensor:
     return (img * (1 - a)).clamp(0, 1)
 
 
-def _grain_tile(i: int, device) -> torch.Tensor:
-    """film.html line 399. One rng draw per pixel, stored as a uint8 gray."""
-    r = mulberry32(7 + i)
-    vals = np.empty(256 * 256, np.float64)
-    for j in range(vals.size):
-        vals[j] = r()
+@lru_cache(maxsize=4)
+def _grain_bytes(i: int) -> np.ndarray:
+    """film.html line 399. One rng draw per pixel, stored as a uint8 gray. Pure in `i`, so memoised."""
+    vals = mulberry32_block(7 + i, 256 * 256)
     # ToUint8Clamp rounds halves to even, which is what np.rint does.
     byte = np.clip(np.rint(vals * 255.0), 0, 255).astype(np.float32).reshape(256, 256) / 255.0
-    return torch.from_numpy(byte).to(device)
+    byte.flags.writeable = False
+    return byte
+
+
+def _grain_tile(i: int, device) -> torch.Tensor:
+    return torch.from_numpy(_grain_bytes(i).copy()).to(device)
 
 
 def grain(cv, img: torch.Tensor, f: float) -> torch.Tensor:
