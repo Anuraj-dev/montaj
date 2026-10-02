@@ -34,7 +34,8 @@ check and review round after that is a `montaj` command that costs no tokens. Ru
    - Their track: copy it into `<project>/music/`, then `montaj music analyze music/<file>.wav` →
      `music/markers.json` (beats; words with times).
    - Generate: write `music/lyrics.txt`, then `montaj music gen --caption "<style>" --lyrics music/lyrics.txt
-     --bpm <n> --duration <len>s --n 2` (minutes, background). The user picks a candidate by ear; analyze it.
+     --bpm <n> --duration <len>s --lang <code> --n 2` (minutes, background). `--lang` defaults to `hi`; set it
+     to the lyrics' language (`en`, `hi`, …). The user picks a candidate by ear; analyze it.
    Done when `markers.json` exists and you have read the analyze output.
 
 4. **Spec.** Rewrite `montaj.yaml` from the recipe: keep its look, transitions and timing grammar; replace the
@@ -43,6 +44,10 @@ check and review round after that is a `montaj` command that costs no tokens. Ru
    - Order shots as an arc: calm open, build, peak, quiet end.
    - Text is short and centred; one idea per card. Width budget on a 1080-wide frame: about 24 characters of
      `script` at `size: 100`; scale `size` down in proportion for longer lines.
+   - Text reads best on a calm backdrop: a dark or plain moment, a dimmed photo or its own card, not a face. A
+     closing title usually holds to the last frame.
+   - Subtitles follow the song: start them at the first sung word in `markers.json`; an instrumental intro
+     can carry a title or no text.
    - Framing: `focus: [x, y]` (source px) puts a face at the screen centre; `crop` trims.
    `montaj validate` and fix every `ERR` line. Done on `OK montaj.yaml …`.
 
