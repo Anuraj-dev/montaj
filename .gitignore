@@ -7,3 +7,12 @@ projects/*/build/
 *.mp4
 *.wav
 *.mov
+
+# Run output and personal photos: never commit
+assets/
+projects/
+*.jpg
+*.jpeg
+*.png
+*.heic
+*.webp
