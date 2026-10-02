@@ -268,6 +268,9 @@ def test_render_holds_the_gpu_and_muxes_the_track(tmp_path: Path, monkeypatch: p
             seen.append(("renderer", held["on"]))
             self.cv = cv
 
+        def begin_segment(self, shots):
+            seen.append(("begin", held["on"]))
+
         def frame(self, f):
             seen.append(("frame", held["on"]))
             return torch.zeros(3, self.cv.H, self.cv.W)
@@ -360,6 +363,88 @@ def test_cached_rerender_does_not_rasterize(tmp_path: Path, monkeypatch: pytest.
     second = render(tmp_path / "montaj.yaml", "preview")
     assert (second.rendered, second.cached) == (0, 1)
     assert calls["n"] == 1
+
+
+def test_render_tells_the_renderer_which_shots_a_segment_reads(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every segment, including a cache hit, names the shots its frames can read."""
+    from contextlib import contextmanager
+
+    assets = tmp_path / "assets"
+    assets.mkdir()
+    Image.new("RGB", (8, 8), (20, 40, 60)).save(assets / "a.jpg")
+    Image.new("RGB", (8, 8), (60, 40, 20)).save(assets / "b.jpg")
+    spec_path = tmp_path / "montaj.yaml"
+    spec_path.write_text(
+        "video:\n  size: 64x64\n  fps: 30\n  look: warm-film\n  motion_blur: 1\n"
+        "assets: assets\nshots:\n"
+        "  - {photo: a, hold: 4f}\n"
+        "  - {photo: b, hold: 4f, in: {type: fade, dur: 2f}}\n"
+    )
+    held = {"on": False}
+    log: list[tuple] = []
+
+    @contextmanager
+    def fake_hold(log_path=None):
+        held["on"] = True
+        try:
+            yield tmp_path / "lock"
+        finally:
+            held["on"] = False
+
+    class FakeCV:
+        def __init__(self, W, H, device="cuda"):
+            assert held["on"]
+            self.W, self.H = W, H
+
+    class FakeRenderer:
+        def __init__(self, tl, spec_dir, cv):
+            assert held["on"]
+            self.cv = cv
+
+        def begin_segment(self, shots):
+            assert held["on"]
+            log.append(("begin", frozenset(shots)))
+
+        def frame(self, f):
+            assert held["on"]
+            log.append(("frame", f))
+            return torch.zeros(3, self.cv.H, self.cv.W)
+
+    class FakeEnc:
+        def __init__(self, path, w, h, fps, log=None):
+            self.path = Path(path)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            self.path.write_bytes(b"seg")
+
+        def write(self, frame):
+            return None
+
+    def fake_concat(chunks, out, **_kwargs):
+        Path(out).parent.mkdir(parents=True, exist_ok=True)
+        Path(out).write_bytes(b"cat")
+        return Path(out)
+
+    monkeypatch.setattr("montaj.pipeline.gpu_hold", fake_hold)
+    monkeypatch.setattr("montaj.pipeline.Canvas", FakeCV)
+    monkeypatch.setattr("montaj.pipeline.Renderer", FakeRenderer)
+    monkeypatch.setattr("montaj.pipeline.Encoder", FakeEnc)
+    monkeypatch.setattr("montaj.pipeline.concat", fake_concat)
+
+    first = render(spec_path, "preview")
+    assert (first.rendered, first.cached) == (2, 0)
+    assert log == [
+        ("begin", frozenset({0})),
+        ("frame", 0), ("frame", 1), ("frame", 2), ("frame", 3),
+        ("begin", frozenset({0, 1})),
+        ("frame", 4), ("frame", 5), ("frame", 6), ("frame", 7),
+    ]
+    second = render(spec_path, "preview")
+    assert (second.rendered, second.cached) == (0, 2)
+    assert log[10:] == [("begin", frozenset({0})), ("begin", frozenset({0, 1}))]
 
 
 def test_mux_two_pass_lands_a_minus_6_tone_on_minus_14(tmp_path: Path) -> None:
