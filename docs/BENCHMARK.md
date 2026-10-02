@@ -47,6 +47,7 @@
 | 8 | W8a contract fixes: look/intro/outro validation, burst int, hints, subs size/colour, SPEC-REFERENCE | grok-4.7 | 13.4m ($1.09, 44 turns) | e2e: styled subtitle renders | 232 pass (GPU 39) | Sol 0H 1M 1L | 0 (fix round: 6.0m, $0.50, 2/2) | yes | Touched `frame.py`/`timeline.py` outside its files, but only to plumb `size`/`color` to the raster; said so |
 | 8 | W8b music compose, analyze --no-words, per-command config, result lines | gpt-5.6-luna xhigh, fast tier | 12.4m (4.7M in, 4.5M cached, 39k out) | 5/5 (compose example, exact bpm 96 / beat0 0, script-fail ERR, silent ERR, no-config hint) | 229 pass + 3 stale it was told not to edit | Sol 0H 5M 1L | 0 (fix round: 6.6m, 3.4M in, 6/6) | yes | Compose example runs in 1.4 s; second Luna implementation run, both rounds clean |
 | 8 | W8c beat lock: unrounded layout, grid snap, markers-derived grid, beat0 | grok-4.6 | 17.4m ($1.12, 41 turns) | e2e: 12 cuts within 1 ms of detected beats (0.3 s phase); recipes keep 840 f / 4950 f | 235 pass (GPU 39) | Sol 2H 2M | 0 (fix round: 10.7m, $0.71, 4/4) | yes | HIGHs: `beat0` kept out of the hash; markers bpm never reached runtime consumers. Fixed by materialising the grid onto the timeline's spec |
+| 9 | W9 bounded render memory (LRU caches, segment-scoped lifetime, clip trimming) | grok-4.7 | 30.8m ($1.16, 37 turns) | 165 s film framemd5-identical; peak VRAM 4.17 → 3.61 GB; 244 → 225 s | 286 pass (GPU 39) | Sol 1H 2M, then fresh re-review 1H 2M | 0 (fix round: 27.1m, $1.11, 3/3) | yes | Re-review HIGH (a wall keeps all its prints on screen) deferred: needs print-resolution downsampling. Decoder-lifetime MED sent to a follow-up |
 
 ## Review runs
 | Wave | Diff | Reviewer | Wall | Findings (H/M/L) | Confirmed real | False positives | Notes |
@@ -70,6 +71,8 @@
 | 8 | W8a grok-4.7 | gpt-6.1-sol medium | 2.1m | 0/1/1 | 2 | 0 | Raster-key collision between styled and spoofed subtitle text; bools coerced to numbers |
 | 8 | W8b gpt-5.6-luna | gpt-6.1-sol medium | 2.4m | 0/5/1 | 6 | 0 | Stale wav accepted, `--bpm 0` traceback, 16-bit peak rounding, requested-not-measured durations |
 | 8 | W8c grok-4.6 | gpt-6.1-sol medium | 2.9m | 2/2/0 | 4 (1 narrowed: beat 0.0 is valid) | 0 | Both cache/runtime HIGHs reproduced in memory; no test the worker wrote could see them |
+| 9 | W9 grok-4.7 | gpt-6.1-sol medium | ~3m | 1/2/0 | 3 | 0 | Walls retained evicted prints; same-source clip windows thrashed (2 decoder opens per frame) |
+| 9 | W9 after fixes (fresh) | gpt-6.1-sol medium | ~5m | 1/2/0 | 2 (+1 inherent, deferred) | 0 | Idle decoders per clip window across cache skips; no out-of-order pixel test; suggested a simpler clip reader |
 
 ## Takeaways so far (wave 1)
 - **Implementation:** grok-4.6 was fastest to a fully correct result on a tightly specified pure-logic task. Space Bunny is slow and token-heavy, but it was the most rigorous: it ran real-machine smokes and proved its tests fail without the fix. Muse Spark wrote the leanest, most faithful GPU port.
