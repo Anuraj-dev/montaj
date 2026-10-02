@@ -111,7 +111,7 @@ birthday montage from the 29 Arshiya photos, brief answered up front, no human r
 
 Targets (PLAN.md): input-eq ≤ 0.3M ✅ (0.12–0.24M vs 1.0–2.7M before Montaj), turns ≤ 20 ✅ on v2 (16, 11),
 starting context ≤ 55k ✅ (25–28k). Feedback round via review.json: one user message, 7 agent turns, 0.09M (PLAN target ≤ 3 turns counts user turns ✅).
-Not yet measured: a run with music (`music analyze` / `gen`).
+Music runs: see § Music benchmark below.
 
 ## Music benchmark (M4, 2026-10-02)
 Same skill (v2), fresh one-shot sessions, one prompt: a 30 s 9:16 birthday music video from the 29 Arshiya photos,
@@ -131,3 +131,13 @@ Input-eq uses the M4 formula (uncached input + 0.1·cache read + 5·output); cod
   and the weakest title.**
 - **Skill gaps to fix:** say to keep the title on a dark or plain backdrop until the last frame; place subtitles
   from the first sung word and set a minimum size; restate "no drift on stills" where shots are described.
+
+## Study runs (2026-10-02, read-only, after M4)
+| Task | Model | Wall | Tokens / cost | Output | Notes |
+|---|---|---|---|---|---|
+| Architecture study (targets, risks, next phase) | gpt-6.1-sol high | 13m | 1.17M (1.05M cached), 9.8k out | 5 items, file:line cited | Only one to find that `b` units ignore analyzed beats and that the skill's `word:12` cut time is invalid |
+| Same prompt, head-to-head | grok-4.7 (plan mode) | 7.3m | $0.45, 1.8M (1.6M cached) | 6 items, file:line cited | Only one to find the missing subtitle size field, the 165 s × 3 gen defaults, and three conflicting M5 descriptions |
+| Transcript triage (10 M4 runs) | gpt-5.6-luna xhigh fast | 16m | 5.3M (4.9M cached), 40k out | Per-run commands, errors, friction ranking | Two errors: claimed the skill says analyze defaults to Hindi (it says gen); quoted render times taken under GPU-lock contention as slow renders |
+
+- Sol and grok agreed on the verdict (harden M4 before M5) and on most gaps; each found 2–3 the other missed.
+  Running both stays worth it for design questions.

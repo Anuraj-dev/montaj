@@ -43,3 +43,13 @@
 
 ## 2026-10-02 — Stacked branches per milestone (m1 → m2 → m3 → m4)
 **Why:** one milestone per PR keeps reviews readable; each builds on the previous engine. Raja decides when to push.
+
+## 2026-10-02 — Harden M4 before M5
+**Why:** two independent design studies found agent-contract leaks (silent Hindi default, late look errors, beat
+holds ignoring analyzed beats) that every music session pays for, and the render-time target was never measured.
+M5's `custom:` code would also widen the cache contract. Rejected: starting M5 now.
+
+## 2026-10-02 — Claude models create, the CLI absorbs the tedium
+**Why:** Raja wants Sonnet 5.5 / Opus 5.5 free to compose (including their own Python-synthesised music) at minimal
+token cost; other models finishing a video is enough. Skill guidance stays advisory, not strict; new facts go into
+`ERR` lines, `OK` lines and spec fields, not new bans.
