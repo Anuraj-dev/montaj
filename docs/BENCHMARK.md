@@ -156,3 +156,16 @@ Input-eq uses the M4 formula (uncached input + 0.1·cache read + 5·output); cod
 - **grok-4.6 on timing logic:** correct layout and grid on the first pass, but missed both cache/runtime implications of a
   new derived field; Sol caught them. New derived inputs need a "who else reads this" line in the prompt.
 - **Sol medium reviews took 2–3 min each** with no false positives.
+
+## Composed-music benchmark (M4.5, 2026-10-02)
+Skill v3 (compose your own track), fresh headless `claude -p`, one prompt: a 30 s 9:16 birthday music video from the
+29 Arshiya photos with an original instrumental the agent composes itself, cut on its beat, no human review.
+
+| Run | Model | Wall | Turns | Start ctx | Images | Input-eq | Cost | Result |
+|---|---|---|---|---|---|---|---|---|
+| 7 | Sonnet 5.5 | 3.8m | 19 | 29k | 2 | 0.27M | $0.65 | `OK check`. 274-line numpy score; 20 photos on 1–2-beat cuts, polaroids for landscapes, gold script title over a dimmed photo |
+| 8 | Opus 5.5 | 5.8m | 23 | 29k | 3 | 0.31M | $1.27 | `OK check`. 285-line score ending on a music-box "Happy Birthday"; 18 photos; moved a photo so the title sits in the sky. Lost 2 renders to a false `WARN frozen` on a morph's eased ends (fixed in `check`), then replaced the morph |
+
+- Both finished the full loop with music they wrote, inside the PLAN targets (≤ 0.3M, ≤ 20 turns for Sonnet; Opus
+  at the edge, including the two wasted renders). Roughly 20k output tokens each is the score itself: creative work.
+- Films: `~/Anuraj-dev/montaj-projects/arshiya/{sonnet,opus}-5.5-composed/out/final.mp4`.
