@@ -453,8 +453,11 @@ def test_intended_freeze_skips_drift_morph_pulse_and_frame(tmp_path: Path) -> No
     assert covers(6.0, 7.0)  # blank
     assert covers(7.0, 8.0)  # untilted frame card
     assert covers(8.0, 9.0)  # drift that does not move
-    for lo in (2.0, 3.0, 4.0, 5.0):
+    for lo in (2.0, 3.0, 5.0):
         assert not any(max(a, lo + 0.05) < min(b, lo + 0.95) for a, b in spans)
+    # morph 4.0-4.33 s: only the middle half of the reveal must move; its eased ends and the still after may not
+    assert not any(max(a, 4.11) < min(b, 4.25) for a, b in spans)
+    assert covers(4.34, 5.0)
 
 
 def _black(path: Path, seconds: float) -> None:

@@ -312,18 +312,31 @@ def _cmd_sheet(ns: argparse.Namespace, root: Path) -> list[str]:
 
 
 def _static_still(spec) -> bool:
-    """A still is animated only by a moving drift, a morph, a pulse, or a changing card tilt.
-    Zoom, tone and an untilted frame card hold still, so their freeze is intended."""
+    """A still is animated only by a moving drift, a pulse, or a changing card tilt.
+    Zoom, tone and an untilted frame card hold still, so their freeze is intended.
+    A morph moves only inside its reveal window (see `_morph_moving`)."""
     d, fr = spec.drift, spec.frame
     drifts = d is not None and (d.zoom[0] != d.zoom[1] or any(d.pan))
     tilts = fr is not None and fr.tilt is not None and fr.tilt[0] != fr.tilt[1]
-    return not drifts and not tilts and spec.morph is None and spec.pulse is None
+    return not drifts and not tilts and spec.pulse is None
+
+
+def _morph_moving(sh, f: int, fps: float, bpm: float | None) -> bool:
+    """True in the middle half of a morph's reveal. Its eased ends barely change the picture, and
+    before and after it the shot is a still: a freeze there is intended (benchmark run 8)."""
+    m = sh.spec.morph
+    if m is None:
+        return False
+    at = _dur_frames(m.at, int(fps), bpm, "morph.at", []) or 0.0
+    dur = _dur_frames(m.dur, int(fps), bpm, "morph.dur", []) or 0.0
+    lo = sh.start + at + dur / 4
+    return lo <= f < lo + dur / 2
 
 
 def _intended_freeze(root: Path) -> list[tuple[float, float]]:
     """Time spans whose picture is designed not to move: static stills, blank holds,
-    and wall frames where both camera tracks hold. A freeze of a drifting, morphing,
-    pulsing, or tilting shot is a defect, and so is a freeze inside a transition."""
+    and wall frames where both camera tracks hold. A freeze of a drifting, pulsing or tilting
+    shot, of a morph mid-reveal, or inside a transition is a defect."""
     spec_file = root / "montaj.yaml"
     if not spec_file.is_file():
         return []
@@ -342,7 +355,8 @@ def _intended_freeze(root: Path) -> list[tuple[float, float]]:
         scene = tl.plan(f).scene
         # A blank hold is the background colour on purpose (the ink tail). A fade into it is not.
         if isinstance(scene, Still):
-            intended = _static_still(tl.shots[scene.shot].spec)
+            sh = tl.shots[scene.shot]
+            intended = _static_still(sh.spec) and not _morph_moving(sh, f, fps, tl.spec.video.bpm)
         elif isinstance(scene, Blank):
             intended = True
         else:
