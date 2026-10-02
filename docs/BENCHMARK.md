@@ -44,6 +44,9 @@
 | 7 | W7 M3 review page, watch, taste | space-bunny | 28m, killed | — | — | — | — | no | opencode stalled at bootstrap with zero model calls |
 | 7 | W7 M3 review page, watch, taste | grok-4.6 | 13.3m ($0.46) | 7/7 | 181 pass | Sol 0H 9M 2L | 0 (fix round: 11.2m, $0.53, 14/14 fixed) | yes | Real Chrome: seek, reject, stamped comment, reload on re-render keeps the playhead |
 | 7 | W7 M3 review page, watch, taste | gpt-5.6-luna xhigh, fast tier | 9.3m (3.06M in, 2.96M cached, 32k out) | 7/7 | 175 pass | Sol 0H 8M 1L | — | no | Leanest (882 vs 1,394 lines) but 4 tests vs 10; page swallowed a re-render reload. First Luna implementation run |
+| 8 | W8a contract fixes: look/intro/outro validation, burst int, hints, subs size/colour, SPEC-REFERENCE | grok-4.7 | 13.4m ($1.09, 44 turns) | e2e: styled subtitle renders | 232 pass (GPU 39) | Sol 0H 1M 1L | 0 (fix round: 6.0m, $0.50, 2/2) | yes | Touched `frame.py`/`timeline.py` outside its files, but only to plumb `size`/`color` to the raster; said so |
+| 8 | W8b music compose, analyze --no-words, per-command config, result lines | gpt-5.6-luna xhigh, fast tier | 12.4m (4.7M in, 4.5M cached, 39k out) | 5/5 (compose example, exact bpm 96 / beat0 0, script-fail ERR, silent ERR, no-config hint) | 229 pass + 3 stale it was told not to edit | Sol 0H 5M 1L | 0 (fix round: 6.6m, 3.4M in, 6/6) | yes | Compose example runs in 1.4 s; second Luna implementation run, both rounds clean |
+| 8 | W8c beat lock: unrounded layout, grid snap, markers-derived grid, beat0 | grok-4.6 | 17.4m ($1.12, 41 turns) | e2e: 12 cuts within 1 ms of detected beats (0.3 s phase); recipes keep 840 f / 4950 f | 235 pass (GPU 39) | Sol 2H 2M | 0 (fix round: 10.7m, $0.71, 4/4) | yes | HIGHs: `beat0` kept out of the hash; markers bpm never reached runtime consumers. Fixed by materialising the grid onto the timeline's spec |
 
 ## Review runs
 | Wave | Diff | Reviewer | Wall | Findings (H/M/L) | Confirmed real | False positives | Notes |
@@ -64,6 +67,9 @@
 | 6 | W6 grok-4.7 | gpt-6.1-sol medium | ~6m | 2/6/1 | 9 | 0 | Leak duration and photo/clip stem collision outside the segment hash; warm-film ignored fade; zoom lost with tone |
 | 7 | W7 grok-4.6 | gpt-6.1-sol medium | ~6m | 0/9/2 | 11 | 0 | Rounded seconds vs frame boundaries, NaN timestamps, `Content-Length: -1` hang, stat/open race |
 | 7 | W7 gpt-5.6-luna | gpt-6.1-sol medium | ~5m | 0/8/1 | 9 | 0 | Same HTTP classes as grok's plus a page reload bug; 6 of 9 overlap the grok findings |
+| 8 | W8a grok-4.7 | gpt-6.1-sol medium | 2.1m | 0/1/1 | 2 | 0 | Raster-key collision between styled and spoofed subtitle text; bools coerced to numbers |
+| 8 | W8b gpt-5.6-luna | gpt-6.1-sol medium | 2.4m | 0/5/1 | 6 | 0 | Stale wav accepted, `--bpm 0` traceback, 16-bit peak rounding, requested-not-measured durations |
+| 8 | W8c grok-4.6 | gpt-6.1-sol medium | 2.9m | 2/2/0 | 4 (1 narrowed: beat 0.0 is valid) | 0 | Both cache/runtime HIGHs reproduced in memory; no test the worker wrote could see them |
 
 ## Takeaways so far (wave 1)
 - **Implementation:** grok-4.6 was fastest to a fully correct result on a tightly specified pure-logic task. Space Bunny is slow and token-heavy, but it was the most rigorous: it ran real-machine smokes and proved its tests fail without the fix. Muse Spark wrote the leanest, most faithful GPU port.
@@ -141,3 +147,12 @@ Input-eq uses the M4 formula (uncached input + 0.1·cache read + 5·output); cod
 
 - Sol and grok agreed on the verdict (harden M4 before M5) and on most gaps; each found 2–3 the other missed.
   Running both stays worth it for design questions.
+
+## Takeaways (wave 8, M4.5)
+- **Driver profiling beat every dispatch on value:** one cProfile of a golden-film preview showed 95% of time in a pure-Python
+  PRNG; vectorising it (bit-identical) cut a 30 s preview 104 → 30 s and final 117 → 40 s.
+- **gpt-5.6-luna is now a reliable implementer for scoped CLI/audio work:** two clean runs, fastest wall time, fix round
+  resolved all 6 findings. It still under-tests contract edges (stale outputs, bad numeric input) until review.
+- **grok-4.6 on timing logic:** correct layout and grid on the first pass, but missed both cache/runtime implications of a
+  new derived field; Sol caught them. New derived inputs need a "who else reads this" line in the prompt.
+- **Sol medium reviews took 2–3 min each** with no false positives.

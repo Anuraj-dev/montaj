@@ -52,7 +52,7 @@ montaj/
     spec.py               pydantic models, defaults, validation hints
     project.py            project layout, asset + segment hashing
     timeline.py           beats/markers/durations -> frame ranges -> segments
-    ingest.py             EXIF rotate, resize, saliency/face focus suggestion, numbered sheet, optional depth
+    ingest.py             EXIF rotate, resize (2048 px cap), assets.json (w, h), numbered sheet
     render/core.py        camera + layer sampling            <- v2/film.py (camera, draw, Img, solo, shift, key/keys_s)
     render/transitions.py cut, fade, whip, swirl, matchcut, flash, wall-drone  <- v2/film2.py
     render/finish.py      grade, vignette, leaks, bloom, grain, motion blur    <- film2.finish / render_frame
@@ -77,13 +77,13 @@ User projects live outside the repo: `<anywhere>/<name>/{montaj.yaml, assets/, m
 | `montaj doctor` | env check + known traps | 5–10 lines |
 | `montaj new <dir> --recipe birthday-short --photos <folder>` | scaffold + ingest | 1 line + sheet path |
 | `montaj ingest` | normalise photos, focus points, `assets.json`, one numbered sheet | 1 image |
-| `montaj music gen\|analyze` | song candidates / markers.json | short table |
+| `montaj music gen\|analyze\|compose` | song candidates / markers.json / agent-composed wav | short table |
 | `montaj validate` | schema + timeline errors with hints | errors only |
 | `montaj render [--preview\|--final]` | cached segment render + mux | 1 line |
 | `montaj sheet [--at …]` | ≤12-frame contact sheet | 1 image |
 | `montaj check` | QA | ≤10 lines |
 | `montaj review` / `watch` | human loop, zero tokens | `review.json` |
-| `montaj export --target master\|whatsapp\|twitter` | presets from render.sh | 1 line |
+| `montaj export --target master\|whatsapp` | presets from render.sh | 1 line |
 
 ### Spec sketch (illustrative)
 ```yaml
