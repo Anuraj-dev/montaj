@@ -19,7 +19,7 @@ import torch.nn.functional as F
 
 from montaj.project import find_clip, find_photo
 from montaj.render.canvas import Canvas
-from montaj.render.clip import ClipSource
+from montaj.render.clip import ClipSource, window_key
 from montaj.render.core import Photo, fit_s, sine, still
 from montaj.render.finish import LOOKS, finish
 from montaj.render.shots import (
@@ -232,13 +232,34 @@ class Renderer:
             del cache[key]
             owners.pop(key, None)
 
+    def _clip_request(self, index: int) -> tuple[str, float, int] | None:
+        shot = self.tl.shots[index]
+        sh = shot.spec
+        if not sh.clip:
+            return None
+        extra = self._outgoing_frames(index)
+        nframes = (shot.end - shot.start) + int(math.ceil(extra - 1e-6))
+        clip_in = 0.0 if sh.clip_in is None else self._frames(sh.clip_in) / self.tl.fps
+        return sh.clip, clip_in, nframes
+
     def _drop_clips(self, needed: frozenset[int]) -> None:
-        stems = {self.tl.shots[i].spec.clip for i in needed if self.tl.shots[i].spec.clip}
-        for key in [key for key in self._clips if key not in stems]:
-            src = self._clips.get(key)
-            del self._clips[key]
+        """Close windows this segment will not read. Same stem, different clip_in, is another window."""
+        wanted: dict[str, set[tuple]] = {}
+        for index in needed:
+            req = self._clip_request(index)
+            if req is None:
+                continue
+            stem, clip_in, nframes = req
+            wanted.setdefault(stem, set()).add(window_key(clip_in, self.cv.W, self.cv.H, nframes))
+        for stem in [stem for stem in self._clips if stem not in wanted]:
+            src = self._clips.get(stem)
+            del self._clips[stem]
             if src is not None:
                 src.close()
+        for stem, keys in wanted.items():
+            src = self._clips.get(stem)
+            if src is not None:
+                src.keep_windows(keys)
 
     def _drop_captions(self, needed: frozenset[int]) -> None:
         texts: set[str] = set()
@@ -356,12 +377,11 @@ class Renderer:
         return 0.0
 
     def _clip_frame(self, scene: Clip, t: float) -> torch.Tensor:
-        shot = self.tl.shots[scene.shot]
-        sh = shot.spec
-        extra = self._outgoing_frames(scene.shot)
-        nframes = (shot.end - shot.start) + int(math.ceil(extra - 1e-6))
-        clip_in = 0.0 if sh.clip_in is None else self._frames(sh.clip_in) / self.tl.fps
-        return self._clip_source(sh.clip).frame(
+        req = self._clip_request(scene.shot)
+        if req is None:
+            raise ValueError(f"shot {scene.shot} is not a clip")
+        stem, clip_in, nframes = req
+        return self._clip_source(stem).frame(
             t, float(scene.t0), clip_in, self.cv.W, self.cv.H, nframes=nframes, device=self.cv.device,
         )
 
