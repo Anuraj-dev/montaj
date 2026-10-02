@@ -4,6 +4,7 @@ import pytest
 from PIL import Image
 
 from montaj.spec import SpecError, load_spec
+from montaj.timeline import resolve
 
 _LINE = __import__("re").compile(r"^[^:]+: .+ \(.+\)$")
 
@@ -465,3 +466,219 @@ def test_wall_print_missing(tmp_path: Path):
     with pytest.raises(SpecError) as ei:
         load_spec(p)
     assert any("prints[0].photo" in e and "zz" in e for e in ei.value.errors)
+
+
+def test_text_at_plain_beats_is_grid_time(tmp_path: Path):
+    p = _write(
+        tmp_path,
+        "  - {photo: a, hold: 10s}\n",
+        ["a"],
+        video="size: 1080x1920\n  fps: 30\n  bpm: 80\n  beat0: 0.41s\n  look: warm-film",
+        extra=(
+            "text:\n"
+            "  - from: 0s\n"
+            "    to: 10s\n"
+            "    lines:\n"
+            "      - {text: x, y: 100, at: 8b}\n"
+        ),
+    )
+    tl = resolve(load_spec(p), p.parent)
+    assert tl.texts[0].lines[0].at == pytest.approx(6.41 * 30)
+
+
+def test_marker_defined_as_plain_beats_is_grid_time(tmp_path: Path):
+    p = _write(
+        tmp_path,
+        "  - {photo: a, until: chorus}\n",
+        ["a"],
+        video="size: 1080x1920\n  fps: 30\n  bpm: 80\n  beat0: 0.41s\n  look: warm-film",
+        extra="markers:\n  chorus: 8b\n",
+    )
+    tl = resolve(load_spec(p), p.parent)
+    assert tl.markers["chorus"] == pytest.approx(6.41 * 30)
+    assert tl.shots[0].end == 192
+
+
+def test_beat_offset_on_marker_is_a_span(tmp_path: Path):
+    p = _write(
+        tmp_path,
+        "  - {photo: a, until: ch1+2b}\n",
+        ["a"],
+        video="size: 1080x1920\n  fps: 30\n  bpm: 80\n  beat0: 0.41s\n  look: warm-film",
+        extra="markers:\n  ch1: 1s\n",
+    )
+    tl = resolve(load_spec(p), p.parent)
+    # 1s + 2 beats (1.5 s) = 2.5 s, not beat0 + 2 beats.
+    assert tl.shots[0].end == 75
+
+
+def test_video_beat0_rejects_beats(tmp_path: Path):
+    p = _write(
+        tmp_path,
+        "  - {photo: a, hold: 4b}\n",
+        ["a"],
+        video="size: 1080x1920\n  fps: 30\n  bpm: 80\n  beat0: 2b\n  look: warm-film",
+    )
+    with pytest.raises(SpecError) as ei:
+        load_spec(p)
+    assert all(_LINE.match(e) for e in ei.value.errors)
+    assert any("video.beat0" in e and "beats" in e for e in ei.value.errors)
+
+
+def test_markers_bpm_nan_is_spec_error(tmp_path: Path):
+    (tmp_path / "music").mkdir()
+    (tmp_path / "music" / "song.wav").write_bytes(b"RIFF")
+    (tmp_path / "music" / "markers.json").write_text('{"bpm": NaN, "beats": [0.41]}')
+    p = _write(
+        tmp_path,
+        "  - {photo: a, hold: 4b}\n",
+        ["a"],
+        video="size: 1080x1920\n  fps: 30\n  look: warm-film",
+        extra="audio:\n  track: music/song.wav\n  markers: music/markers.json\n",
+    )
+    with pytest.raises(SpecError) as ei:
+        load_spec(p)
+    assert all(_LINE.match(e) for e in ei.value.errors)
+    assert any("audio.markers" in e for e in ei.value.errors)
+
+
+def test_markers_beats_non_number_is_spec_error(tmp_path: Path):
+    (tmp_path / "music").mkdir()
+    (tmp_path / "music" / "song.wav").write_bytes(b"RIFF")
+    (tmp_path / "music" / "markers.json").write_text('{"bpm": 80, "beats": [0.41, "nope"]}')
+    p = _write(
+        tmp_path,
+        "  - {photo: a, hold: 4b}\n",
+        ["a"],
+        video="size: 1080x1920\n  fps: 30\n  look: warm-film",
+        extra="audio:\n  track: music/song.wav\n  markers: music/markers.json\n",
+    )
+    with pytest.raises(SpecError) as ei:
+        load_spec(p)
+    assert all(_LINE.match(e) for e in ei.value.errors)
+    assert any("audio.markers" in e and "bpm/beats" in e for e in ei.value.errors)
+    assert sum("audio.markers" in e for e in ei.value.errors) == 1
+
+
+def test_markers_only_bpm_materialises_on_resolved_spec(tmp_path: Path):
+    from montaj.spec import _dur_frames
+
+    (tmp_path / "music").mkdir()
+    (tmp_path / "music" / "song.wav").write_bytes(b"RIFF")
+    (tmp_path / "music" / "markers.json").write_text(
+        '{"bpm": 80, "beats": [0.41, 1.16]}'
+    )
+    p = _write(
+        tmp_path,
+        "  - {photo: a, hold: 4b, pulse: heartbeat}\n",
+        ["a"],
+        video="size: 1080x1920\n  fps: 30\n  look: warm-film",
+        extra=(
+            "audio:\n  track: music/song.wav\n  markers: music/markers.json\n"
+            "  fade_out: 4b\n"
+        ),
+    )
+    spec = load_spec(p)
+    assert spec.video.bpm is None
+    tl = resolve(spec, p.parent)
+    assert tl.spec.video.bpm == 80.0
+    assert tl.spec.video.beat0 == "0.41s"
+    assert _dur_frames("2b", 30, tl.spec.video.bpm, "clip_in", []) == pytest.approx(45.0)
+    assert _dur_frames("4b", 30, tl.spec.video.bpm, "fade_out", []) == pytest.approx(90.0)
+    assert _dur_frames("4b", 30, spec.video.bpm, "fade_out", []) is None
+
+
+def test_clip_in_and_fade_out_beats_use_markers_bpm(tmp_path: Path):
+    from montaj.spec import Spec, validate_spec
+
+    (tmp_path / "music").mkdir()
+    (tmp_path / "music" / "song.wav").write_bytes(b"RIFF")
+    (tmp_path / "music" / "markers.json").write_text('{"bpm": 80, "beats": [0.41]}')
+    spec = Spec.model_validate(
+        {
+            "video": {"size": "1080x1920", "fps": 30, "look": "warm-film"},
+            "shots": [{"clip": "intro", "clip_in": "2b", "hold": "4b"}],
+            "audio": {
+                "track": "music/song.wav",
+                "markers": "music/markers.json",
+                "fade_out": "4b",
+            },
+        }
+    )
+    errors: list[str] = []
+    parsed, times, *_ = validate_spec(spec, errors, spec_dir=tmp_path)
+    assert errors == []
+    assert times["shots[0].clip_in"] == pytest.approx(45.0)
+    assert times["audio.fade_out"] == pytest.approx(90.0)
+    tl = resolve(spec, tmp_path)
+    fade = times["audio.fade_out"] / tl.spec.video.fps
+    assert fade == pytest.approx(3.0)
+    assert parsed["shots[0].hold"] == 102
+
+
+def test_bad_markers_error_even_with_explicit_bpm(tmp_path: Path):
+    (tmp_path / "music").mkdir()
+    (tmp_path / "music" / "song.wav").write_bytes(b"RIFF")
+    (tmp_path / "music" / "markers.json").write_text('{"bpm": NaN, "beats": ["bad"]}')
+    p = _write(
+        tmp_path,
+        "  - {photo: a, hold: 4b}\n",
+        ["a"],
+        video="size: 1080x1920\n  fps: 30\n  bpm: 80\n  look: warm-film",
+        extra="audio:\n  track: music/song.wav\n  markers: music/markers.json\n",
+    )
+    with pytest.raises(SpecError) as ei:
+        load_spec(p)
+    assert all(_LINE.match(e) for e in ei.value.errors)
+    assert sum("audio.markers" in e for e in ei.value.errors) == 1
+
+
+def test_negative_beat_entry_is_spec_error(tmp_path: Path):
+    (tmp_path / "music").mkdir()
+    (tmp_path / "music" / "song.wav").write_bytes(b"RIFF")
+    for payload in ('{"bpm": 80, "beats": [-0.41]}', '{"bpm": 80, "beats": [0.41, -1]}'):
+        (tmp_path / "music" / "markers.json").write_text(payload)
+        p = _write(
+            tmp_path,
+            "  - {photo: a, hold: 4b}\n",
+            ["a"],
+            video="size: 1080x1920\n  fps: 30\n  look: warm-film",
+            extra="audio:\n  track: music/song.wav\n  markers: music/markers.json\n",
+        )
+        with pytest.raises(SpecError) as ei:
+            load_spec(p)
+        assert all(_LINE.match(e) for e in ei.value.errors)
+        assert sum("audio.markers" in e for e in ei.value.errors) == 1
+
+
+def test_zero_beat_entry_is_valid_phase(tmp_path: Path):
+    (tmp_path / "music").mkdir()
+    (tmp_path / "music" / "song.wav").write_bytes(b"RIFF")
+    (tmp_path / "music" / "markers.json").write_text('{"bpm": 80, "beats": [0.0, 0.75]}')
+    p = _write(
+        tmp_path,
+        "  - {photo: a, hold: 4b}\n",
+        ["a"],
+        video="size: 1080x1920\n  fps: 30\n  look: warm-film",
+        extra="audio:\n  track: music/song.wav\n  markers: music/markers.json\n",
+    )
+    tl = resolve(load_spec(p), p.parent)
+    assert tl.spec.video.bpm == 80.0
+    assert tl.spec.video.beat0 == "0s"
+    assert tl.shots[0].end == 90
+
+
+def test_beats_without_bpm_or_markers_hint_names_both_fixes(tmp_path: Path):
+    p = _write(
+        tmp_path,
+        "  - {photo: a, hold: 4b}\n",
+        ["a"],
+        video="size: 1080x1920\n  fps: 30\n  look: warm-film",
+    )
+    with pytest.raises(SpecError) as ei:
+        load_spec(p)
+    assert all(_LINE.match(e) for e in ei.value.errors)
+    assert any(
+        "video.bpm" in e and "add bpm: 120, or audio.markers from montaj music analyze" in e
+        for e in ei.value.errors
+    )

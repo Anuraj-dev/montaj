@@ -108,6 +108,7 @@ class Video(Frozen):
     size: str
     fps: int
     bpm: float | None = None
+    beat0: DurationStr | None = None
     look: str
     intro: IntroOutro | None = None
     outro: IntroOutro | None = None
@@ -396,8 +397,14 @@ def _parse_time(
     bpm: float | None,
     path: str,
     errors: list[str],
+    *,
+    beat0: float = 0.0,
 ) -> float | None:
-    """Duration from film start, or `<marker>[±duration]`. Returns float frames."""
+    """Duration from film start, or `<marker>[±duration]`. Returns float frames.
+
+    A plain beat duration (`8b`) is a grid time: beat0 + 8 beats. Offsets (`ch1+2b`)
+    are spans and do not add beat0.
+    """
     if isinstance(raw, (int, float)) and not isinstance(raw, bool):
         errors.append(_line(path, "bare number", "use 22f, 4b or 1.5s"))
         return None
@@ -408,8 +415,14 @@ def _parse_time(
     if _BARE.match(text):
         errors.append(_line(path, "bare number", "use 22f, 4b or 1.5s"))
         return None
-    if _DUR.match(text):
-        return _dur_frames(text, fps, bpm, path, errors)
+    dur = _DUR.match(text)
+    if dur:
+        frames = _dur_frames(text, fps, bpm, path, errors)
+        if frames is None:
+            return None
+        if dur.group(2) == "b":
+            return beat0 + frames
+        return frames
     m = _MARKER.match(text)
     if not m:
         errors.append(_line(path, f"invalid time {text!r}", "use 12s, 360f, 16b or a marker"))
@@ -435,10 +448,12 @@ def parse_time(
     fps: int,
     bpm: float | None,
     path: str = ".",
+    *,
+    beat0: float = 0.0,
 ) -> float:
     """Float frames, unrounded. Raises SpecError on a bad expression."""
     errors: list[str] = []
-    val = _parse_time(raw, markers, fps, bpm, path, errors)
+    val = _parse_time(raw, markers, fps, bpm, path, errors, beat0=beat0)
     if errors or val is None:
         raise SpecError(errors or [_line(path, "invalid time", "use 12s, 360f, 16b or a marker")])
     return val
@@ -606,22 +621,200 @@ def _require_photo(assets_dir: Path, pid: str, path: str, errors: list[str], fin
         errors.append(_line(path, f"{pid!r} not in assets/", f"have: {have}"))
 
 
-def _load_word_starts(spec: Spec, spec_dir: Path | None, errors: list[str]) -> dict[int, float]:
-    """Map word `i` -> start seconds from audio.markers JSON."""
+_MARKERS_GRID_HINT = 'use {"bpm": 80, "beats": [0.41, ...]} from montaj music analyze'
+
+
+def _read_markers_json(spec: Spec, spec_dir: Path | None, errors: list[str]) -> object | None:
+    """Parsed audio.markers JSON, or None after recording an error."""
     if spec.audio is None or not spec.audio.markers:
-        return {}
+        return None
     rel = spec.audio.markers
     if spec_dir is None:
         errors.append(_line("audio.markers", f"{rel!r} needs a spec file", "load the spec from disk"))
-        return {}
+        return None
     path = spec_dir / rel
     if not path.is_file():
         errors.append(_line("audio.markers", f"{rel!r} not found", "path relative to the spec file"))
-        return {}
+        return None
     try:
-        data = json.loads(path.read_text())
+        return json.loads(path.read_text())
     except (OSError, json.JSONDecodeError) as e:
         errors.append(_line("audio.markers", "invalid JSON", str(e)))
+        return None
+
+
+def _finite_number(v: object) -> float | None:
+    if isinstance(v, bool) or not isinstance(v, (int, float)):
+        return None
+    x = float(v)
+    return x if math.isfinite(x) else None
+
+
+def _markers_grid(data: object, errors: list[str]) -> tuple[float | None, float | None]:
+    """`(bpm, beat0_seconds)` from a markers file. One error on `audio.markers` if bad."""
+    if not isinstance(data, dict):
+        errors.append(_line("audio.markers", "invalid bpm/beats", _MARKERS_GRID_HINT))
+        return None, None
+    bpm: float | None = None
+    if "bpm" in data:
+        n = _finite_number(data["bpm"])
+        if n is None or n <= 0:
+            errors.append(_line("audio.markers", "invalid bpm/beats", _MARKERS_GRID_HINT))
+            return None, None
+        bpm = n
+    beat0_s: float | None = None
+    if "beats" in data:
+        beats = data["beats"]
+        if not isinstance(beats, list):
+            errors.append(_line("audio.markers", "invalid bpm/beats", _MARKERS_GRID_HINT))
+            return bpm, None
+        nums: list[float] = []
+        for x in beats:
+            n = _finite_number(x)
+            if n is None or n < 0:
+                errors.append(_line("audio.markers", "invalid bpm/beats", _MARKERS_GRID_HINT))
+                return bpm, None
+            nums.append(n)
+        if nums:
+            beat0_s = nums[0]
+    return bpm, beat0_s
+
+
+def _parse_beat0(raw: str, fps: int, errors: list[str]) -> float | None:
+    """`video.beat0` as frames. `b` units are an error."""
+    path = "video.beat0"
+    if isinstance(raw, str):
+        m = _DUR.match(raw.strip())
+        if m and m.group(2) == "b":
+            errors.append(_line(path, "beats are not allowed", "use 0.5s or 12f"))
+            return None
+    return _dur_frames(raw, fps, None, path, errors)
+
+
+def _format_beat0(frames: float, fps: int) -> str:
+    """Canonical seconds string for a resolved phase (`0s`, `0.41s`)."""
+    seconds = 0.0 if fps <= 0 else frames / float(fps)
+    if seconds == 0:
+        return "0s"
+    return f"{seconds:g}s"
+
+
+def _beat_period(fps: int, bpm: float | None) -> float | None:
+    if bpm is None or not math.isfinite(bpm) or bpm <= 0 or fps <= 0:
+        return None
+    period = 60.0 / bpm * fps
+    return period if math.isfinite(period) and period > 0 else None
+
+
+def _whole_beats(raw: object) -> int | None:
+    """Integer N when `raw` is `Nb`; None for fractional beats or other units."""
+    if not isinstance(raw, str):
+        return None
+    m = _DUR.match(raw.strip())
+    if not m or m.group(2) != "b":
+        return None
+    n = float(m.group(1))
+    if not math.isfinite(n) or n != int(n):
+        return None
+    return int(n)
+
+
+def _on_beat_grid(u: float, beat0: float, period: float) -> bool:
+    k = round((u - beat0) / period)
+    return abs(u - (beat0 + k * period)) <= 1e-6
+
+
+def _snap_forward_to_grid(u: float, beat0: float, period: float) -> float:
+    if _on_beat_grid(u, beat0, period):
+        return u
+    return beat0 + math.ceil((u - beat0) / period) * period
+
+
+def layout_shots(
+    spec: Spec,
+    markers: dict[str, float],
+    fps: int,
+    bpm: float | None,
+    beat0: float,
+    errors: list[str],
+) -> tuple[list[tuple[int, int] | None], dict[str, float]]:
+    """Lay shots out on an unrounded clock. Returns (bounds, until times).
+
+    `u` is running time in frames (float). Shot end frame is `round_frame(end_u)`;
+    the next shot starts there; `u` continues from `end_u` so rounding does not drift.
+    Whole-beat holds snap forward onto `beat0 + k·T`.
+    """
+    period = _beat_period(fps, bpm)
+    bounds: list[tuple[int, int] | None] = []
+    until_times: dict[str, float] = {}
+    u = 0.0
+    start = 0
+    for i, sh in enumerate(spec.shots):
+        has_hold = sh.hold is not None
+        has_until = sh.until is not None
+        if has_hold and has_until:
+            errors.append(_line(f"shots[{i}]", "hold and until are mutually exclusive", "remove one"))
+            bounds.append(None)
+            continue
+        if not has_hold and not has_until:
+            errors.append(_line(f"shots[{i}]", "need hold or until", "set one"))
+            bounds.append(None)
+            continue
+        if has_until:
+            until_f = _parse_time(
+                sh.until, markers, fps, bpm, f"shots[{i}].until", errors, beat0=beat0
+            )
+            if until_f is None:
+                bounds.append(None)
+                continue
+            until_times[f"shots[{i}].until"] = until_f
+            end_u = until_f
+        else:
+            span = _dur_frames(sh.hold, fps, bpm, f"shots[{i}].hold", errors)
+            if span is None:
+                bounds.append(None)
+                continue
+            end_u = u + span
+            if period is not None and _whole_beats(sh.hold) is not None:
+                end_u = _snap_forward_to_grid(end_u, beat0, period)
+        end = round_frame(end_u)
+        if end <= start:
+            if has_until:
+                errors.append(
+                    _line(
+                        f"shots[{i}].until",
+                        f"ends at {end}f, not after start {start}f",
+                        f"use a time after {start}f",
+                    )
+                )
+            else:
+                errors.append(
+                    _line(f"shots[{i}].hold", f"must be > 0, got {end - start}f", "lengthen hold")
+                )
+            bounds.append(None)
+            continue
+        bounds.append((start, end))
+        start = end
+        u = end_u
+    return bounds, until_times
+
+
+def _load_word_starts(
+    spec: Spec,
+    spec_dir: Path | None,
+    errors: list[str],
+    *,
+    data: object | None = None,
+    loaded: bool = False,
+) -> dict[int, float]:
+    """Map word `i` -> start seconds from audio.markers JSON."""
+    if spec.audio is None or not spec.audio.markers:
+        return {}
+    if not loaded:
+        data = _read_markers_json(spec, spec_dir, errors)
+        if data is None:
+            return {}
+    elif data is None:
         return {}
     words = data.get("words") if isinstance(data, dict) else None
     if not isinstance(words, list):
@@ -664,7 +857,15 @@ def _load_word_starts(spec: Spec, spec_dir: Path | None, errors: list[str]) -> d
 
 
 def resolve_markers(
-    spec: Spec, spec_dir: Path | None, fps: int, bpm: float | None, errors: list[str]
+    spec: Spec,
+    spec_dir: Path | None,
+    fps: int,
+    bpm: float | None,
+    errors: list[str],
+    *,
+    beat0: float = 0.0,
+    markers_json: object | None = None,
+    markers_loaded: bool = False,
 ) -> dict[str, float]:
     """Resolve `markers` to float frames. Acyclic name→name refs are allowed."""
     uses_word = [
@@ -680,7 +881,9 @@ def resolve_markers(
                     _line(f"markers.{name}", f"{expr} needs audio.markers", "set audio.markers")
                 )
         else:
-            word_s = _load_word_starts(spec, spec_dir, errors)
+            word_s = _load_word_starts(
+                spec, spec_dir, errors, data=markers_json, loaded=markers_loaded
+            )
 
     for name in spec.markers:
         if not _NAME.match(name):
@@ -707,7 +910,7 @@ def resolve_markers(
                 resolved[name] = word_s[i] * fps
             continue
         if _DUR.match(text):
-            val = _dur_frames(text, fps, bpm, path, errors)
+            val = _parse_time(text, {}, fps, bpm, path, errors, beat0=beat0)
             if val is not None:
                 resolved[name] = val
             continue
@@ -718,7 +921,7 @@ def resolve_markers(
         progress = False
         for name, expr in list(pending.items()):
             bag: list[str] = []
-            val = _parse_time(expr, resolved, fps, bpm, f"markers.{name}", bag)
+            val = _parse_time(expr, resolved, fps, bpm, f"markers.{name}", bag, beat0=beat0)
             if val is not None:
                 resolved[name] = val
                 del pending[name]
@@ -739,7 +942,7 @@ def resolve_markers(
                 )
             )
         else:
-            _parse_time(expr, resolved, fps, bpm, f"markers.{name}", errors)
+            _parse_time(expr, resolved, fps, bpm, f"markers.{name}", errors, beat0=beat0)
     return resolved
 
 
@@ -780,27 +983,73 @@ def _check_ease(path: str, ease: str, errors: list[str]) -> None:
 
 def validate_spec(
     spec: Spec, errors: list[str], spec_dir: Path | None = None
-) -> tuple[dict[str, int], dict[str, float], dict[str, float]]:
-    """Fill `errors`; return (rounded frames, float frames, resolved markers)."""
+) -> tuple[dict[str, int], dict[str, float], dict[str, float], float | None, float]:
+    """Fill `errors`; return (rounded frames, float frames, markers, bpm, beat0 frames)."""
     fps = spec.video.fps
-    bpm = spec.video.bpm
+    specified_bpm = spec.video.bpm is not None
     if fps <= 0:
         errors.append(_line("video.fps", f"must be positive, got {fps}", "use fps: 30"))
-    if bpm is not None and (not math.isfinite(bpm) or bpm <= 0):
-        errors.append(_line("video.bpm", f"must be finite and positive, got {_fmt_num(bpm)}", "use bpm: 120"))
+    if specified_bpm and (not math.isfinite(spec.video.bpm) or spec.video.bpm <= 0):
+        errors.append(
+            _line(
+                "video.bpm",
+                f"must be finite and positive, got {_fmt_num(spec.video.bpm)}",
+                "use bpm: 120",
+            )
+        )
+        bpm: float | None = None
+    else:
+        bpm = spec.video.bpm
     if spec.video.motion_blur < 1:
         errors.append(_line("video.motion_blur", "must be >= 1", "1 = off"))
     parse_wh(spec.video.size, "video.size", errors, even=True)
 
-    uses_beats = any(isinstance(raw, str) and _expr_uses_beats(raw) for raw in _time_strings(spec))
-    if uses_beats and bpm is None:
-        errors.append(_line("video.bpm", "required when a duration uses beats", "add bpm: 120"))
+    beat0_locked = spec.video.beat0 is not None
+    beat0 = 0.0
+    if beat0_locked:
+        parsed_b0 = _parse_beat0(spec.video.beat0, fps, errors)
+        if parsed_b0 is not None:
+            beat0 = parsed_b0
 
-    markers = resolve_markers(spec, spec_dir, fps, bpm, errors)
+    markers_json: object | None = None
+    markers_loaded = False
+    if spec.audio is not None and spec.audio.markers:
+        markers_json = _read_markers_json(spec, spec_dir, errors)
+        markers_loaded = True
+        if markers_json is not None:
+            m_bpm, m_beat0_s = _markers_grid(markers_json, errors)
+            if not specified_bpm:
+                if bpm is None:
+                    bpm = m_bpm
+                if not beat0_locked and m_beat0_s is not None:
+                    beat0 = m_beat0_s * fps
+
+    uses_beats = any(isinstance(raw, str) and _expr_uses_beats(raw) for raw in _time_strings(spec))
+    if uses_beats and bpm is None and not specified_bpm:
+        errors.append(
+            _line(
+                "video.bpm",
+                "required when a duration uses beats",
+                "add bpm: 120, or audio.markers from montaj music analyze",
+            )
+        )
+
+    markers = resolve_markers(
+        spec,
+        spec_dir,
+        fps,
+        bpm,
+        errors,
+        beat0=beat0,
+        markers_json=markers_json,
+        markers_loaded=markers_loaded,
+    )
 
     parsed: dict[str, int] = {}
     times: dict[str, float] = {}
     for path, raw in _duration_fields(spec):
+        if path.endswith("].hold") and path.count(".") == 1:
+            continue
         n = parse_dur(raw, fps, bpm, path, errors)
         if n is not None:
             parsed[path] = n
@@ -813,47 +1062,19 @@ def validate_spec(
     if not spec.shots:
         errors.append(_line("shots", "need at least one shot", "add a shot"))
 
+    bounds, until_times = layout_shots(spec, markers, fps, bpm, beat0, errors)
+    times.update(until_times)
     holds: list[int | None] = []
-    t = 0
-    for i, sh in enumerate(spec.shots):
-        has_hold = sh.hold is not None
-        has_until = sh.until is not None
-        if has_hold and has_until:
-            errors.append(_line(f"shots[{i}]", "hold and until are mutually exclusive", "remove one"))
+    for i, span in enumerate(bounds):
+        if span is None:
             holds.append(None)
             continue
-        if not has_hold and not has_until:
-            errors.append(_line(f"shots[{i}]", "need hold or until", "set one"))
-            holds.append(None)
-            continue
-        if has_until:
-            until_f = _parse_time(sh.until, markers, fps, bpm, f"shots[{i}].until", errors)
-            if until_f is None:
-                holds.append(None)
-                continue
-            end = round_frame(until_f)
-            times[f"shots[{i}].until"] = until_f
-            if end <= t:
-                errors.append(
-                    _line(
-                        f"shots[{i}].until",
-                        f"ends at {end}f, not after start {t}f",
-                        f"use a time after {t}f",
-                    )
-                )
-                holds.append(None)
-                continue
-            h = end - t
-            parsed[f"shots[{i}].hold"] = h
-            holds.append(h)
-            t = end
-        else:
-            h = parsed.get(f"shots[{i}].hold")
-            holds.append(h)
-            if h is not None:
-                if h <= 0:
-                    errors.append(_line(f"shots[{i}].hold", f"must be > 0, got {h}f", "lengthen hold"))
-                t += h
+        start, end = span
+        h = end - start
+        parsed[f"shots[{i}].hold"] = h
+        parsed[f"shots[{i}].start"] = start
+        parsed[f"shots[{i}].end"] = end
+        holds.append(h)
 
     for i, sh in enumerate(spec.shots):
         h = holds[i]
@@ -1014,14 +1235,14 @@ def validate_spec(
             )
         if fx.burst is not None and fx.pos is None:
             errors.append(_line(f"fx[{i}].pos", "required for burst", "set pos: [x, y]"))
-        at_f = _parse_time(fx.at, markers, fps, bpm, f"fx[{i}].at", errors)
+        at_f = _parse_time(fx.at, markers, fps, bpm, f"fx[{i}].at", errors, beat0=beat0)
         if at_f is not None:
             times[f"fx[{i}].at"] = at_f
             parsed[f"fx[{i}].at"] = round_frame(at_f)
 
-    _validate_text(spec, markers, fps, bpm, times, errors)
-    _validate_tracks(spec, markers, fps, bpm, times, errors)
-    return parsed, times, markers
+    _validate_text(spec, markers, fps, bpm, times, errors, beat0=beat0)
+    _validate_tracks(spec, markers, fps, bpm, times, errors, beat0=beat0)
+    return parsed, times, markers, bpm, beat0
 
 
 def _validate_text(
@@ -1031,10 +1252,12 @@ def _validate_text(
     bpm: float | None,
     times: dict[str, float],
     errors: list[str],
+    *,
+    beat0: float = 0.0,
 ) -> None:
     for i, block in enumerate(spec.text):
         for field, raw in (("from", block.from_), ("to", block.to)):
-            val = _parse_time(raw, markers, fps, bpm, f"text[{i}].{field}", errors)
+            val = _parse_time(raw, markers, fps, bpm, f"text[{i}].{field}", errors, beat0=beat0)
             if val is not None:
                 times[f"text[{i}].{field}"] = val
         if not block.lines:
@@ -1050,17 +1273,17 @@ def _validate_text(
             if line.reveal not in TEXT_REVEAL:
                 errors.append(_line(f"{p}.reveal", f"unknown {line.reveal!r}", "use rise or pop"))
             _check_color(f"{p}.color", line.color, errors)
-            val = _parse_time(line.at, markers, fps, bpm, f"{p}.at", errors)
+            val = _parse_time(line.at, markers, fps, bpm, f"{p}.at", errors, beat0=beat0)
             if val is not None:
                 times[f"{p}.at"] = val
             if line.sweep:
                 for k, raw in enumerate(line.sweep):
-                    sv = _parse_time(raw, markers, fps, bpm, f"{p}.sweep[{k}]", errors)
+                    sv = _parse_time(raw, markers, fps, bpm, f"{p}.sweep[{k}]", errors, beat0=beat0)
                     if sv is not None:
                         times[f"{p}.sweep[{k}]"] = sv
     for i, sub in enumerate(spec.subs):
         for field, raw in (("from", sub.from_), ("to", sub.to)):
-            val = _parse_time(raw, markers, fps, bpm, f"subs[{i}].{field}", errors)
+            val = _parse_time(raw, markers, fps, bpm, f"subs[{i}].{field}", errors, beat0=beat0)
             if val is not None:
                 times[f"subs[{i}].{field}"] = val
         if sub.size is not None and (not math.isfinite(sub.size) or sub.size <= 0):
@@ -1081,6 +1304,8 @@ def _validate_tracks(
     bpm: float | None,
     times: dict[str, float],
     errors: list[str],
+    *,
+    beat0: float = 0.0,
 ) -> None:
     if spec.tracks is None:
         return
@@ -1088,7 +1313,7 @@ def _validate_tracks(
         keys: list[TrackKey] = getattr(spec.tracks, name)
         for k, key in enumerate(keys):
             path = f"tracks.{name}[{k}]"
-            val = _parse_time(key.t, markers, fps, bpm, f"{path}.t", errors)
+            val = _parse_time(key.t, markers, fps, bpm, f"{path}.t", errors, beat0=beat0)
             if val is not None:
                 times[f"{path}.t"] = val
             if key.ease is not None:

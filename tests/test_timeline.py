@@ -481,3 +481,158 @@ def test_frame_card_has_span(tmp_path: Path):
     )
     sc0 = tl.plan(0).scene
     assert isinstance(sc0, Still) and sc0.span == (0, 30)
+
+
+def test_ten_one_beat_holds_at_76bpm_do_not_drift(tmp_path: Path):
+    """10 × 1b at 76 bpm / 30 fps is 237 f, not 10 × round(23.684) = 240 f."""
+    from montaj.spec import round_frame, validate_spec
+
+    shots = "\n".join(f"  - {{photo: a, hold: 1b}}" for _ in range(10))
+    tl = _load(
+        tmp_path,
+        "video:\n  size: 1080x1920\n  fps: 30\n  bpm: 76\n  look: warm-film\n"
+        f"assets: assets\nshots:\n{shots}\n",
+        ["a"],
+    )
+    period = 60.0 / 76.0 * 30.0
+    ends = [round_frame(k * period) for k in range(1, 11)]
+    assert ends[-1] == 237
+    assert [s.end for s in tl.shots] == ends
+    assert [s.start for s in tl.shots] == [0] + ends[:-1]
+    assert tl.n_frames == 237
+    parsed, *_ = validate_spec(tl.spec, [], spec_dir=tmp_path)
+    holds = [parsed[f"shots[{i}].hold"] for i in range(10)]
+    assert holds == [e - s for s, e in zip([0] + ends[:-1], ends)]
+    assert sum(holds) == 237
+
+
+def test_markers_beat_grid_phases_four_bar_holds(tmp_path: Path):
+    """No video.bpm: 4b holds lock to markers beats[0] + n·4 beats."""
+    (tmp_path / "music").mkdir()
+    (tmp_path / "music" / "song.wav").write_bytes(b"RIFF")
+    (tmp_path / "music" / "markers.json").write_text(
+        '{"bpm": 80, "beats": [0.41, 1.16, 1.91, 2.66, 3.41]}'
+    )
+    shots = "\n".join(f"  - {{photo: a, hold: 4b}}" for _ in range(4))
+    tl = _load(
+        tmp_path,
+        "video:\n  size: 1080x1920\n  fps: 30\n  look: warm-film\n"
+        "assets: assets\n"
+        "audio:\n  track: music/song.wav\n  markers: music/markers.json\n"
+        f"shots:\n{shots}\n",
+        ["a"],
+    )
+    # round(30 · (0.41 + 3k)) for k = 1..4
+    assert [s.end for s in tl.shots] == [102, 192, 282, 372]
+    assert tl.n_frames == 372
+
+
+def test_video_beat0_overrides_markers_beats(tmp_path: Path):
+    (tmp_path / "music").mkdir()
+    (tmp_path / "music" / "song.wav").write_bytes(b"RIFF")
+    (tmp_path / "music" / "markers.json").write_text(
+        '{"bpm": 80, "beats": [0.41, 1.16, 1.91]}'
+    )
+    shots = "\n".join(f"  - {{photo: a, hold: 4b}}" for _ in range(4))
+    tl = _load(
+        tmp_path,
+        "video:\n  size: 1080x1920\n  fps: 30\n  beat0: 0.5s\n  look: warm-film\n"
+        "assets: assets\n"
+        "audio:\n  track: music/song.wav\n  markers: music/markers.json\n"
+        f"shots:\n{shots}\n",
+        ["a"],
+    )
+    assert [s.end for s in tl.shots] == [105, 195, 285, 375]
+
+
+def test_whole_beat_hold_snaps_forward_after_off_grid_seconds(tmp_path: Path):
+    tl = _load(
+        tmp_path,
+        "video:\n  size: 1080x1920\n  fps: 30\n  bpm: 76\n  look: warm-film\n"
+        "assets: assets\nshots:\n"
+        "  - {photo: a, hold: 1.5s}\n"
+        "  - {photo: a, hold: 1b}\n",
+        ["a"],
+    )
+    from montaj.spec import round_frame
+
+    period = 60.0 / 76.0 * 30.0
+    # 1.5s = 45 f, off the 76 bpm grid; 1b then snaps forward to 3 beats.
+    assert tl.shots[0].end == 45
+    assert tl.shots[1].end == round_frame(3 * period)
+
+
+def test_fractional_beat_hold_does_not_snap(tmp_path: Path):
+    tl = _load(
+        tmp_path,
+        "video:\n  size: 1080x1920\n  fps: 30\n  bpm: 80\n  beat0: 0.41s\n"
+        "  look: warm-film\nassets: assets\nshots:\n  - {photo: a, hold: 1.5b}\n",
+        ["a"],
+    )
+    from montaj.spec import round_frame
+
+    # 1.5 · 22.5 f, no snap to beat0 + 2 beats (34.8 f).
+    assert tl.shots[0].end == round_frame(1.5 * 60.0 / 80.0 * 30.0)
+    assert tl.shots[0].end == 34
+
+
+def test_changing_beat0_changes_affected_segment_hashes(tmp_path: Path):
+    def _film(folder: Path, beat0: str | None, holds: str):
+        assets = folder / "assets"
+        assets.mkdir(parents=True)
+        _jpeg(assets, "a")
+        _jpeg(assets, "b")
+        beat0_l = f"\n  beat0: {beat0}" if beat0 else ""
+        p = folder / "montaj.yaml"
+        p.write_text(
+            "video:\n  size: 1080x1920\n  fps: 30\n  bpm: 80\n  look: warm-film"
+            f"{beat0_l}\nassets: assets\nshots:\n{holds}\n"
+        )
+        tl = resolve(load_spec(p), p.parent)
+        shas = {"a": file_sha(assets / "a.jpg"), "b": file_sha(assets / "b.jpg")}
+        return tl, [segment_hash(tl, seg, shas, "e1") for seg in tl.segments]
+
+    beat_holds = "  - {photo: a, hold: 4b}\n  - {photo: b, hold: 4b}\n"
+    a, ha = _film(tmp_path / "a", None, beat_holds)
+    b, hb = _film(tmp_path / "b", "0.41s", beat_holds)
+    assert a.shots[0].end != b.shots[0].end
+    assert ha[0] != hb[0]
+    assert ha[1] != hb[1]
+
+    frame_holds = "  - {photo: a, hold: 10f}\n  - {photo: b, hold: 10f}\n"
+    c, hc = _film(tmp_path / "c", None, frame_holds)
+    d, hd = _film(tmp_path / "d", "0.41s", frame_holds)
+    assert c.n_frames == d.n_frames
+    assert hc != hd
+
+
+def test_beat0_change_with_fixed_shot_bounds_changes_text_hash(tmp_path: Path):
+    """text at: 8b moves 180 → 192.3 f; shot bounds stay 300 f; hash must change."""
+    extra = (
+        "text:\n"
+        "  - from: 0s\n"
+        "    to: 10s\n"
+        "    lines:\n"
+        "      - {text: x, y: 100, at: 8b}\n"
+    )
+
+    def _film(folder: Path, beat0: str | None):
+        assets = folder / "assets"
+        assets.mkdir(parents=True)
+        _jpeg(assets, "a")
+        beat0_l = f"\n  beat0: {beat0}" if beat0 else ""
+        p = folder / "montaj.yaml"
+        p.write_text(
+            "video:\n  size: 1080x1920\n  fps: 30\n  bpm: 80\n  look: warm-film"
+            f"{beat0_l}\nassets: assets\nshots:\n  - {{photo: a, hold: 10s}}\n{extra}"
+        )
+        tl = resolve(load_spec(p), p.parent)
+        shas = {"a": file_sha(assets / "a.jpg")}
+        return tl, segment_hash(tl, tl.segments[0], shas, "e1")
+
+    a, ha = _film(tmp_path / "a", None)
+    b, hb = _film(tmp_path / "b", "0.41s")
+    assert a.n_frames == b.n_frames == 300
+    assert a.texts[0].lines[0].at == pytest.approx(180.0)
+    assert b.texts[0].lines[0].at == pytest.approx(192.3)
+    assert ha != hb

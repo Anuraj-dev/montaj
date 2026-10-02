@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from montaj.render.core import EASE as EASE_FN, key as eval_key
-from montaj.spec import Shot, Spec, SpecError, parse_wh, round_frame, validate_spec
+from montaj.spec import Shot, Spec, SpecError, _format_beat0, parse_wh, round_frame, validate_spec
 
 _TRACK_DEFAULT = {"dust": "linear", "glow": "linear", "bars": "sine"}
 
@@ -411,27 +411,33 @@ def _resolve_tracks(spec: Spec, times: dict[str, float]) -> dict[str, list]:
 
 def resolve(spec: Spec, spec_dir: Path) -> Timeline:
     errors: list[str] = []
-    parsed, times, markers = validate_spec(spec, errors, spec_dir=spec_dir)
+    parsed, times, markers, bpm, beat0 = validate_spec(spec, errors, spec_dir=spec_dir)
     size = parse_wh(spec.video.size, "video.size", errors, even=True)
     if errors:
         raise SpecError(errors)
     assert size is not None
+    spec = spec.model_copy(
+        update={
+            "video": spec.video.model_copy(
+                update={"bpm": bpm, "beat0": _format_beat0(beat0, spec.video.fps)}
+            )
+        }
+    )
 
-    t = 0
     resolved: list[ResolvedShot] = []
     for i, sh in enumerate(spec.shots):
-        hold = parsed[f"shots[{i}].hold"]
+        start = parsed[f"shots[{i}].start"]
+        end = parsed[f"shots[{i}].end"]
         resolved.append(
             ResolvedShot(
                 index=i,
-                start=t,
-                end=t + hold,
+                start=start,
+                end=end,
                 kind=_shot_kind(sh),
                 spec=_shot_with_frame_keys(sh, i, parsed),
             )
         )
-        t += hold
-    n_frames = t
+    n_frames = resolved[-1].end if resolved else 0
     segments = [Segment(index=i, start=s.start, end=s.end) for i, s in enumerate(resolved)]
     spans = {i: _visible_span(resolved, i, parsed) for i in range(len(resolved))}
 
