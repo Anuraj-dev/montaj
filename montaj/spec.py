@@ -13,7 +13,9 @@ from pydantic import (
     BaseModel,
     BeforeValidator,
     ConfigDict,
+    Discriminator,
     Field,
+    Tag,
     ValidationError,
     WrapSerializer,
     model_validator,
@@ -22,7 +24,7 @@ from pydantic import (
 EASE = ("linear", "smooth", "cubic", "outc", "inc", "expo", "ramp", "sine")
 EASE_HINT = "use linear, smooth, cubic, outc, inc, expo, ramp or sine"
 TRANS_TYPES = ("cut", "fade", "swirl", "whip")
-LOOK_NAMES = ("warm-film", "golden-film")
+LOOK_NAMES = ("warm-film", "golden-film", "clean", "cool-tech")
 INTRO_TYPES = ("white-lift",)
 OUTRO_TYPES = ("glow", "fade")
 TEXT_STYLES = ("serif", "script", "caps", "deva")
@@ -115,12 +117,30 @@ class IntroOutro(Frozen):
     dur: DurationStr
 
 
+class LutLook(Frozen):
+    lut: str
+    strength: RealNum = 1.0
+    vignette: RealNum = 0.0
+    grain: RealNum = 0.0
+
+
+def _look_kind(v: object) -> str:
+    """A name or a `{lut: …}` mapping. The tag keeps pydantic from reporting both branches."""
+    return "look_lut" if isinstance(v, (dict, LutLook)) else "look_name"
+
+
+Look = Annotated[
+    Annotated[str, Tag("look_name")] | Annotated[LutLook, Tag("look_lut")],
+    Discriminator(_look_kind),
+]
+
+
 class Video(Frozen):
     size: str
     fps: int
     bpm: float | None = None
     beat0: DurationStr | None = None
-    look: str
+    look: Look
     intro: IntroOutro | None = None
     outro: IntroOutro | None = None
     motion_blur: int = 1
@@ -367,6 +387,8 @@ def _yaml_path(loc: tuple) -> str:
     for x in loc:
         if x == "in_":
             x = "in"
+        if x in ("look_name", "look_lut"):  # discriminator tags, not spec keys
+            continue
         if isinstance(x, int):
             if parts:
                 parts[-1] = f"{parts[-1]}[{x}]"
@@ -1057,9 +1079,34 @@ def _whole_number(v: float) -> bool:
     return isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v) and v == int(v)
 
 
-def _check_finish(spec: Spec, errors: list[str]) -> None:
-    if spec.video.look not in LOOK_NAMES:
-        errors.append(_line("video.look", f"unknown {spec.video.look!r}", f"use {_choices(LOOK_NAMES)}"))
+def _check_lut_look(look: LutLook, errors: list[str], spec_dir: Path | None) -> None:
+    from montaj.cube import load_cube
+
+    for name in ("strength", "vignette", "grain"):
+        v = getattr(look, name)
+        if not math.isfinite(v) or not 0.0 <= v <= 1.0:
+            errors.append(_line(f"video.look.{name}", f"must be 0..1, got {_fmt_num(v)}", "use a number from 0 to 1"))
+    if not look.lut.lower().endswith(".cube"):
+        errors.append(_line("video.look.lut", f"{look.lut!r} is not a .cube file", "use a path ending in .cube"))
+        return
+    if spec_dir is None:
+        return
+    path = spec_dir / look.lut
+    if not path.is_file():
+        errors.append(_line("video.look.lut", f"{look.lut!r} not found", "path relative to the spec file"))
+        return
+    try:
+        load_cube(path)
+    except (OSError, ValueError) as e:
+        errors.append(_line("video.look.lut", f"{look.lut!r}: {e}", "use a 3D .cube up to 65 points (or a 1D .cube)"))
+
+
+def _check_finish(spec: Spec, errors: list[str], spec_dir: Path | None = None) -> None:
+    look = spec.video.look
+    if isinstance(look, LutLook):
+        _check_lut_look(look, errors, spec_dir)
+    elif look not in LOOK_NAMES:
+        errors.append(_line("video.look", f"unknown {look!r}", f"use {', '.join(LOOK_NAMES)} or {{lut: file.cube}}"))
     intro = spec.video.intro
     if intro is not None and intro.type not in INTRO_TYPES:
         errors.append(
@@ -1309,7 +1356,7 @@ def validate_spec(
                 )
 
     _reject_overlap_windows(spec, holds, parsed, errors)
-    _check_finish(spec, errors)
+    _check_finish(spec, errors, spec_dir)
 
     for i, fx in enumerate(spec.fx):
         kinds = [fx.leak is not None, fx.flash is not None, fx.hit is not None, fx.burst is not None]

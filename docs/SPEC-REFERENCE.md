@@ -6,7 +6,11 @@ Photo fields (`crop`, `focus`, swirl `center`, wall `at`) are source-image pixel
 - `video.fps` — integer, required — frames per second.
 - `video.bpm` — number, default none — beats per minute. If omitted, `audio.markers` `bpm` sets the grid (beats follow the analysed song). Needed, one way or the other, when any duration uses `b`.
 - `video.beat0` — duration (`f` or `s`), default see text — time of the first beat. Default: `0s` when `video.bpm` is set; else `beats[0]` from `audio.markers`.
-- `video.look` — `warm-film` or `golden-film`, required — finish preset applied to every frame. See looks below.
+- `video.look` — `warm-film`, `golden-film`, `clean`, `cool-tech` or a mapping with `lut`, required — finish preset applied to every frame. See looks below.
+- `video.look.lut` — path to a `.cube` file, required in the mapping form — relative to the spec file. 3D up to 65 points per side, or 1D. The file bytes are part of the cache key.
+- `video.look.strength` — number 0..1, default `1` — mix from the ungraded picture (`0`) to the LUT result (`1`).
+- `video.look.vignette` — number 0..1, default `0` — edge darkening, applied after the LUT. `0.1` is subtle.
+- `video.look.grain` — number 0..1, default `0` — film grain mix; `1` is the golden-film grain.
 - `video.background` — `#rrggbb`, default `#000000` — colour that shows through a fade from or to nothing.
 - `video.intro` — mapping, default none — opening treatment on the first frames.
 - `video.intro.type` — `white-lift`, required with intro — a white bloom that settles onto the picture, plus a short lift from white.
@@ -150,6 +154,10 @@ Looks (`video.look`):
 
 - `warm-film` — sharpen, softer contrast, lifted blacks, a vignette, and amber leaks. Uses `shots[].flash`, `fx[].flash`, `fx[].leak`, `video.intro`, and a glow outro. Ignores `fx[].hit`, `fx[].burst`, and `tracks` (`dust`, `glow`, `bars`). `outro: {type: fade}` still fades the frame to black.
 - `golden-film` — `tracks.glow` leaks, `tracks.dust`, `fx[].hit`, `fx[].burst`, `tracks.bars`, and grain. Ignores `shots[].flash`, `fx[].flash`, `fx[].leak`, `video.intro`, and a glow outro. Does not fade to black unless the spec sets `outro: {type: fade}`.
+
+- `clean` — near-identity: light sharpen, no contrast curve, true blacks, a faint vignette. No cast, so screen recordings keep their colours. Uses `shots[].flash`, `fx[].flash`, and `outro: {type: fade}`. Ignores `fx[].leak`, `fx[].hit`, `fx[].burst`, `tracks`, `video.intro`, and a glow outro.
+- `cool-tech` — `clean` plus teal-leaning shadows, cooler whites, a slight contrast curve and a light vignette. Same fx as `clean`.
+- `{lut: …}` — the LUT applied to the untouched picture, then `vignette` and `grain`. Same fx as `clean`.
 
 Easing (the curve into a camera key):
 
