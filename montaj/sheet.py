@@ -1,9 +1,12 @@
-"""Frame contact sheets: pick frames from a video, draw their timestamps, save one JPEG.
+"""Frame contact sheets: pick frames from a video, draw their timestamps, save JPEGs.
 
 `compose_grid` is the shared grid builder (ingest reuses it for photo sheets).
+The default sheet is one JPEG of ≤ 12 frames. `--every` samples a fixed interval
+and writes more pages (`sheet.jpg`, `sheet-2.jpg`, …) when that is more than 12.
 """
 from __future__ import annotations
 
+import math
 import shutil
 import tempfile
 from pathlib import Path
@@ -14,6 +17,9 @@ from PIL import Image, ImageDraw, ImageFont, ImageOps
 from montaj.encode import FFMPEG, MediaInfo, probe, run
 
 MAX_TILES = 12
+# One ffmpeg `select=` expression. Past this the argv no longer fits, and the
+# sheet stops being something an agent can look at.
+MAX_SAMPLES = 4096
 SHEET_MAX_W = 1536
 SHEET_COLS = 4
 TILE_RATIO = 4 / 3
@@ -39,6 +45,43 @@ def pick_times(video: Path | str, at: Sequence[float] | float | None = None, n: 
         raise ValueError(f"{video}: unknown duration, pass explicit times")
     count = max(1, min(int(n), MAX_TILES))
     return [(i + 0.5) * duration / count for i in range(count)]
+
+
+def every_times(duration: float, interval: float, *, fps: float | None = None) -> list[float]:
+    """`0, interval, 2*interval, …` while each time is inside `duration`.
+
+    A 60s film at 0.5s is 120 times (0.0 … 59.5): one sample per interval, the
+    endpoint itself left out. `fps` rejects a step finer than one frame.
+    """
+    if not math.isfinite(interval) or interval <= 0:
+        raise ValueError(f"interval {interval}: use a positive number of seconds, like 0.5s")
+    if not math.isfinite(duration) or duration <= 0:
+        raise ValueError(f"unknown duration {duration}, pass explicit times")
+    span = (duration - 1e-9) / interval
+    if not math.isfinite(span):
+        raise ValueError(
+            f"interval {interval:g}s would sample too many frames across {duration:.2f}s; "
+            "use a coarser interval like 0.5s"
+        )
+    # A duration shorter than the epsilon still gets the opening frame.
+    n = max(1, int(math.floor(span)) + 1)
+    if fps is not None and fps > 0:
+        n_frames = max(1, int(round(duration * fps)))
+        if n > n_frames:
+            frame = 1.0 / fps
+            raise ValueError(
+                f"interval {interval:g}s is finer than one frame ({frame:.4f}s at {fps:g} fps); "
+                "use a coarser step such as 0.5s"
+            )
+    if n > MAX_SAMPLES:
+        raise ValueError(
+            f"interval {interval:g}s would sample {n} frames across {duration:.2f}s; "
+            "use a coarser interval like 0.5s"
+        )
+    times = [i * interval for i in range(n)]
+    # `i * interval` can land on the endpoint from rounding. That frame is the
+    # next film's, not this interval's.
+    return [t for t in times if t < duration]
 
 
 def extract(video: Path | str, times: Sequence[float], dest: Path | str, *,
@@ -90,20 +133,57 @@ def compose_grid(tiles: Sequence[Image.Image], labels: Sequence[str], out: Path 
     return out
 
 
-def sheet(video: Path | str, out: Path | str, at: Sequence[float] | float | None = None, n: int = 12, *,
-          log: Path | str | None = None) -> Path:
-    """One JPEG contact sheet of ≤ 12 frames, ≤ 1536 px wide, each labelled mm:ss.ff."""
-    times = pick_times(video, at, n)
-    if len(times) > MAX_TILES:
-        times = times[:MAX_TILES]
-    times = sorted(times)
+def page_path(out: Path | str, page: int) -> Path:
+    """Page 0 keeps `out`. Later pages are `<stem>-2.jpg`, `<stem>-3.jpg`, …"""
+    out = Path(out)
+    if page <= 0:
+        return out
+    return out.with_name(f"{out.stem}-{page + 1}{out.suffix}")
+
+
+def _drop_stale_pages(out: Path, keep_pages: int) -> None:
+    """Remove pages left by a denser sheet at the same path."""
+    page = keep_pages
+    while True:
+        path = page_path(out, page)
+        if not path.is_file():
+            return
+        path.unlink()
+        page += 1
+
+
+def sheets(video: Path | str, out: Path | str, times: Sequence[float], *,
+           per_page: int = MAX_TILES, log: Path | str | None = None) -> list[Path]:
+    """One JPEG per page of ≤ `per_page` frames, in time order. Returns the paths written."""
     info = probe(video, log=log)
     tmp = Path(tempfile.mkdtemp(prefix="montaj-sheet-"))
     try:
         frames = extract(video, times, tmp / "frames", info=info, log=log)
         if not frames:
             raise RuntimeError(f"sheet: no frames extracted from {video}")
-        labels = [stamp(index / info.fps) for index, _ in frames]
-        return compose_grid([Image.open(path) for _, path in frames], labels, out)
+        step = max(1, int(per_page))
+        paths: list[Path] = []
+        for page, start in enumerate(range(0, len(frames), step)):
+            chunk = frames[start:start + step]
+            images = [Image.open(path) for _, path in chunk]
+            try:
+                labels = [stamp(index / info.fps) for index, _ in chunk]
+                dest = page_path(out, page)
+                compose_grid(images, labels, dest)
+                paths.append(dest)
+            finally:
+                for image in images:
+                    image.close()
+        _drop_stale_pages(Path(out), len(paths))
+        return paths
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
+
+
+def sheet(video: Path | str, out: Path | str, at: Sequence[float] | float | None = None, n: int = 12, *,
+          log: Path | str | None = None) -> Path:
+    """One JPEG contact sheet of ≤ 12 frames, ≤ 1536 px wide, each labelled mm:ss.ff."""
+    times = pick_times(video, at, n)
+    if len(times) > MAX_TILES:
+        times = times[:MAX_TILES]
+    return sheets(video, out, sorted(times), log=log)[0]

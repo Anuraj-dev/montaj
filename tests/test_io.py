@@ -409,6 +409,45 @@ def test_sheet_caps_tile_count(tmp_path: Path) -> None:
     assert len(times) <= sheet.MAX_TILES
 
 
+def test_every_times_covers_60s_at_half_second() -> None:
+    """A 60s film at 0.5s is one sample per interval, from 0 through 59.5."""
+    times = sheet.every_times(60.0, 0.5)
+    assert len(times) == 120
+    assert times[0] == 0.0
+    assert times[-1] == pytest.approx(59.5)
+    assert times == pytest.approx([i * 0.5 for i in range(120)])
+    assert all(t < 60.0 for t in times)
+    assert -(-len(times) // sheet.MAX_TILES) == 10
+
+
+def test_every_times_rejects_bad_intervals() -> None:
+    with pytest.raises(ValueError, match="positive"):
+        sheet.every_times(60.0, 0)
+    with pytest.raises(ValueError, match="positive"):
+        sheet.every_times(60.0, -0.5)
+    with pytest.raises(ValueError, match="unknown duration"):
+        sheet.every_times(0.0, 0.5)
+    with pytest.raises(ValueError, match="finer than one frame"):
+        sheet.every_times(1.0, 0.001, fps=25)
+    with pytest.raises(ValueError, match="coarser"):
+        sheet.every_times(100.0, 0.01)
+
+
+def test_sheets_pages_past_twelve_and_drops_stale(tmp_path: Path) -> None:
+    log = tmp_path / "io.log"
+    video = clip(tmp_path / "v.mp4", seconds=1.0, src="testsrc")
+    times = [i * 0.04 for i in range(13)]  # frames 0..12 at 25 fps
+    paths = sheet.sheets(video, tmp_path / "sheet.jpg", times, log=log)
+    assert [path.name for path in paths] == ["sheet.jpg", "sheet-2.jpg"]
+    for path in paths:
+        with Image.open(path) as img:
+            assert 0 < img.width <= 1536
+
+    one = sheet.sheet(video, tmp_path / "sheet.jpg", at=[0.2], log=log)
+    assert one.name == "sheet.jpg" and one.exists()
+    assert not (tmp_path / "sheet-2.jpg").exists()
+
+
 # --- qa -------------------------------------------------------------------------------------
 
 def _spans(*sections: str) -> Path:
