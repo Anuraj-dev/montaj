@@ -77,9 +77,16 @@ def parse_cube(text: str) -> Cube:
     want = size**3 if dims == 3 else size
     if len(rows) != want:
         raise ValueError(f"LUT_{dims}D_SIZE {size} needs {want} rows, found {len(rows)}")
-    if any(hi <= lo for lo, hi in zip(dmin, dmax)):
-        raise ValueError("DOMAIN_MAX must exceed DOMAIN_MIN")
-    arr = np.asarray(rows, dtype=np.float32)
+    # Judge everything in float32: that is what the renderer uploads.
+    lo32, hi32 = np.asarray(dmin, np.float32), np.asarray(dmax, np.float32)
+    if not (np.isfinite(lo32).all() and np.isfinite(hi32).all()):
+        raise ValueError("DOMAIN_MIN/DOMAIN_MAX outside float32 range")
+    if not (np.isfinite(hi32 - lo32).all() and (hi32 > lo32).all()):
+        raise ValueError("DOMAIN_MAX must exceed DOMAIN_MIN (in float32)")
+    with np.errstate(over="ignore"):
+        arr = np.asarray(rows, dtype=np.float64).astype(np.float32)
+    if not np.isfinite(arr).all():
+        raise ValueError("table values outside float32 range")
     if dims == 3:
         arr = arr.reshape(size, size, size, 3)
     return Cube(dims, size, arr, dmin, dmax)

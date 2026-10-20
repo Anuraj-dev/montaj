@@ -237,3 +237,14 @@ def test_identity_lut_on_cuda() -> None:
     look = {"kind": "graded", "lut": lut_texture(parse_cube(_cube_text(33)), "cuda")}
     out = finish(cv, img, 3, look, _plan())
     assert (out - img).abs().max().item() < 1 / 255
+
+
+def test_cube_domain_collapsing_in_float32_is_rejected():
+    text = "LUT_1D_SIZE 2\nDOMAIN_MIN 1 1 1\nDOMAIN_MAX 1.00000001 1.00000001 1.00000001\n0 0 0\n1 1 1\n"
+    with pytest.raises(ValueError, match="float32"):
+        parse_cube(text)
+
+
+def test_cube_table_values_overflowing_float32_are_rejected():
+    with pytest.raises(ValueError, match="float32"):
+        parse_cube("LUT_1D_SIZE 2\n0 0 0\n1e39 1 1\n")
