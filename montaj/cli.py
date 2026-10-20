@@ -17,6 +17,7 @@ import yaml
 from montaj.audio import analyze as analyze_audio
 from montaj.audio import compose as compose_audio
 from montaj.audio import music as music_gen
+from montaj.audio.mix import check_lines
 from montaj.audio.music import parse_duration
 from montaj.doctor import doctor
 from montaj.encode import export, probe
@@ -451,12 +452,25 @@ def _av_tol(root: Path) -> float | None:
     return 1.0 / float(spec.video.fps)
 
 
+def _audio_mix_lines(root: Path) -> list[str]:
+    """Mix stats from the last render, when the spec mixes clips, edits or ducking."""
+    stats_file = root / "build" / "audio-mix.json"
+    spec_file = root / "montaj.yaml"
+    if not stats_file.is_file() or not spec_file.is_file():
+        return []
+    audio = load_spec(spec_file).audio
+    if audio is None or not (audio.clips or audio.edit or audio.duck):
+        return []
+    return check_lines(json.loads(stats_file.read_text()))
+
+
 def _cmd_check(ns: argparse.Namespace, root: Path) -> list[str]:
     lines = check(
         _video(root, ns.video), _intended_freeze(root),
         log=root / "build" / "qa.log", av_tol=_av_tol(root),
         intended_black=_intended_black(root),
     )
+    lines += _audio_mix_lines(root)
     warns = sum(line.startswith("WARN") for line in lines)
     lines.append(f"WARN check: {warns} warnings" if warns else "OK check")
     return lines
