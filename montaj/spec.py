@@ -138,7 +138,8 @@ class Transition(Frozen):
     center: tuple[float, float] | None = None
     axis: str = "x"
     blur: float = 0.0
-    zoom: RealNum | None = None
+    # Absent stays out of model_dump so films without a pull-back keep their segment hash.
+    zoom: RealNum | None = Field(default=None, exclude_if=lambda v: v is None)
 
 
 class WallPrint(Frozen):
