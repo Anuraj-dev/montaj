@@ -446,6 +446,90 @@ def test_sub_size_changes_segment_hash_and_reaches_the_timeline(tmp_path: Path):
     assert h0 != h1
 
 
+def _caption(backdrop: str) -> str:
+    return (
+        "text:\n"
+        "  - from: 0s\n"
+        "    to: 1s\n"
+        f"    backdrop: {backdrop}\n"
+        "    lines:\n"
+        "      - {text: hi, y: 1400, at: 0s}\n"
+    )
+
+
+def test_backdrop_rejects_bad_values(tmp_path: Path):
+    shot = "  - {photo: a, hold: 30f}\n"
+    bad_type = _errors(tmp_path, shot, extra=_caption("fog"))
+    assert any("text[0].backdrop.type" in e and "gradient or solid" in e for e in bad_type)
+    bad_strength = _errors(tmp_path, shot, extra=_caption("{strength: 1.5}"))
+    assert any("text[0].backdrop.strength" in e and "from 0 to 1" in e for e in bad_strength)
+    bad_place = _errors(tmp_path, shot, extra=_caption("{place: side}"))
+    assert any("text[0].backdrop.place" in e and "bottom, top or band" in e for e in bad_place)
+    off = _errors(tmp_path, shot, extra=_caption("false"))
+    assert any("text[0].backdrop" in e and "omit backdrop" in e for e in off)
+    flag = _errors(tmp_path, shot, extra=_caption("{strength: true}"))
+    assert any("text[0].backdrop.strength" in e and "not a boolean" in e for e in flag)
+
+
+def test_backdrop_reaches_the_timeline_and_the_segment_hash(tmp_path: Path):
+    from montaj.project import file_sha, segment_hash
+    from montaj.spec import BACKDROP_STRENGTH
+
+    shot = "  - {photo: a, hold: 30f}\n  - {photo: b, hold: 30f}\n"
+    p = _write(tmp_path, shot, ["a", "b"], extra=_caption("true"))
+    spec = load_spec(p)
+    assert spec.text[0].backdrop is not None
+    assert spec.text[0].backdrop.type == "gradient"
+    assert spec.text[0].backdrop.place == "band"
+    assert spec.text[0].backdrop.strength == BACKDROP_STRENGTH
+    dumped = spec.model_dump(mode="json", by_alias=True)
+    assert dumped["text"][0]["backdrop"]["type"] == "gradient"
+    from montaj.spec import Spec
+
+    assert Spec.model_validate(dumped) == spec
+
+    shaped = _write(
+        tmp_path,
+        shot,
+        ["a", "b"],
+        extra=_caption("{type: solid, strength: 0.25, place: top}"),
+    )
+    spec = load_spec(shaped)
+    bd = spec.text[0].backdrop
+    assert bd is not None and (bd.type, bd.strength, bd.place) == ("solid", 0.25, "top")
+    tl = resolve(spec, shaped.parent)
+    assert tl.texts[0].backdrop is bd
+    bare = spec.model_copy(deep=True)
+    bare.text[0].backdrop = None
+    assert "backdrop" not in bare.text[0].model_dump(mode="json", by_alias=True)
+
+    extra = """
+text:
+  - from: 0s
+    to: 0.4s
+    backdrop: {strength: 0.5, place: bottom}
+    lines:
+      - {text: first, y: 1600, at: 0s}
+  - from: 1.2s
+    to: 1.8s
+    lines:
+      - {text: second, y: 200, at: 1.2s}
+"""
+    both = _write(tmp_path, shot, ["a", "b"], extra=extra)
+    spec = load_spec(both)
+    assert spec.text[0].backdrop is not None
+    assert spec.text[0].backdrop.type == "gradient"
+    assert "backdrop" not in spec.text[1].model_dump(mode="json", by_alias=True)
+    tl = resolve(spec, both.parent)
+    shas = {s: file_sha(both.parent / "assets" / f"{s}.jpg") for s in ("a", "b")}
+    h0 = [segment_hash(tl, seg, shas, "e1") for seg in tl.segments]
+    edited = spec.model_copy(deep=True)
+    edited.text[0].backdrop.strength = 0.2
+    h1 = [segment_hash(resolve(edited, both.parent), seg, shas, "e1") for seg in tl.segments]
+    assert h0[0] != h1[0]
+    assert h0[1] == h1[1]
+
+
 def test_wall_print_missing(tmp_path: Path):
     wall = """
   - hold: 10f
@@ -682,3 +766,34 @@ def test_beats_without_bpm_or_markers_hint_names_both_fixes(tmp_path: Path):
         "video.bpm" in e and "add bpm: 120, or audio.markers from montaj music analyze" in e
         for e in ei.value.errors
     )
+
+
+def test_check_expect_resolves_markers_and_loudness(tmp_path: Path):
+    p = _write(
+        tmp_path,
+        "  - {photo: a, hold: 4s}\n",
+        ["a"],
+        extra=(
+            "markers:\n  logo: 1s\n"
+            "check:\n  expect:\n"
+            "    - {black: [0s, 2s], why: HUD intro}\n"
+            "    - {frozen: [logo, logo+0.5s]}\n"
+            "  loudness: {i: -16}\n"
+        ),
+    )
+    tl = resolve(load_spec(p), p.parent)
+    a, b = tl.check_expects
+    assert (a.kind, a.start, a.end, a.why) == ("black", 0.0, 2.0, "HUD intro")
+    assert (b.kind, b.start, b.end) == ("frozen", 1.0, 1.5)
+    assert tl.spec.check.loudness.i == -16 and tl.spec.check.loudness.tol == 1
+
+
+@pytest.mark.parametrize(
+    "item",
+    ["{why: x}", "{black: [0s, 1s], frozen: [0s, 1s]}", "{black: [2s, 1s]}", "{black: [0s, nope]}"],
+)
+def test_check_expect_rejects_bad_spans(tmp_path: Path, item: str):
+    p = _write(tmp_path, "  - {photo: a, hold: 4s}\n", ["a"], extra=f"check:\n  expect:\n    - {item}\n")
+    with pytest.raises(SpecError) as ei:
+        load_spec(p)
+    assert all(_LINE.match(e) for e in ei.value.errors)

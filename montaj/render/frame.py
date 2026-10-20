@@ -10,7 +10,6 @@ on the first frame that needs them, one batch per kind, under ``<project>/build/
 """
 from __future__ import annotations
 
-import math
 from collections import OrderedDict
 from pathlib import Path
 from types import SimpleNamespace
@@ -40,6 +39,7 @@ from montaj.render.text import (
     RasterLine,
     RasterSet,
     Sub,
+    TextBackdrop,
     TextBlock,
     TextLine,
     Unit,
@@ -51,7 +51,18 @@ from montaj.render.text import (
 from montaj.render.transitions import fade, swirl, whip
 from montaj.render.wall import build_wall, wall_camera, wall_frame
 from montaj.spec import _dur_frames
-from montaj.timeline import Blank, Card, Clip, Scene, Still, Timeline, Trans, Wall
+from montaj.timeline import (
+    Blank,
+    Card,
+    Clip,
+    Scene,
+    Still,
+    Timeline,
+    Trans,
+    Wall,
+    clip_read_frames,
+    transition_overlap,
+)
 
 # film.html 155: an omitted morph centre is (cx ?? .5, cy ?? .45). The spec leaves it unset.
 _MORPH_CENTER = (0.5, 0.45)
@@ -240,7 +251,7 @@ class Renderer:
         if not sh.clip:
             return None
         extra = self._outgoing_frames(index)
-        nframes = (shot.end - shot.start) + int(math.ceil(extra - 1e-6))
+        nframes = clip_read_frames(shot.end - shot.start, extra)
         clip_in = 0.0 if sh.clip_in is None else self._frames(sh.clip_in) / self.tl.fps
         return sh.clip, clip_in, nframes
 
@@ -410,12 +421,7 @@ class Renderer:
         tr = self.tl.shots[nxt].spec.in_
         if tr is None or tr.type == "cut" or tr.dur is None:
             return 0.0
-        dur = self._frames(tr.dur)
-        if tr.type == "whip":
-            return dur / 2.0
-        if tr.type in ("fade", "swirl"):
-            return dur
-        return 0.0
+        return transition_overlap(tr.type, self._frames(tr.dur))
 
     def _clip_frame(self, scene: Clip, t: float) -> torch.Tensor:
         req = self._clip_request(scene.shot)
@@ -567,6 +573,11 @@ class Renderer:
             reveal=ln.reveal, sweep=ln.sweep, shadow=ln.shadow, indent=ln.indent,
         )
 
+    def _backdrop(self, src) -> TextBackdrop | None:
+        if src is None:
+            return None
+        return TextBackdrop(src.type, float(src.strength), src.place)
+
     def _ensure_rasters(self) -> None:
         """One pass per Renderer. A disk hit starts no browser; a miss batches each kind."""
         if self._rasters_ready:
@@ -594,7 +605,12 @@ class Renderer:
         for block in self.tl.texts:
             lines = tuple(self._line(ln) for ln in block.lines)
             flat.extend(lines)
-            blocks.append(TextBlock(block.from_, block.to, block.fade_in, block.fade_out, block.blur, lines))
+            blocks.append(
+                TextBlock(
+                    block.from_, block.to, block.fade_in, block.fade_out, block.blur, lines,
+                    self._backdrop(block.backdrop),
+                )
+            )
         subs = tuple(Sub(s.from_, s.to, s.text, size=s.size, color=s.color) for s in self.tl.subs)
         device = self.cv.device
         scale = float(self.cv.k)
