@@ -20,6 +20,7 @@ from montaj.audio import compose as compose_audio
 from montaj.audio import music as music_gen
 from montaj.audio.mix import check_lines
 from montaj.audio.music import parse_duration
+from montaj.capture import run as run_capture
 from montaj.doctor import doctor
 from montaj.encode import MediaInfo, export, probe
 from montaj.ingest import IngestError, ingest, ingest_rec
@@ -44,7 +45,7 @@ class _Usage(Exception):
 
 _COMMANDS = (
     "doctor", "new", "ingest", "ingest-rec", "validate", "render", "sheet", "check", "export", "music",
-    "review", "watch", "taste",
+    "review", "watch", "taste", "capture",
 )
 
 
@@ -125,6 +126,9 @@ def _parser() -> argparse.ArgumentParser:
     ta = sub.add_parser("taste")
     ta.add_argument("action", nargs="?", choices=("add",))
     ta.add_argument("line", nargs="?")
+
+    cap = sub.add_parser("capture")
+    cap.add_argument("script")
     return p
 
 
@@ -748,6 +752,13 @@ def _cmd_music_compose(ns: argparse.Namespace, root: Path) -> list[str]:
     return lines
 
 
+def _cmd_capture(ns: argparse.Namespace, root: Path) -> list[str]:
+    result = run_capture(_at(root, ns.script), root, log=root / "build" / "capture.log")
+    mb = result.path.stat().st_size / (1024 * 1024)
+    w, h = result.size
+    return [f"OK {_rel(root, result.path)} {result.seconds:.2f}s {w}x{h} {mb:.1f}MB"]
+
+
 def _cmd_taste(ns: argparse.Namespace) -> list[str]:
     if ns.action == "add":
         if not (ns.line or "").strip():
@@ -800,6 +811,8 @@ def _dispatch(ns: argparse.Namespace, root: Path) -> list[str]:
         return review_summary(root)[0]
     if ns.cmd == "taste":
         return _cmd_taste(ns)
+    if ns.cmd == "capture":
+        return _cmd_capture(ns, root)
     raise _Usage(f"cli: unknown command {ns.cmd!r}")
 
 
