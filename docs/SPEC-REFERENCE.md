@@ -144,7 +144,7 @@ Photo fields (`crop`, `focus`, swirl `center`, wall `at`) are source-image pixel
 - `text[].backdrop.place` — `bottom`, `top` or `band`, default `band` — `band` covers the lines (full strength on the line box, cosine fade across a pad of 48 design px or 0.45× the line size); `bottom` and `top` keep the outer 28% of the frame fully dark, then fade across the next 22%.
 - `text[].lines` — list, required — the lines in this block.
 - `text[].lines[].text` — string, required — the line.
-- `text[].lines[].style` — `serif`, `script`, `caps` or `deva`, default `serif`.
+- `text[].lines[].style` — `serif`, `script`, `caps`, `deva`, `sans` (Inter) or `mono` (JetBrains Mono), default `serif`. `sans` size `48`, weights 400/600/700; `mono` size `32`, weights 400/700; both cream, tracking 0.
 - `text[].lines[].italic` — boolean, default false — serif only.
 - `text[].lines[].gold` — boolean, default false — gold gradient fill with a travelling sweep.
 - `text[].lines[].color` — `cream`, `gold`, `ink` or `#rrggbb`, default serif/deva cream `#fbf1dc`, script/caps gold `#f0c77e`.
@@ -158,10 +158,16 @@ Photo fields (`crop`, `focus`, swirl `center`, wall `at`) are source-image pixel
 - `text[].lines[].stagger` — duration, default `0.16s` word / `0.07s` char — delay between units.
 - `text[].lines[].dur` — duration, default `0.9s` — reveal length of one unit.
 - `text[].lines[].rise` — number, default `26` — design-px rise of each unit.
-- `text[].lines[].reveal` — `rise` or `pop`, default `rise`.
+- `text[].lines[].reveal` — `rise`, `pop` or `type`, default `rise`. `type` is a typewriter: one char per `stagger` (default `0.05s`), no rise or blur, each char instant (`dur` is rejected); forces `by: char`.
 - `text[].lines[].sweep` — `[from, to]` time expressions, default the block window — gold gradient travels 100%→0% across it.
 - `text[].lines[].shadow` — boolean, default true — false drops the text shadow (ink lines).
 - `text[].lines[].indent` — number, default `0` — extra `margin-left` in em, on top of the centred line.
+- `text[].lines[].align` — `center`, `left` or `right`, default `center` — `left`/`right` inset the line 72 design px from that edge.
+- `text[].lines[].cursor` — boolean, default false — `reveal: type` only; a bar after the last typed char, solid while typing, then blinking every `0.53s`.
+- `text[].lines[].box` — `none` or `chip`, default `none` — `chip` draws a rounded translucent pill behind the line, revealed with its first unit.
+- `text[].lines[].box_color` — `cream`, `gold`, `ink` or `#rrggbb`, default dark translucent — chip fill; needs `box: chip`.
+- `text[].lines[].dot` — `cream`, `gold`, `ink` or `#rrggbb`, default none — status dot before the text inside the chip; needs `box: chip`.
+- `text[].lower_third` — `{title, subtitle?, at?, side?, y?}`, replaces `lines` — sugar for a bold sans title chip with a gold dot and a sans subtitle 110 design px below. `at` default the block `from`, `side` `left` or `right` default `left`, `y` default `1500` (design px, title top). `fade_in`/`fade_out` default `0.4s`. No bar or slide yet.
 - `subs` — list, default none — lyric subtitles, one fixed style.
 - `subs[].from` — time expression, required — subtitle window start.
 - `subs[].to` — time expression, required — subtitle window end.

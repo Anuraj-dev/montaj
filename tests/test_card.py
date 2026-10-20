@@ -103,3 +103,25 @@ def test_card_field_does_not_change_existing_hashes(tmp_path: Path) -> None:
         "f3275515065843b5dcf908991483c46a0ce59a18825e792e0c966d14bf83be76",
         "cdda609de59fa0089e05b129c226170783a281a9ebc7a1bbb061a43036b35d5f",
     ]
+
+
+def test_card_lines_take_the_new_text_styles(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Card text uses the same line fields as a text block: it renders, and its ext fonts reach the hash."""
+    import montaj.project as project
+    from montaj.render.canvas import Canvas
+    from montaj.render.frame import Renderer
+
+    styled = _CARD.replace("at: 0s", "at: 0s, style: sans, box: chip, align: left")
+    p = _write(tmp_path, styled)
+    p.write_text(p.read_text().replace("1080x1920", "270x480"))
+    tl = resolve(load_spec(p), tmp_path)
+    r = Renderer(tl, tmp_path, Canvas(tl.size[0], tl.size[1], device="cpu"))
+    r._ensure_rasters()
+    assert r._eval(tl.plan(15).scene, 15.0).shape == (3, 480, 270)
+
+    seen: list[frozenset[str] | None] = []
+    real = project._text_asset_shas
+    monkeypatch.setattr(project, "_text_asset_shas", lambda ext=None: seen.append(ext) or real(ext))
+    segment_hash(tl, tl.segments[0], {}, "e1")
+    assert seen == [frozenset({"sans"})]
+    assert any("card.text[0].box" in e and "need a box" in e for e in _errors(tmp_path, _CARD.replace("at: 0s", 'at: 0s, dot: "#ff0000"')))

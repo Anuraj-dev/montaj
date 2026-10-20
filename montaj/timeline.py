@@ -146,6 +146,11 @@ class ResolvedLine:
     sweep: tuple[float, float]
     shadow: bool
     indent: float = 0.0
+    align: str = "center"
+    box: str = "none"
+    box_color: str | None = None
+    dot: str | None = None
+    cursor: bool = False
 
 
 @dataclass(frozen=True)
@@ -542,11 +547,12 @@ def _resolve_texts(spec: Spec, times: dict[str, float], fps: int) -> list[Resolv
         fo = times.get(f"text[{i}].fade_out", 0.8 * fps)
         lines: list[ResolvedLine] = []
         for j, line in enumerate(block.lines):
+            typed = line.reveal == "type"  # typewriter: one char per stagger, each instant
             stagger = times.get(
                 f"text[{i}].lines[{j}].stagger",
-                (0.07 if line.by == "char" else 0.16) * fps,
+                (0.05 if typed else 0.07 if line.by == "char" else 0.16) * fps,
             )
-            dur = times.get(f"text[{i}].lines[{j}].dur", 0.9 * fps)
+            dur = times.get(f"text[{i}].lines[{j}].dur", 0.0 if typed else 0.9 * fps)
             if line.sweep:
                 sweep = (times[f"text[{i}].lines[{j}].sweep[0]"], times[f"text[{i}].lines[{j}].sweep[1]"])
             else:
@@ -564,14 +570,19 @@ def _resolve_texts(spec: Spec, times: dict[str, float], fps: int) -> list[Resolv
                     line_height=line.line_height,
                     y=line.y,
                     at=times[f"text[{i}].lines[{j}].at"],
-                    by=line.by,
+                    by="char" if typed else line.by,
                     stagger=stagger,
                     dur=dur,
-                    rise=line.rise,
+                    rise=0.0 if typed else line.rise,
                     reveal=line.reveal,
                     sweep=sweep,
                     shadow=line.shadow,
                     indent=line.indent,
+                    align=line.align,
+                    box=line.box,
+                    box_color=line.box_color,
+                    dot=line.dot,
+                    cursor=line.cursor,
                 )
             )
         out.append(
