@@ -136,23 +136,32 @@ def draw_overlay(cv, img: torch.Tensor, ov, f: float) -> torch.Tensor:
     half = kind[-1]
     sigma = (2.0 * ov.width + 4.0) * k if ov.glow > 0 else 0.0
     pad = math.ceil(half + 2.0 + 3.0 * sigma)
-    x0, y0 = max(0, int(math.floor(bx0)) - pad), max(0, int(math.floor(by0)) - pad)
-    x1, y1 = min(cv.W, int(math.ceil(bx1)) + pad), min(cv.H, int(math.ceil(by1)) + pad)
+    # Rasterise and blur on a window that reaches `pad` past the canvas: an offscreen stroke
+    # still lights visible pixels. Only the canvas part is composited.
+    x0, y0 = max(-pad, int(math.floor(bx0)) - pad), max(-pad, int(math.floor(by0)) - pad)
+    x1, y1 = min(cv.W + pad, int(math.ceil(bx1)) + pad), min(cv.H + pad, int(math.ceil(by1)) + pad)
     if x1 <= x0 or y1 <= y0:
         return img
-    X = cv.XX[y0:y1, x0:x1] + 0.5
-    Y = cv.YY[y0:y1, x0:x1] + 0.5
+    X = (torch.arange(x0, x1, device=img.device, dtype=img.dtype) + 0.5)[None, :].expand(y1 - y0, -1)
+    Y = (torch.arange(y0, y1, device=img.device, dtype=img.dtype) + 0.5)[:, None].expand(-1, x1 - x0)
     cov = _coverage(kind, X, Y)
     if cov is None:
         return img
-    rgb = torch.tensor(_rgb(ov.color), device=img.device, dtype=img.dtype)[:, None, None]
-    win = img[:, y0:y1, x0:x1]
+    g = None
     if sigma > 0:
-        # Screen the blurred coverage under the shape so glow brightens, never darkens.
         g = (css_blur(cov[None], sigma)[0] * ov.glow * ov.opacity).clamp(0.0, 1.0)
-        win = 1.0 - (1.0 - win) * (1.0 - rgb * g)
+    cx0, cy0, cx1, cy1 = max(x0, 0), max(y0, 0), min(x1, cv.W), min(y1, cv.H)
+    if cx1 <= cx0 or cy1 <= cy0:
+        return img
+    sl = (slice(cy0 - y0, cy1 - y0), slice(cx0 - x0, cx1 - x0))
+    cov = cov[sl]
+    rgb = torch.tensor(_rgb(ov.color), device=img.device, dtype=img.dtype)[:, None, None]
+    win = img[:, cy0:cy1, cx0:cx1]
+    if g is not None:
+        # Screen the blurred coverage under the shape so glow brightens, never darkens.
+        win = 1.0 - (1.0 - win) * (1.0 - rgb * g[sl])
     a = cov * ov.opacity
-    img[:, y0:y1, x0:x1] = win * (1.0 - a) + rgb * a
+    img[:, cy0:cy1, cx0:cx1] = win * (1.0 - a) + rgb * a
     return img
 
 

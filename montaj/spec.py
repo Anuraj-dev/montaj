@@ -348,17 +348,17 @@ class Overlay(Frozen):
     shape: str
     from_: TimeExpr = Field(alias="from")
     to: TimeExpr
-    center: tuple[float, float] | None = None
+    center: tuple[RealNum, RealNum] | None = None
     radius: RealNum | tuple[RealNum, RealNum] | None = None
     sweep: RealNum | tuple[RealNum, RealNum] | None = None
-    box: tuple[float, float, float, float] | None = None
-    arm: float | None = None
-    points: list[tuple[float, float]] | None = None
+    box: tuple[RealNum, RealNum, RealNum, RealNum] | None = None
+    arm: RealNum | None = None
+    points: list[tuple[RealNum, RealNum]] | None = None
     draw: DurationStr | None = None
-    width: float = 3.0
+    width: RealNum = 3.0
     color: str = "#ffffff"
-    opacity: float = 1.0
-    glow: float = 0.0
+    opacity: RealNum = 1.0
+    glow: RealNum = 0.0
     ease: str = "smooth"
     above_finish: bool = False
 

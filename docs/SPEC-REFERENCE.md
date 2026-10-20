@@ -151,7 +151,7 @@ Photo fields (`crop`, `focus`, swirl `center`, wall `at`) are source-image pixel
 - `overlays[].opacity` — number 0–1, default `1`.
 - `overlays[].glow` — number ≥ 0, default `0` — soft halo around the stroke, screened under it. About `0.6` is a gentle neon.
 - `overlays[].ease` — easing name, default `smooth` — curve for radius, sweep and draw.
-- `overlays[].above_finish` — boolean, default false — draw after the look, grain and fade, so the shape stays crisp and ungraded.
+- `overlays[].above_finish` — boolean, default false — skip the look, so the shape stays crisp and ungraded; still under text, and fades with the picture.
 - `check` — mapping, default none — designed QA exceptions. The renderer does not read this, so it does not change the segment hash.
 - `check.expect` — list, default none — black or frozen spans `check` treats as designed. A span that matches no detected span prints `INFO expect <kind> <start>–<end>s not found`.
 - `check.expect[].black` — `[start, end]` time expressions, black or frozen — a designed black window. Set this or `frozen`, not both. `end` must be later than `start`.

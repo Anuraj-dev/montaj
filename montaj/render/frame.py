@@ -560,11 +560,15 @@ class Renderer:
             self._sprite(caption)
         self._rasters_ready = True
 
-    def _overlay(self, f: int):
-        if self._rasters is None:
+    def _overlay(self, f: int, above: list):
+        """Hook run inside `finish`: `above_finish` shapes, then text, so text always sits on top."""
+        if self._rasters is None and not above:
             return None
 
         def overlay(img: torch.Tensor) -> torch.Tensor:
+            img = draw_overlays(self.cv, img, above, float(f))
+            if self._rasters is None:
+                return img
             return draw_text(
                 self.cv, img, self._blocks, self._subs, float(f), self._rasters, fps=float(self.tl.fps),
             )
@@ -641,10 +645,9 @@ class Renderer:
                     sample = self._eval(plan.scene, t)
                     acc = sample if acc is None else acc + sample
                 acc = acc / n
-            # Overlays under the finish are graded with the picture; `above_finish` ones land after it.
+            # Plain overlays are graded with the picture. `above_finish` ones skip the look but
+            # still land under text and fade with the picture.
             ovs = [self.tl.overlays[i] for i in plan.overlays]
-            under = [o for o in ovs if not o.above_finish]
+            acc = draw_overlays(self.cv, acc, [o for o in ovs if not o.above_finish], float(f))
             above = [o for o in ovs if o.above_finish]
-            acc = draw_overlays(self.cv, acc, under, float(f))
-            out = finish(self.cv, acc, f, self._look(), plan, self._overlay(f))
-            return draw_overlays(self.cv, out, above, float(f))
+            return finish(self.cv, acc, f, self._look(), plan, self._overlay(f, above))

@@ -123,7 +123,7 @@ def _canvas(w: int = 1080, h: int = 180) -> Canvas:
 
 
 def _black(cv: Canvas) -> torch.Tensor:
-    return torch.zeros(3, cv.H, cv.W)
+    return torch.zeros(3, cv.H, cv.W, device=cv.device)
 
 
 def test_ring_pixel_coverage() -> None:
@@ -243,6 +243,15 @@ def test_above_finish_skips_the_grade(tmp_path: Path) -> None:
     assert outs["false"][0, y, x] < 1.0       # graded: warm-film lifts/gains the red
 
 
+def test_offscreen_stroke_glows_into_the_canvas() -> None:
+    cv = _canvas()
+    line = dict(shape="line", center=None, radius=None, points=((-3.0, 0.0), (-3.0, 180.0)), width=2.0)
+    glow = draw_overlays(cv, _black(cv), [_ov(glow=0.8, **line)], 0.0)
+    crisp = draw_overlays(cv, _black(cv), [_ov(glow=0.0, **line)], 0.0)
+    assert float(crisp[0, 90, 0]) == 0.0                 # the stroke itself is offscreen
+    assert float(glow[0, 90, 0]) > 0.02                  # its halo reaches the edge
+
+
 @pytest.mark.gpu
 def test_cuda_overlay_matches_cpu() -> None:
     cpu, gpu = _canvas(), Canvas(1080, 180, device="cuda")
@@ -251,3 +260,33 @@ def test_cuda_overlay_matches_cpu() -> None:
     a = draw_overlays(cpu, _black(cpu), ovs, 5.0)
     b = draw_overlays(gpu, _black(gpu), ovs, 5.0).cpu()
     assert (a - b).abs().max() < 1e-3
+
+
+@pytest.mark.parametrize("field", ["width", "glow", "opacity", "arm"])
+def test_bool_numeric_fields_are_rejected(tmp_path: Path, field: str) -> None:
+    shape = "brackets, box: [10, 20, 170, 120]" if field == "arm" else "ring, center: [90, 160], radius: 40"
+    _err(tmp_path, f"overlays:\n  - {{shape: {shape}, from: 0f, to: 6f, {field}: true}}\n", f"overlays[0].{field}")
+
+
+@pytest.mark.parametrize("shape", [
+    "ring, center: [true, 160], radius: 40",
+    "ring, center: [90, 160], radius: [true, 40]",
+    "brackets, box: [10, 20, 170, true]",
+    "line, points: [[0, 0], [true, 5]]",
+])
+def test_bool_coordinates_are_rejected(tmp_path: Path, shape: str) -> None:
+    _err(tmp_path, f"overlays:\n  - {{shape: {shape}, from: 0f, to: 6f}}\n", "overlays[0]")
+
+
+def test_above_finish_shape_sits_under_text(tmp_path: Path) -> None:
+    ring = "overlays:\n  - {shape: ring, from: 0f, to: 12f, center: [540, 960], radius: 100, width: 2400, color: '#ff0000', above_finish: true}\n"
+    text = "text:\n  - from: 0f\n    to: 12f\n    lines:\n      - {text: HELLO, style: caps, size: 200, y: 900, at: 0f}\n"
+    outs = {}
+    for name, body in (("ring", ring), ("both", ring + text)):
+        d = tmp_path / name
+        p = _write(d, body, size="270x480", hold="12f")
+        p.write_text(p.read_text().replace("size: 270x480", "size: 1080x1920"))
+        tl = resolve(load_spec(p), d)
+        outs[name] = Renderer(tl, d, Canvas(*tl.size, device="cpu")).frame(3)
+    changed = (outs["both"] - outs["ring"]).abs().sum(0) > 0.05
+    assert changed.any()          # text shows through the opaque above_finish ring
