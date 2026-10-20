@@ -27,6 +27,13 @@ Photo fields (`crop`, `focus`, swirl `center`, wall `at`) are source-image pixel
 - `shots[].at_event` — mapping, default none — pick `clip_in` from `assets/<clip>.events.json`: `{kind, <field>: value, contains: {<field>: substring}, nth}`; `nth` is 1-based among matches. A miss is an error listing the values present. Needs `clip`; exclusive with `clip_in` and `range`. The resolved time is written into the shot, so changing `nth` re-renders only that shot.
 - `shots[].pre` — duration, default `0s` — start this long before the `at_event` time (clamped error if before the clip start). Needs `at_event`.
 - `shots[].range` — `[start, end]` durations, default none — source span of `clip` played as this shot. Needs `clip`. Shot length is `end − start` and does not snap to the beat grid. Playback stops at `end`: an outgoing transition holds the last frame. The file needs a video stream and `start` must fall inside it. Mutually exclusive with `hold`, `until` and `clip_in`.
+- `shots[].camera` — list of keys, default none — keyframed punch-in on a clip, on the shot clock (`t` from the shot's start, fade-in included). Needs `clip`. Mutually exclusive with `focus` and `zoom`.
+- `shots[].camera[].t` — duration, required — when this key is reached. Keys run in increasing time; before the first key the camera holds it, after the last it holds that.
+- `shots[].camera[].zoom` — number >= 1, optional — multiple of cover: `1` shows the whole crop, `1.35` is a 35% punch-in. Leave it off to hold the previous zoom (first key: `1`). Moves geometrically between keys.
+- `shots[].camera[].focus` — `[x, y]`, optional — source-video pixel placed at the screen centre, kept inside the crop's cover so no border shows. Leave it off to hold the previous focus (first key: the crop centre).
+- `shots[].camera[].ease` — easing name, default `smooth` — how the camera travels into this key.
+- `shots[].speed` — number > 0 or list of `{t, v, ease}` keys, default `1` — playback speed of a clip. `2` plays twice as fast. Keys ease the speed (`v`) like a camera track; the source position is its integral at frame resolution. Needs `clip`; mutually exclusive with `range`. The source must last the hold (`ERR shots[3]: clip ends at 4.1s of source, needs 5.2s`). No reverse.
+- `shots[].freeze` — duration, default none — from this time in the shot to its end the clip shows the source frame it had here. Needs `clip`; must fall inside the hold.
 - `shots[].hold` — duration, hold, until or range — how long this shot is on screen. Exactly one of `hold`, `until` or `range`. A whole-beat hold (`4b`) ends on a beat of the grid (moving forward if the shot started off-beat), and beat holds never drift from rounding.
 - `shots[].until` — time expression, hold or until — the shot ends at this time from film start. Must fall after the shot's start.
 - `shots[].drift` — mapping, default none — Ken Burns zoom/pan on a photo. Needs `photo`. Mutually exclusive with `zoom`.
@@ -52,9 +59,9 @@ Photo fields (`crop`, `focus`, swirl `center`, wall `at`) are source-image pixel
 - `shots[].card` — mapping, one source: photo, wall, clip, blank, sequence or card — a solid colour and text as this shot's picture, with no blank shot and no `text` block. Mutually exclusive with the other sources.
 - `shots[].card.color` — `#rrggbb`, required — the card's background.
 - `shots[].card.text` — list, required — lines with the same fields as `text[].lines[]`. `at`, `stagger`, `dur` and `sweep` are durations from this shot's start (`0s`, `12f`, `1b`), not film markers. The colour and the lines are one picture, so a fade or whip carries both.
-- `shots[].crop` — `[x0, y0, x1, y1]`, default the full image — the part of the photo that is shown.
-- `shots[].focus` — `[x, y]`, default the crop centre — the photo point placed at the screen centre.
-- `shots[].zoom` — number, default cover — design pixels per photo pixel. Cover fits the crop with a hair of overscan.
+- `shots[].crop` — `[x0, y0, x1, y1]`, default the full image — the part of the photo that is shown. On a clip it is a box of the source video frame, in source px, inside the video.
+- `shots[].focus` — `[x, y]`, default the crop centre — the photo point placed at the screen centre. On a clip it is a source-video pixel inside the crop, a one-key `camera`.
+- `shots[].zoom` — number, default cover — design pixels per photo pixel. Cover fits the crop with a hair of overscan. On a clip it is a multiple of cover (>= 1), a one-key `camera`, as in `camera[].zoom`.
 - `shots[].in` — mapping, default none — how this shot arrives from the previous one. Omit `in` for a cut. See transitions.
 - `shots[].in.type` — `cut`, `fade`, `swirl`, `whip`, `wall-pullback` or `burn-white`, required inside `in` — which transition.
 - `shots[].in.dur` — duration, required except for a cut — length of the transition. It has to fit in the shots it overlaps.

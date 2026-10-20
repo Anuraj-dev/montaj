@@ -11,12 +11,15 @@ on the first frame that needs them, one batch per kind, under ``<project>/build/
 from __future__ import annotations
 
 from collections import OrderedDict
+from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
 
 import torch
 import torch.nn.functional as F
 
+from montaj.clipmap import camera_at, source_index
+from montaj.encode import probe
 from montaj.project import find_photo, resolve_clip
 from montaj.render.canvas import Canvas
 from montaj.render.clip import ClipSource, window_key
@@ -83,6 +86,30 @@ _STILL_CAP = 4
 _WALL_CAP = 2
 _CLIP_CAP = 2
 _CAPTION_CAP = 8
+
+
+@dataclass(frozen=True)
+class _ClipPlan:
+    """How one clip shot is decoded. `crop` None means the plain cover decode at the canvas size."""
+
+    stem: str
+    clip_in: float
+    count: int
+    w: int
+    h: int
+    crop: tuple[int, int, int, int] | None
+    src: tuple[int, ...] | None
+    box: tuple[int, int, int, int] | None
+
+
+class _ClipView:
+    """The decoded crop, shaped like a Photo for `kenburns`: crop is the whole texture."""
+
+    __slots__ = ("crop", "tex")
+
+    def __init__(self, tex: torch.Tensor):
+        self.tex = tex
+        self.crop = (0, 0, int(tex.shape[3]), int(tex.shape[2]))
 
 
 class _LRU:
@@ -200,6 +227,8 @@ class Renderer:
         self._walls: _LRU = _LRU(caps["walls"])
         self._stills: _LRU = _LRU(caps["stills"])
         self._clips: _LRU = _LRU(caps["clips"])
+        self._clip_plans: dict[int, _ClipPlan] = {}
+        self._clip_sizes: dict[str, tuple[int, int]] = {}
         self._bgs: _LRU = _LRU(caps["bgs"])
         self._cards: _LRU = _LRU(caps["cards"])
         self._bg: torch.Tensor | None = None
@@ -248,7 +277,26 @@ class Renderer:
             del cache[key]
             owners.pop(key, None)
 
-    def _clip_request(self, index: int) -> tuple[str, float, int] | None:
+    def _clip_size(self, stem: str) -> tuple[int, int]:
+        hit = self._clip_sizes.get(stem)
+        if hit is None:
+            info = probe(resolve_clip(self._dir, self._assets, stem))
+            if info.width <= 0 or info.height <= 0:
+                raise RuntimeError(f"clip {stem} has no video size")
+            hit = self._clip_sizes[stem] = (info.width, info.height)
+        return hit
+
+    @staticmethod
+    def _camera_keys(sh) -> list[tuple]:
+        """Shot-level focus/zoom is a one-key camera."""
+        if sh.camera:
+            return [(float(k.t), k.zoom, k.focus, k.ease) for k in sh.camera]
+        return [(0.0, sh.zoom, sh.focus, "linear")]
+
+    def _clip_plan(self, index: int) -> _ClipPlan | None:
+        hit = self._clip_plans.get(index)
+        if hit is not None:
+            return hit
         shot = self.tl.shots[index]
         sh = shot.spec
         if not sh.clip:
@@ -256,7 +304,31 @@ class Renderer:
         # A range stops at its end: the outgoing fade holds the last frame instead of reading on.
         extra = 0.0 if sh.range is not None else self._outgoing_frames(index)
         nframes = clip_read_frames(shot.end - shot.start, extra)
-        return sh.clip, self._clip_in_seconds(sh), nframes
+        clip_in = self._clip_in_seconds(sh)
+        speed = sh.speed
+        if isinstance(speed, list):
+            speed = [(k.t, k.v, k.ease) for k in speed]
+        src = source_index(speed, sh.freeze, nframes)
+        count = nframes if src is None else max(src) + 1
+        W, H = self.cv.W, self.cv.H
+        if sh.crop is None and sh.camera is None and sh.focus is None and sh.zoom is None:
+            plan = _ClipPlan(sh.clip, clip_in, count, W, H, None, src, None)
+        else:
+            sw, shh = self._clip_size(sh.clip)
+            box = tuple(sh.crop) if sh.crop is not None else (0, 0, sw, shh)
+            cw, ch = box[2] - box[0], box[3] - box[1]
+            zmax = max([1.0] + [float(k[1]) for k in self._camera_keys(sh) if k[1] is not None])
+            # Decode no finer than the deepest zoom can show; never upscale in ffmpeg.
+            d = min(1.0, max(W / cw, H / ch) * zmax)
+            plan = _ClipPlan(
+                sh.clip, clip_in, count, max(2, round(cw * d)), max(2, round(ch * d)), box, src, box,
+            )
+        self._clip_plans[index] = plan
+        return plan
+
+    def _clip_request(self, index: int) -> tuple[str, float, int] | None:
+        plan = self._clip_plan(index)
+        return None if plan is None else (plan.stem, plan.clip_in, plan.count)
 
     def _clip_in_seconds(self, sh) -> float:
         """Source offset. `range` starts at its first time; `clip_in` is the other way in."""
@@ -269,11 +341,12 @@ class Renderer:
         """Close windows this segment will not read. Same stem, different clip_in, is another window."""
         wanted: dict[str, set[tuple]] = {}
         for index in needed:
-            req = self._clip_request(index)
-            if req is None:
+            plan = self._clip_plan(index)
+            if plan is None:
                 continue
-            stem, clip_in, nframes = req
-            wanted.setdefault(stem, set()).add(window_key(clip_in, self.cv.W, self.cv.H, nframes))
+            wanted.setdefault(plan.stem, set()).add(
+                window_key(plan.clip_in, plan.w, plan.h, plan.count, plan.crop)
+            )
         for stem in [stem for stem in self._clips if stem not in wanted]:
             src = self._clips.get(stem)
             del self._clips[stem]
@@ -450,13 +523,20 @@ class Renderer:
         return transition_overlap(tr.type, self._frames(tr.dur))
 
     def _clip_frame(self, scene: Clip, t: float) -> torch.Tensor:
-        req = self._clip_request(scene.shot)
-        if req is None:
+        plan = self._clip_plan(scene.shot)
+        if plan is None:
             raise ValueError(f"shot {scene.shot} is not a clip")
-        stem, clip_in, nframes = req
-        return self._clip_source(stem).frame(
-            t, float(scene.t0), clip_in, self.cv.W, self.cv.H, nframes=nframes, device=self.cv.device,
+        img = self._clip_source(plan.stem).frame(
+            t, float(scene.t0), plan.clip_in, plan.w, plan.h, nframes=plan.count, device=self.cv.device,
+            crop=plan.crop, src=plan.src,
         )
+        if plan.box is None:
+            return img
+        # Crop, focus and zoom share the photo path: cover-fit the crop, then focus/zoom on it.
+        # t is the continuous shot clock, so motion-blur sub-samples stay smooth.
+        keys = self._camera_keys(self.tl.shots[scene.shot].spec)
+        z, fx, fy = camera_at(keys, plan.box, t - scene.t0)
+        return kenburns(self.cv, _ClipView(img[None]), fx, fy, z, 0.0, 0.0)
 
     def _frame_bg(self, stem: str, photo: Photo) -> torch.Tensor:
         key = (stem, photo.crop)
