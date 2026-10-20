@@ -490,7 +490,7 @@ def _clip_overruns(root: Path) -> list[str]:
     if not spec_file.is_file():
         return []
     tl = resolve(load_spec(spec_file), root)
-    return clip_overruns(tl, _assets_dir(root, tl.spec.assets), log=root / "build" / "qa.log")
+    return clip_overruns(tl, _assets_dir(root, tl.spec.assets), spec_dir=root, log=root / "build" / "qa.log")
 
 
 def _cmd_check(ns: argparse.Namespace, root: Path) -> list[str]:

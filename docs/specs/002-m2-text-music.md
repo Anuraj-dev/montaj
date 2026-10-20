@@ -54,8 +54,10 @@ shots:
     pulse: heartbeat      # beat-locked scale pulse on video.bpm, phase from the shot start
     in: {type: fade, dur: 0.5s, blur: 14}   # new: blur (design px) on the fading layers; default 0
   - clip: intro-video     # video file stem in assets/ (mp4, mov, webm, mkv); photo | wall | clip
-    clip_in: 1.5s         # source offset; default 0s
+    clip_in: 1.5s         # source offset; default 0s. Mutually exclusive with range
     hold: 3s
+  - clip: ../launch/out/final.mp4  # stem in assets/, or a path to a finished video
+    range: [12.0s, 18.5s]          # [start, end) of that file; shot length is the span
 text:                     # overlay blocks; each line reveals unit by unit
   - from: 0s              # block visible window [from, to]
     to: 7.2s
@@ -166,6 +168,12 @@ CPU frames lazily per shot; frame for timeline `t` = `floor(t − shot.start)` c
 The decoded window is the hold plus the outgoing fade or swirl (half a whip). Past the file, that index
 clamps to the last decoded frame. `montaj check` warns, naming the shot and how far the window overruns.
 Framing: cover, centred (focus/crop/drift not supported on clips in M2).
+
+`shots[].range` is `[start, end]` durations into that file. It is the shot: length is `end − start`, source
+offset is `start`, and `hold`, `until`, and `clip_in` stay unset. `clip` may be an assets stem or a path to a
+finished video (`mp4`, `mov`, `webm`, `mkv`) relative to the spec file or absolute, so a section of an earlier
+film is reused without trimming. Validate rejects a range that ends after the file. The segment hash includes
+that file's sha and, when set, the range; an unset range is left out of the shot payload so older hashes stay put.
 
 ## Timeline (montaj/timeline.py) — additions
 ```python

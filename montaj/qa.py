@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import NamedTuple, Sequence
 
 from montaj.encode import FFMPEG, FFPROBE, capture, probe, run
-from montaj.project import find_clip
+from montaj.project import resolve_clip
 from montaj.spec import _dur_frames
 from montaj.timeline import Timeline, clip_read_frames, transition_overlap
 
@@ -260,7 +260,9 @@ def video_end(path: Path, *, log: Path | str | None = None) -> float:
     return end or probe(path, log=log).duration
 
 
-def clip_overruns(tl: Timeline, assets: Path, *, log: Path | str | None = None) -> list[str]:
+def clip_overruns(
+    tl: Timeline, assets: Path, *, spec_dir: Path | None = None, log: Path | str | None = None
+) -> list[str]:
     """WARN when a clip shot's read window goes past the end of its source.
 
     The window is the hold plus the outgoing fade or swirl, or half a whip: the
@@ -280,13 +282,14 @@ def clip_overruns(tl: Timeline, assets: Path, *, log: Path | str | None = None) 
             continue
         nxt = shot.index + 1
         overlap = 0.0
-        if nxt < len(tl.shots):
+        # A range never reads past its end, so only the hold counts.
+        if nxt < len(tl.shots) and sh.range is None:
             tr = tl.shots[nxt].spec.in_
             if tr is not None and tr.type != "cut" and tr.dur is not None:
                 overlap = transition_overlap(tr.type, _frames(tr.dur, fps, bpm))
         need = clip_read_frames(shot.end - shot.start, overlap) / float(fps)
-        clip_in = _frames(sh.clip_in, fps, bpm) / float(fps)
-        path = find_clip(assets, sh.clip)
+        clip_in = _frames(sh.range[0] if sh.range is not None else sh.clip_in, fps, bpm) / float(fps)
+        path = resolve_clip(spec_dir if spec_dir is not None else assets.parent, assets, sh.clip)
         if path not in durations:
             durations[path] = video_end(path, log=log)
         overrun = (clip_in + need) - durations[path]
