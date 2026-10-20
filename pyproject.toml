@@ -15,6 +15,9 @@ dependencies = [
 [project.scripts]
 montaj = "montaj.cli:main"
 
+[project.optional-dependencies]
+guards = ["opencv-python-headless>=4.9"]
+
 [dependency-groups]
 dev = ["pytest>=8"]
 

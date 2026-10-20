@@ -149,3 +149,10 @@ Easing (the curve into a camera key):
 - `inc` — creeps, then arrives quickly.
 - `expo` — very slow, then very fast, then very slow.
 - `ramp` — slow, fast through the middle, then slow again.
+
+Content guards (`check`, read by `montaj check` only; they never change the render):
+
+- `check` — mapping, default none — content guards. Absent means no guard runs.
+- `check.digits` — `none` or `spec`, default off — OCR the sampled frames. `none`: any on-screen digit warns. `spec`: a digit run warns unless it appears in `text[].lines[].text`, `subs[].text` or `shots[].frame.caption`. Needs the `tesseract` binary.
+- `check.faces` — `none`, default off — a face in a sampled frame warns. Needs `uv sync --extra guards` (OpenCV).
+- `check.sample` — integer 1 to 30, default `3` — frames sampled per shot, evenly across the shot. Output: `WARN digits shot=<n> frame=<f> "<digits>"`, `WARN faces shot=<n> frame=<f> (<k>)`; a missing backend gives `ERR <guard>: <install hint>`.

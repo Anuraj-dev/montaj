@@ -6,7 +6,7 @@ import json
 import math
 import re
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Literal
 
 import yaml
 from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, ValidationError, WrapSerializer
@@ -278,6 +278,12 @@ class Fx(Frozen):
     pos: tuple[float, float] | None = None
 
 
+class Guards(Frozen):
+    digits: Literal["none", "spec"] | None = None
+    faces: Literal["none"] | None = None
+    sample: int = 3
+
+
 class Spec(Frozen):
     video: Video
     assets: str = "assets"
@@ -288,6 +294,7 @@ class Spec(Frozen):
     text: list[TextBlock] = Field(default_factory=list)
     subs: list[Sub] = Field(default_factory=list)
     tracks: Tracks | None = None
+    check: Guards | None = None
 
 
 def _yaml_path(loc: tuple) -> str:
@@ -1214,6 +1221,8 @@ def validate_spec(
 
     _reject_overlap_windows(spec, holds, parsed, errors)
     _check_finish(spec, errors)
+    if spec.check is not None and not 1 <= spec.check.sample <= 30:
+        errors.append(_line("check.sample", f"must be 1 to 30, got {spec.check.sample}", "use sample: 3"))
 
     for i, fx in enumerate(spec.fx):
         kinds = [fx.leak is not None, fx.flash is not None, fx.hit is not None, fx.burst is not None]

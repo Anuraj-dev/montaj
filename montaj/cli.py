@@ -22,6 +22,7 @@ from montaj.doctor import doctor
 from montaj.encode import export, probe
 from montaj.ingest import ingest
 from montaj import taste
+from montaj.guards import content_guards
 from montaj.qa import BLACK_PIX_TH, check
 from montaj.review.server import serve as serve_review
 from montaj.review.summary import summary as review_summary
@@ -457,8 +458,18 @@ def _cmd_check(ns: argparse.Namespace, root: Path) -> list[str]:
         log=root / "build" / "qa.log", av_tol=_av_tol(root),
         intended_black=_intended_black(root),
     )
+    spec_file = root / "montaj.yaml"
+    spec = load_spec(spec_file) if spec_file.is_file() else None
+    if spec is not None and spec.check is not None:
+        tl = resolve(spec, root)
+        lines += content_guards(tl, _video(root, ns.video), root / "build" / "guards",
+                                log=root / "build" / "qa.log")
+    errs = sum(line.startswith("ERR") for line in lines)
     warns = sum(line.startswith("WARN") for line in lines)
-    lines.append(f"WARN check: {warns} warnings" if warns else "OK check")
+    if errs:
+        lines.append(f"ERR check: {errs} guard(s) unavailable")
+    else:
+        lines.append(f"WARN check: {warns} warnings" if warns else "OK check")
     return lines
 
 
