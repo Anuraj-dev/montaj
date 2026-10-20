@@ -11,11 +11,11 @@ import torch
 from montaj import __version__
 from montaj.encode import Encoder, concat, mux
 from montaj.gpulock import hold as gpu_hold
-from montaj.project import file_sha, find_clip, find_photo, segment_hash
+from montaj.project import file_sha, find_photo, resolve_clip, segment_hash
 from montaj.render.canvas import Canvas
 from montaj.render.frame import Renderer
 from montaj.spec import Spec, _dur_frames, load_spec
-from montaj.timeline import Clip, Segment, Still, Trans, Wall, resolve
+from montaj.timeline import Card, Clip, Segment, Sequence, Still, Trans, Wall, resolve
 
 # Bump when a pixel changes. Concatenated onto __version__ inside every segment hash.
 RENDER_REV = "+4"  # duration hash, photo/clip shas, sine fades, zoom, clip tail, warm fade
@@ -66,6 +66,8 @@ def _asset_shas(spec: Spec, spec_dir: Path) -> dict[str, str]:
             photos.extend(p.photo for p in shot.wall.prints)
         if shot.morph is not None:
             photos.append(shot.morph.photo)
+        if shot.sequence is not None:
+            photos.extend(item.photo for item in shot.sequence.items if item.photo)
         if shot.clip:
             clips.append(shot.clip)
     # A still and a clip can share a stem (`reel.jpg` and `reel.mp4`). One dict
@@ -78,7 +80,10 @@ def _asset_shas(spec: Spec, spec_dir: Path) -> dict[str, str]:
     for cid in clips:
         key = f"clip:{cid}"
         if key not in out:
-            out[key] = file_sha(find_clip(assets, cid))
+            out[key] = file_sha(resolve_clip(spec_dir, assets, cid))
+    look = spec.video.look
+    if not isinstance(look, str):
+        out[f"lut:{look.lut}"] = file_sha(spec_dir / look.lut)
     return out
 
 
@@ -93,7 +98,7 @@ def _u8(frame: torch.Tensor):
 
 
 def _shots_in(scene) -> set[int]:
-    if isinstance(scene, (Still, Wall, Clip)):
+    if isinstance(scene, (Still, Wall, Clip, Sequence, Card)):
         return {scene.shot}
     if isinstance(scene, Trans):
         return _shots_in(scene.a) | _shots_in(scene.b)

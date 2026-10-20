@@ -10,18 +10,18 @@ on the first frame that needs them, one batch per kind, under ``<project>/build/
 """
 from __future__ import annotations
 
-import math
 from collections import OrderedDict
 from pathlib import Path
+from types import SimpleNamespace
 
 import torch
 import torch.nn.functional as F
 
-from montaj.project import find_clip, find_photo
+from montaj.project import find_photo, resolve_clip
 from montaj.render.canvas import Canvas
 from montaj.render.clip import ClipSource, window_key
 from montaj.render.core import Photo, fit_s, sine, still
-from montaj.render.finish import LOOKS, finish
+from montaj.render.finish import LOOKS, finish, lut_texture
 from montaj.render.shots import (
     card_frame,
     css_blur,
@@ -39,6 +39,7 @@ from montaj.render.text import (
     RasterLine,
     RasterSet,
     Sub,
+    TextBackdrop,
     TextBlock,
     TextLine,
     Unit,
@@ -47,10 +48,23 @@ from montaj.render.text import (
     raster_lines,
     raster_subs,
 )
-from montaj.render.transitions import fade, swirl, whip
+from montaj.render.transitions import burn_white, fade, swirl, wall_pullback, whip
 from montaj.render.wall import build_wall, wall_camera, wall_frame
 from montaj.spec import _dur_frames
-from montaj.timeline import Blank, Clip, Scene, Still, Timeline, Trans, Wall
+from montaj.timeline import (
+    Blank,
+    Card,
+    Clip,
+    Scene,
+    Sequence,
+    Still,
+    Timeline,
+    Trans,
+    Wall,
+    clip_read_frames,
+    sequence_index,
+    transition_overlap,
+)
 
 # film.html 155: an omitted morph centre is (cx ?? .5, cy ?? .45). The spec leaves it unset.
 _MORPH_CENTER = (0.5, 0.45)
@@ -193,8 +207,10 @@ class Renderer:
         self._blocks: tuple = ()
         self._subs: tuple = ()
         self._rasters: RasterSet | None = None
+        self._card_rasters: dict[int, tuple[RasterLine, ...]] = {}
         self._captions: _LRU = _LRU(caps["captions"])
         self._shot: int | None = None
+        self._lut = None
         self._owners: dict[str, dict[tuple, set[int]]] = {"photos": {}, "bgs": {}, "cards": {}}
 
     def begin_segment(self, shots) -> None:
@@ -237,10 +253,17 @@ class Renderer:
         sh = shot.spec
         if not sh.clip:
             return None
-        extra = self._outgoing_frames(index)
-        nframes = (shot.end - shot.start) + int(math.ceil(extra - 1e-6))
-        clip_in = 0.0 if sh.clip_in is None else self._frames(sh.clip_in) / self.tl.fps
-        return sh.clip, clip_in, nframes
+        # A range stops at its end: the outgoing fade holds the last frame instead of reading on.
+        extra = 0.0 if sh.range is not None else self._outgoing_frames(index)
+        nframes = clip_read_frames(shot.end - shot.start, extra)
+        return sh.clip, self._clip_in_seconds(sh), nframes
+
+    def _clip_in_seconds(self, sh) -> float:
+        """Source offset. `range` starts at its first time; `clip_in` is the other way in."""
+        raw = sh.range[0] if sh.range is not None else sh.clip_in
+        if raw is None:
+            return 0.0
+        return self._frames(raw) / self.tl.fps
 
     def _drop_clips(self, needed: frozenset[int]) -> None:
         """Close windows this segment will not read. Same stem, different clip_in, is another window."""
@@ -350,18 +373,73 @@ class Renderer:
         # Each eval gets its own tensor so an in-place grade cannot tint the next blank.
         return self._bg.clone()
 
+    def _solid(self, color: str) -> torch.Tensor:
+        col = torch.tensor(_rgb(color), device=self.cv.device, dtype=torch.float32)
+        return col[:, None, None].expand(3, self.cv.H, self.cv.W).contiguous().clone()
+
+    def _sequence_frame(self, scene: Sequence, t: float) -> torch.Tensor:
+        shot = self.tl.shots[scene.shot]
+        seq = shot.spec.sequence
+        if seq is None or not seq.items:
+            raise ValueError(f"shot {scene.shot} is not a sequence")
+        every = seq.every
+        if isinstance(every, bool) or not isinstance(every, int):
+            raise ValueError(f"shot {scene.shot} sequence.every is not resolved")
+        item = seq.items[sequence_index(scene.t0, every, len(seq.items), t)]
+        self._shot = scene.shot
+        if item.color is not None:
+            return self._solid(item.color)
+        if item.photo is None:
+            raise ValueError(f"shot {scene.shot} sequence item has no photo or color")
+        return still(self.cv, self._photo(item.photo, None, False))
+
+    def _card_render_lines(self, card, t0: float, end: float) -> tuple[TextLine, ...]:
+        """Same styling as an overlay line. Clocks are durations from the shot start."""
+        lines = []
+        for line in card.text:
+            if line.sweep:
+                sweep = (t0 + self._frames(line.sweep[0]), t0 + self._frames(line.sweep[1]))
+            else:
+                sweep = (t0, end)
+            lines.append(
+                self._line(
+                    SimpleNamespace(
+                        text=line.text,
+                        y=line.y,
+                        at=t0 + self._frames(line.at),
+                        style=line.style,
+                        italic=line.italic,
+                        gold=line.gold,
+                        color=line.color,
+                        size=line.size,
+                        weight=line.weight,
+                        tracking=line.tracking,
+                        line_height=line.line_height,
+                        by=line.by,
+                        stagger=None if line.stagger is None else self._frames(line.stagger),
+                        dur=None if line.dur is None else self._frames(line.dur),
+                        rise=line.rise,
+                        reveal=line.reveal,
+                        sweep=sweep,
+                        shadow=line.shadow,
+                        indent=line.indent,
+                    )
+                )
+            )
+        return tuple(lines)
+
     def _clip_source(self, stem: str) -> ClipSource:
         hit = self._clips.get(stem)
         if hit is None:
-            hit = ClipSource(find_clip(self._assets, stem), self.tl.fps)
+            hit = ClipSource(resolve_clip(self._dir, self._assets, stem), self.tl.fps)
             self._clips[stem] = hit
         return hit
 
     def _outgoing_frames(self, index: int) -> float:
         """Frames of this shot still visible after its hold, while the next transition plays.
 
-        A fade or swirl runs `dur` past the cut. A whip runs `dur / 2`. ClipSource clamps
-        an index past the frames ffmpeg actually returned.
+        A fade, swirl, wall-pullback or burn-white runs `dur` past the cut. A whip runs
+        `dur / 2`. ClipSource clamps an index past the frames ffmpeg actually returned.
         """
         nxt = index + 1
         if nxt >= len(self.tl.shots):
@@ -369,12 +447,7 @@ class Renderer:
         tr = self.tl.shots[nxt].spec.in_
         if tr is None or tr.type == "cut" or tr.dur is None:
             return 0.0
-        dur = self._frames(tr.dur)
-        if tr.type == "whip":
-            return dur / 2.0
-        if tr.type in ("fade", "swirl"):
-            return dur
-        return 0.0
+        return transition_overlap(tr.type, self._frames(tr.dur))
 
     def _clip_frame(self, scene: Clip, t: float) -> torch.Tensor:
         req = self._clip_request(scene.shot)
@@ -487,6 +560,22 @@ class Renderer:
             arrived = self._layer(sh, sh.morph.photo, other, fx, fy, z, px, py, tilt, False)
         return self._morph_pulse(base, arrived, sh, shot, t)
 
+    def _word_card(self, scene: Card, t: float) -> torch.Tensor:
+        """Colour and text are one picture, so a transition carries both."""
+        self._shot = scene.shot
+        card = self.tl.shots[scene.shot].spec.card
+        if card is None:
+            raise ValueError(f"shot {scene.shot} has no card")
+        img = self._solid(card.color)
+        rasters = self._card_rasters.get(scene.shot)
+        if not rasters:
+            return img
+        lines = self._card_render_lines(card, float(scene.t0), float(scene.end))
+        block = TextBlock(scene.span[0], scene.span[1], 0.0, 0.0, 0.0, lines)
+        return draw_text(
+            self.cv, img, [block], [], t, RasterSet(rasters, ()), fps=float(self.tl.fps),
+        )
+
     def _fade(self, a: torch.Tensor, b: torch.Tensor, x: float, blur: float) -> torch.Tensor:
         # blur 0 stays on M1 smoothstep (`fade`). film.html vis() line 411 eases with `es`
         # (line 73, sine). Line 417 blurs each side by (1 − opacity) · blur.
@@ -510,6 +599,11 @@ class Renderer:
             reveal=ln.reveal, sweep=ln.sweep, shadow=ln.shadow, indent=ln.indent,
         )
 
+    def _backdrop(self, src) -> TextBackdrop | None:
+        if src is None:
+            return None
+        return TextBackdrop(src.type, float(src.strength), src.place)
+
     def _ensure_rasters(self) -> None:
         """One pass per Renderer. A disk hit starts no browser; a miss batches each kind."""
         if self._rasters_ready:
@@ -519,7 +613,16 @@ class Renderer:
             frame = shot.spec.frame
             if frame is not None and frame.caption and frame.caption not in captions:
                 captions.append(frame.caption)
-        if not self.tl.texts and not self.tl.subs and not captions:
+        card_lines: list[TextLine] = []
+        card_index: dict[int, tuple[int, int]] = {}
+        for shot in self.tl.shots:
+            card = shot.spec.card
+            if card is None:
+                continue
+            built = self._card_render_lines(card, float(shot.start), float(shot.end))
+            card_index[shot.index] = (len(card_lines), len(card_lines) + len(built))
+            card_lines.extend(built)
+        if not self.tl.texts and not self.tl.subs and not captions and not card_lines:
             self._rasters_ready = True
             return
         cache = self._dir / "build" / "text"
@@ -528,17 +631,27 @@ class Renderer:
         for block in self.tl.texts:
             lines = tuple(self._line(ln) for ln in block.lines)
             flat.extend(lines)
-            blocks.append(TextBlock(block.from_, block.to, block.fade_in, block.fade_out, block.blur, lines))
+            blocks.append(
+                TextBlock(
+                    block.from_, block.to, block.fade_in, block.fade_out, block.blur, lines,
+                    self._backdrop(block.backdrop),
+                )
+            )
         subs = tuple(Sub(s.from_, s.to, s.text, size=s.size, color=s.color) for s in self.tl.subs)
         device = self.cv.device
         scale = float(self.cv.k)
-        lines = tuple(_move_line(ln, device) for ln in raster_lines(flat, scale=scale, cache_dir=cache)) if flat else ()
+        everything = (*flat, *card_lines)
+        rasters = tuple(_move_line(ln, device) for ln in raster_lines(everything, scale=scale, cache_dir=cache)) if everything else ()
         sub_r = tuple(_move_image(im, device) for im in raster_subs(subs, scale=scale, cache_dir=cache)) if subs else ()
         self._blocks = tuple(blocks)
         self._subs = subs
+        n_overlay = len(flat)
         # Captions are card art, not the finish overlay. An empty RasterSet would still clone.
         if blocks or subs:
-            self._rasters = RasterSet(lines, sub_r)
+            self._rasters = RasterSet(rasters[:n_overlay], sub_r)
+        self._card_rasters = {
+            index: rasters[n_overlay + lo : n_overlay + hi] for index, (lo, hi) in card_index.items()
+        }
         for caption in captions:
             self._sprite(caption)
         self._rasters_ready = True
@@ -557,11 +670,15 @@ class Renderer:
     def _eval(self, scene: Scene, t: float) -> torch.Tensor:
         if isinstance(scene, Blank):
             return self._background()
+        if isinstance(scene, Card):
+            return self._word_card(scene, t)
         if isinstance(scene, Still):
             sh = self.tl.shots[scene.shot].spec
             if not _m2(sh):
                 return self._still_image(scene.shot)
             return self._m2_still(scene.shot, scene.span, t)
+        if isinstance(scene, Sequence):
+            return self._sequence_frame(scene, t)
         if isinstance(scene, Clip):
             return self._clip_frame(scene, t)
         if isinstance(scene, Wall):
@@ -581,10 +698,24 @@ class Renderer:
             return whip(self.cv, a, b, x, scene.axis)
         if scene.kind == "swirl":
             return swirl(self.cv, a, b, x, self._swirl_center(scene))
+        if scene.kind == "wall-pullback":
+            if scene.zoom is None:
+                raise ValueError("wall-pullback: missing zoom")
+            return wall_pullback(self.cv, a, b, x, scene.zoom)
+        if scene.kind == "burn-white":
+            return burn_white(a, b, x)
         raise ValueError(f"transition: unknown {scene.kind!r}")
 
     def _look(self):
         name = self.tl.spec.video.look
+        if not isinstance(name, str):
+            # `look: {lut: …}`. The texture is parsed once per Renderer; strength/vignette/grain ride along.
+            if self._lut is None:
+                from montaj.cube import load_cube
+
+                self._lut = lut_texture(load_cube(self._dir / name.lut), self.cv.device)
+            return {"kind": "graded", "lut": self._lut, "strength": name.strength,
+                    "vignette": name.vignette, "grain": name.grain}
         look = LOOKS.get(name)
         if look is None:
             have = ", ".join(LOOKS)

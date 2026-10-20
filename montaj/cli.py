@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import shutil
 import sys
 import time
@@ -20,15 +21,16 @@ from montaj.audio import music as music_gen
 from montaj.audio.music import parse_duration
 from montaj.capture import run as run_capture
 from montaj.doctor import doctor
-from montaj.encode import export, probe
-from montaj.ingest import ingest
+from montaj.encode import MediaInfo, export, probe
+from montaj.ingest import IngestError, ingest, ingest_rec
 from montaj import taste
-from montaj.qa import BLACK_PIX_TH, check
+from montaj.guards import content_guards
+from montaj.qa import BLACK_PIX_TH, FREEZE_MIN_S, Expect, check, clip_overruns, subtract, union
 from montaj.review.server import serve as serve_review
 from montaj.review.summary import summary as review_summary
-from montaj.sheet import MAX_TILES, pick_times, sheet
-from montaj.spec import SpecError, _dur_frames, load_spec
-from montaj.timeline import Blank, Still, Wall, resolve, wall_static_spans
+from montaj.sheet import MAX_TILES, every_times, pick_times, sheet, sheets
+from montaj.spec import INCOMING_TRANS, SpecError, _dur_frames, load_spec
+from montaj.timeline import Blank, Card, Sequence, Still, Wall, resolve, sequence_index, wall_static_spans
 from montaj.watch import watch
 
 RECIPES = Path(__file__).resolve().parents[1] / "recipes"
@@ -41,7 +43,7 @@ class _Usage(Exception):
 
 
 _COMMANDS = (
-    "doctor", "new", "ingest", "validate", "render", "sheet", "check", "export", "music",
+    "doctor", "new", "ingest", "ingest-rec", "validate", "render", "sheet", "check", "export", "music",
     "review", "watch", "taste", "capture",
 )
 
@@ -67,6 +69,10 @@ def _parser() -> argparse.ArgumentParser:
     ing = sub.add_parser("ingest")
     ing.add_argument("--photos", required=True)
 
+    rec = sub.add_parser("ingest-rec")
+    rec.add_argument("video")
+    rec.add_argument("--events", default=None)
+
     sub.add_parser("validate")
 
     ren = sub.add_parser("render")
@@ -75,7 +81,9 @@ def _parser() -> argparse.ArgumentParser:
     group.add_argument("--final", action="store_true")
 
     sh = sub.add_parser("sheet")
-    sh.add_argument("--at", default=None)
+    when = sh.add_mutually_exclusive_group()
+    when.add_argument("--at", default=None)
+    when.add_argument("--every", default=None)
     sh.add_argument("--video", default=None)
 
     ck = sub.add_parser("check")
@@ -257,6 +265,18 @@ def _cmd_new(ns: argparse.Namespace, root: Path) -> list[str]:
     return [f"OK {shown}/montaj.yaml sheet={shown}/build/ingest-sheet.jpg"]
 
 
+def _cmd_ingest_rec(ns: argparse.Namespace, root: Path) -> list[str]:
+    assets = _assets_dir(root, _assets_rel(root / "montaj.yaml"))
+    events = _at(root, ns.events) if ns.events else None
+    try:
+        rec = ingest_rec(_at(root, ns.video), assets, events=events, log=root / "build" / "ingest-rec.log")
+    except IngestError as exc:
+        return [f"ERR {exc}"]
+    n_ev = f" {rec.n_events} events" if rec.events_path else ""
+    audio = f" {rec.audio_streams} audio stream{'s' if rec.audio_streams != 1 else ''}"
+    return [f"OK {rec.stem} {rec.duration:.1f}s {rec.fps:g}fps{audio}{n_ev} -> {rec.path.name}"]
+
+
 def _cmd_ingest(ns: argparse.Namespace, root: Path) -> list[str]:
     photos = _at(root, ns.photos)
     assets = _assets_dir(root, _assets_rel(root / "montaj.yaml"))
@@ -290,29 +310,46 @@ def _cmd_render(ns: argparse.Namespace, root: Path) -> list[str]:
     ]
 
 
-def _seconds(raw: str) -> float:
-    """A `--at` time: `4.5` or `4.5s`, like a spec duration in seconds."""
+def _seconds(raw: str, flag: str = "--at") -> float:
+    """A time in seconds: `4.5` or `4.5s`. `--every` must be a positive interval."""
     text = raw.strip()
     try:
-        return float(text[:-1] if text.endswith("s") else text)
+        value = float(text[:-1] if text.endswith("s") else text)
     except ValueError:
-        raise ValueError(f"--at {text!r}: use seconds like 4.5 or 4.5s") from None
+        hint = "0.5 or 0.5s" if flag == "--every" else "4.5 or 4.5s"
+        raise ValueError(f"{flag} {text!r}: use seconds like {hint}") from None
+    if flag == "--every" and (not math.isfinite(value) or value <= 0):
+        raise ValueError(f"{flag} {text!r}: use a positive interval like 0.5s")
+    return value
+
+
+def _shown_frames(times: list[float], info: MediaInfo) -> int:
+    """How many distinct frames `extract` will keep. The OK line counts those."""
+    n_frames = int(round(info.duration * info.fps)) or 1
+    return len({min(max(0, int(round(t * info.fps))), n_frames - 1) for t in times})
 
 
 def _cmd_sheet(ns: argparse.Namespace, root: Path) -> list[str]:
     video = _video(root, ns.video)
     log = root / "build" / "sheet.log"
     info = probe(video, log=log)
-    at = None
-    if ns.at:
-        at = [_seconds(part) for part in str(ns.at).split(",") if part.strip()]
-    # Pass the times in, so sheet does not probe into the process cwd's build/.
-    # sheet() keeps at most MAX_TILES. Count the same list it will draw.
-    times = pick_times(video, at, n=MAX_TILES, info=info)[:MAX_TILES]
-    sheet(video, root / "build" / "sheet.jpg", at=times, log=log)
-    n_frames = int(round(info.duration * info.fps)) or 1
-    shown = len({min(max(0, int(round(t * info.fps))), n_frames - 1) for t in times})
-    return [f"OK build/sheet.jpg {shown} frames"]
+    out = root / "build" / "sheet.jpg"
+    if ns.every is not None:
+        interval = _seconds(str(ns.every), flag="--every")
+        # Fixed stride from t=0. Pages past 12 frames so a 60s film at 0.5s fits.
+        times = every_times(info.duration, interval, fps=info.fps)
+        paths = sheets(video, out, times, log=log)
+    else:
+        at = None
+        if ns.at:
+            at = [_seconds(part) for part in str(ns.at).split(",") if part.strip()]
+        # Pass the times in, so sheet does not probe into the process cwd's build/.
+        # sheet() keeps at most MAX_TILES. Count the same list it will draw.
+        times = pick_times(video, at, n=MAX_TILES, info=info)[:MAX_TILES]
+        paths = [sheet(video, out, at=times, log=log)]
+    shown = _shown_frames(times, info)
+    rels = " ".join(path.resolve().relative_to(root.resolve()).as_posix() for path in paths)
+    return [f"OK {rels} {shown} frames"]
 
 
 def _static_still(spec) -> bool:
@@ -339,8 +376,8 @@ def _morph_moving(sh, f: int, fps: float, bpm: float | None) -> bool:
 
 def _intended_freeze(root: Path) -> list[tuple[float, float]]:
     """Time spans whose picture is designed not to move: static stills, blank holds,
-    and wall frames where both camera tracks hold. A freeze of a drifting, pulsing or tilting
-    shot, of a morph mid-reveal, or inside a transition is a defect."""
+    sequence steps, and wall frames where both camera tracks hold. A freeze of a drifting,
+    pulsing or tilting shot, of a morph mid-reveal, or inside a transition is a defect."""
     spec_file = root / "montaj.yaml"
     if not spec_file.is_file():
         return []
@@ -363,6 +400,10 @@ def _intended_freeze(root: Path) -> list[tuple[float, float]]:
             intended = _static_still(sh.spec) and not _morph_moving(sh, f, fps, tl.spec.video.bpm)
         elif isinstance(scene, Blank):
             intended = True
+        elif isinstance(scene, Sequence):
+            intended = True
+        elif isinstance(scene, Card):
+            intended = _card_settled(tl.shots[scene.shot], f, fps, tl.spec.video.bpm, scene)
         else:
             intended = isinstance(scene, Wall) and wall_hold(f)
         if intended:
@@ -373,6 +414,28 @@ def _intended_freeze(root: Path) -> list[tuple[float, float]]:
             start = None
     if start is not None:
         spans.append((start / fps, tl.n_frames / fps))
+    return _split_sequence_steps(tl, spans, fps)
+
+
+def _split_sequence_steps(tl, spans: list[tuple[float, float]], fps: float) -> list[tuple[float, float]]:
+    """Cut a gap around each sequence boundary where the item changes. A step is a designed
+    hold, but a freeze running across such a boundary means the output is stuck on one item;
+    the gap is longer than the freeze detector's minimum, so only that case leaves a report."""
+    gap = FREEZE_MIN_S * 1.5
+    cuts: list[tuple[float, float]] = []
+    for sh in tl.shots:
+        seq = sh.spec.sequence
+        if seq is None or isinstance(seq.every, bool) or not isinstance(seq.every, int):
+            continue
+        if seq.every < 1 or len(seq.items) < 2:
+            continue
+        for lo in range(sh.start + seq.every, sh.end, seq.every):
+            before = sequence_index(sh.start, seq.every, len(seq.items), lo - 1)
+            after = sequence_index(sh.start, seq.every, len(seq.items), lo)
+            if seq.items[before] != seq.items[after]:
+                cuts.append((lo / fps - gap / 2, lo / fps + gap / 2))
+    for cut in cuts:
+        spans = [piece for span in spans for piece in subtract(span, [cut])]
     return spans
 
 
@@ -398,11 +461,81 @@ def _is_dark(color: str) -> bool:
     return (0.299 * r + 0.587 * g + 0.114 * b) < BLACK_PIX_TH
 
 
+def _sequence_dark_spans(tl, fps: float) -> list[tuple[float, float]]:
+    """Each dark colour step of a sequence, on the shot clock. Photos are not included."""
+    spans: list[tuple[float, float]] = []
+    for sh in tl.shots:
+        seq = sh.spec.sequence
+        if seq is None or isinstance(seq.every, bool) or not isinstance(seq.every, int):
+            continue
+        if seq.every < 1 or not seq.items:
+            continue
+        step = 0
+        while True:
+            lo = sh.start + step * seq.every
+            if lo >= sh.end:
+                break
+            hi = min(sh.end, lo + seq.every)
+            item = seq.items[sequence_index(sh.start, seq.every, len(seq.items), lo)]
+            if item.color is not None and _is_dark(item.color):
+                spans.append((lo / fps, hi / fps))
+            step += 1
+    return spans
+
+
+def _dark_plate(sh, background: str) -> bool:
+    """A blank shows `video.background`. A card shows its own colour."""
+    if sh.spec.card is not None:
+        return _is_dark(sh.spec.card.color)
+    return bool(sh.spec.blank) and _is_dark(background)
+
+
+def _card_settled(sh, f: int, fps: float, bpm: float | None, scene: Card) -> bool:
+    """True once every line has finished revealing and a gold sweep has ended.
+
+    A settled card is a designed hold. While glyphs are still arriving, a freeze is a defect.
+    """
+    from montaj.render.text import _split
+
+    card = sh.spec.card
+    if card is None:
+        return False
+    fps_i = int(fps)
+    for line in card.text:
+        at = sh.start + (_dur_frames(line.at, fps_i, bpm, "card.at", []) or 0.0)
+        if line.reveal == "pop":
+            span = float(scene.span[1] - scene.span[0])
+            if f < at + (span / 5.0 if span > 0 else 0.0):
+                return False
+        else:
+            n = len(_split(line.text, line.by))
+            if line.stagger:
+                stagger = _dur_frames(line.stagger, fps_i, bpm, "card.stagger", []) or 0.0
+            else:
+                stagger = (0.07 if line.by == "char" else 0.16) * fps
+            if line.dur:
+                dur = _dur_frames(line.dur, fps_i, bpm, "card.dur", []) or 0.0
+            else:
+                dur = 0.9 * fps
+            if f < at + max(0, n - 1) * stagger + dur:
+                return False
+        if line.gold:
+            if line.sweep:
+                a = sh.start + (_dur_frames(line.sweep[0], fps_i, bpm, "card.sweep", []) or 0.0)
+                b = sh.start + (_dur_frames(line.sweep[1], fps_i, bpm, "card.sweep", []) or 0.0)
+            else:
+                a, b = float(sh.start), float(sh.end)
+            if a <= f < b and b > a:
+                return False
+    return True
+
+
 def _intended_black(root: Path) -> list[tuple[float, float]]:
     """Dark windows blackdetect should not call a defect.
 
     Shot 0's fade from a dark `video.background`, a blank on that background
-    (hold plus its in/out transitions), and the outro fade to black.
+    (hold plus its in/out transitions) or a dark card (hold plus its in/out
+    transitions), a sequence step on a dark colour, and the outro fade to black.
     """
     spec_file = root / "montaj.yaml"
     if not spec_file.is_file():
@@ -413,14 +546,14 @@ def _intended_black(root: Path) -> list[tuple[float, float]]:
     spans: list[tuple[float, float]] = []
     dark = _is_dark(spec.video.background)
     shots = tl.shots
-    if dark and shots:
+    if shots:
         first = shots[0]
         tr = first.spec.in_
-        if not first.spec.blank and tr is not None and tr.type == "fade" and tr.dur:
+        if dark and not first.spec.blank and tr is not None and tr.type == "fade" and tr.dur:
             dur = _frames(spec, tr.dur)
             spans.append((first.start / fps, (first.start + dur) / fps))
         for i, sh in enumerate(shots):
-            if not sh.spec.blank:
+            if not _dark_plate(sh, spec.video.background):
                 continue
             before = 0.0
             incoming = sh.spec.in_
@@ -433,15 +566,29 @@ def _intended_black(root: Path) -> list[tuple[float, float]]:
                     nd = _frames(spec, outgoing.dur)
                     if outgoing.type == "whip":
                         after = nd / 2.0
-                    elif outgoing.type in ("fade", "swirl"):
+                    elif outgoing.type in INCOMING_TRANS:
                         after = nd
             spans.append((max(0.0, (sh.start - before) / fps), (sh.end + after) / fps))
+    spans.extend(_sequence_dark_spans(tl, fps))
     if tl.n_frames:
         fade = tl.plan(tl.n_frames - 1).fade_out
         if fade is not None:
             _dur, start = fade
             spans.append((start / fps, tl.n_frames / fps))
     return spans
+
+
+def _check_overrides(root: Path) -> tuple[list[Expect], float | None, float | None]:
+    """Resolved `check.expect` spans, plus an optional loudness target and tolerance."""
+    spec_file = root / "montaj.yaml"
+    if not spec_file.is_file():
+        return [], None, None
+    tl = resolve(load_spec(spec_file), root)
+    expects = [Expect(item.kind, (item.start, item.end), item.why) for item in tl.check_expects]
+    loud = None if tl.spec.check is None else tl.spec.check.loudness
+    if loud is None:
+        return expects, None, None
+    return expects, float(loud.i), float(loud.tol)
 
 
 def _av_tol(root: Path) -> float | None:
@@ -455,14 +602,38 @@ def _av_tol(root: Path) -> float | None:
     return 1.0 / float(spec.video.fps)
 
 
+def _clip_overruns(root: Path) -> list[str]:
+    """Clip shots whose timeline read runs past the source. No spec means no new lines."""
+    spec_file = root / "montaj.yaml"
+    if not spec_file.is_file():
+        return []
+    tl = resolve(load_spec(spec_file), root)
+    return clip_overruns(tl, _assets_dir(root, tl.spec.assets), spec_dir=root, log=root / "build" / "qa.log")
+
+
 def _cmd_check(ns: argparse.Namespace, root: Path) -> list[str]:
+    expects, loud_i, loud_tol = _check_overrides(root)
+    black = union([*_intended_black(root), *(item.span for item in expects if item.kind == "black")])
+    freeze = union([*_intended_freeze(root), *(item.span for item in expects if item.kind == "frozen")])
     lines = check(
-        _video(root, ns.video), _intended_freeze(root),
+        _video(root, ns.video), freeze,
         log=root / "build" / "qa.log", av_tol=_av_tol(root),
-        intended_black=_intended_black(root),
+        intended_black=black, expect=expects,
+        loudness_target=loud_i, loudness_tol=loud_tol,
     )
+    spec_file = root / "montaj.yaml"
+    spec = load_spec(spec_file) if spec_file.is_file() else None
+    if spec is not None and spec.check is not None:
+        tl = resolve(spec, root)
+        lines += content_guards(tl, _video(root, ns.video), root / "build" / "guards",
+                                log=root / "build" / "qa.log")
+    lines.extend(_clip_overruns(root))
+    errs = sum(line.startswith("ERR") for line in lines)
     warns = sum(line.startswith("WARN") for line in lines)
-    lines.append(f"WARN check: {warns} warnings" if warns else "OK check")
+    if errs:
+        lines.append(f"ERR check: {errs} guard(s) unavailable")
+    else:
+        lines.append(f"WARN check: {warns} warnings" if warns else "OK check")
     return lines
 
 
@@ -604,6 +775,8 @@ def _dispatch(ns: argparse.Namespace, root: Path) -> list[str]:
         return _cmd_new(ns, root)
     if ns.cmd == "ingest":
         return _cmd_ingest(ns, root)
+    if ns.cmd == "ingest-rec":
+        return _cmd_ingest_rec(ns, root)
     if ns.cmd == "validate":
         return _cmd_validate(root)
     if ns.cmd == "render":

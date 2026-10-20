@@ -6,21 +6,51 @@ import json
 import math
 import re
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Any, Literal
 
 import yaml
-from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, ValidationError, WrapSerializer
+from pydantic import (
+    BaseModel,
+    BeforeValidator,
+    ConfigDict,
+    Discriminator,
+    Field,
+    StrictInt,
+    Tag,
+    ValidationError,
+    WrapSerializer,
+    model_validator,
+)
+
+from montaj.events import (
+    Hit,
+    Miss,
+    compile_at_event,
+    compile_event_marker,
+    format_seconds,
+    is_event_marker,
+    load_events_file,
+    match_event,
+)
 
 EASE = ("linear", "smooth", "cubic", "outc", "inc", "expo", "ramp", "sine")
 EASE_HINT = "use linear, smooth, cubic, outc, inc, expo, ramp or sine"
-TRANS_TYPES = ("cut", "fade", "swirl", "whip")
-LOOK_NAMES = ("warm-film", "golden-film")
+TRANS_TYPES = ("cut", "fade", "swirl", "whip", "wall-pullback", "burn-white")
+# These occupy [start, start+dur) of the incoming shot. Whip is centred on the cut.
+INCOMING_TRANS = ("fade", "swirl", "wall-pullback", "burn-white")
+TRANS_HINT = "use cut, fade, swirl, whip, wall-pullback or burn-white"
+# Starting magnification of a wall pull-back. Materialised onto the shot so the hash sees it.
+WALL_PULLBACK_ZOOM = 3.2
+LOOK_NAMES = ("warm-film", "golden-film", "clean", "cool-tech")
 INTRO_TYPES = ("white-lift",)
 OUTRO_TYPES = ("glow", "fade")
 TEXT_STYLES = ("serif", "script", "caps", "deva")
 TEXT_BY = ("word", "char")
 TEXT_REVEAL = ("rise", "pop")
 TEXT_COLORS = ("cream", "gold", "ink")
+BACKDROP_TYPES = ("gradient", "solid")
+BACKDROP_PLACES = ("bottom", "top", "band")
+BACKDROP_STRENGTH = 0.8
 _DUR = re.compile(r"^([+-]?(?:\d+(?:\.\d*)?|\.\d+))([fbs])$")
 _BARE = re.compile(r"^[+-]?(?:\d+(?:\.\d*)?|\.\d+)$")
 _WH = re.compile(r"^(\d+)x(\d+)$")
@@ -81,6 +111,13 @@ def _reject_bare_duration(v: object) -> object:
     return v
 
 
+def _reject_bare_duration_or_bool(v: object) -> object:
+    """Pydantic would read YAML `true` as the integer 1, a one-frame interval."""
+    if isinstance(v, bool):
+        raise ValueError("bare number")
+    return _reject_bare_duration(v)
+
+
 DurationStr = Annotated[str, BeforeValidator(_reject_bare_duration)]
 TimeExpr = DurationStr
 
@@ -104,12 +141,30 @@ class IntroOutro(Frozen):
     dur: DurationStr
 
 
+class LutLook(Frozen):
+    lut: str
+    strength: RealNum = 1.0
+    vignette: RealNum = 0.0
+    grain: RealNum = 0.0
+
+
+def _look_kind(v: object) -> str:
+    """A name or a `{lut: …}` mapping. The tag keeps pydantic from reporting both branches."""
+    return "look_lut" if isinstance(v, (dict, LutLook)) else "look_name"
+
+
+Look = Annotated[
+    Annotated[str, Tag("look_name")] | Annotated[LutLook, Tag("look_lut")],
+    Discriminator(_look_kind),
+]
+
+
 class Video(Frozen):
     size: str
     fps: int
     bpm: float | None = None
     beat0: DurationStr | None = None
-    look: str
+    look: Look
     intro: IntroOutro | None = None
     outro: IntroOutro | None = None
     motion_blur: int = 1
@@ -122,6 +177,8 @@ class Transition(Frozen):
     center: tuple[float, float] | None = None
     axis: str = "x"
     blur: float = 0.0
+    # Absent stays out of model_dump so films without a pull-back keep their segment hash.
+    zoom: RealNum | None = Field(default=None, exclude_if=lambda v: v is None)
 
 
 class WallPrint(Frozen):
@@ -190,24 +247,30 @@ class Morph(Frozen):
     center: tuple[float, float] | None = None
 
 
-class Shot(Frozen):
+def _as_sequence_item(v: object) -> object:
+    """A list entry is a photo stem, `#rrggbb`, or `{photo}` / `{color}`."""
+    if isinstance(v, bool):
+        return v
+    if isinstance(v, int):
+        return {"photo": str(v)}
+    if isinstance(v, str):
+        text = v.strip()
+        if not text:
+            raise ValueError("need a photo stem or #rrggbb")
+        if text.startswith("#"):
+            return {"color": text}
+        return {"photo": text}
+    return v
+
+
+class SequenceItem(Frozen):
     photo: PhotoId | None = None
-    wall: WallSpec | None = None
-    clip: PhotoId | None = None
-    hold: DurationStr | None = None
-    until: TimeExpr | None = None
-    clip_in: DurationStr | None = None
-    crop: CropBox | None = None
-    focus: tuple[float, float] | None = None
-    zoom: float | None = None
-    drift: Drift | None = None
-    tone: Tone | None = None
-    frame: FrameCard | None = None
-    morph: Morph | None = None
-    pulse: str | None = None
-    blank: bool = False
-    in_: Transition | None = Field(default=None, alias="in")
-    flash: float | None = None
+    color: str | None = None
+
+
+class SequenceSpec(Frozen):
+    every: Annotated[str | int, BeforeValidator(_reject_bare_duration_or_bool)]  # int only after resolve
+    items: list[Annotated[SequenceItem, BeforeValidator(_as_sequence_item)]]
 
 
 class TextLine(Frozen):
@@ -232,12 +295,72 @@ class TextLine(Frozen):
     indent: float = 0.0
 
 
+class CardSpec(Frozen):
+    """One shot's picture: a solid colour with text lines on it."""
+
+    color: str
+    text: list[TextLine]
+
+
+class Shot(Frozen):
+    photo: PhotoId | None = None
+    wall: WallSpec | None = None
+    clip: PhotoId | None = None
+    hold: DurationStr | None = None
+    until: TimeExpr | None = None
+    clip_in: DurationStr | None = None
+    # Authoring-only: `resolve` folds the pick into clip_in. Absent stays out of model_dump
+    # so an existing film keeps its segment hash.
+    at_event: dict[str, Any] | None = Field(default=None, exclude_if=lambda v: v is None)
+    pre: DurationStr | None = Field(default=None, exclude_if=lambda v: v is None)
+    range: tuple[DurationStr, DurationStr] | None = None
+    crop: CropBox | None = None
+    focus: tuple[float, float] | None = None
+    zoom: float | None = None
+    drift: Drift | None = None
+    tone: Tone | None = None
+    frame: FrameCard | None = None
+    morph: Morph | None = None
+    pulse: str | None = None
+    blank: bool = False
+    # Absent stays out of model_dump so films without a sequence keep their segment hash.
+    sequence: SequenceSpec | None = Field(default=None, exclude_if=lambda v: v is None)
+    card: CardSpec | None = Field(default=None, exclude_if=lambda v: v is None)
+    in_: Transition | None = Field(default=None, alias="in")
+    flash: float | None = None
+
+
+class TextBackdrop(Frozen):
+    """Dark scrim behind a text block. The compositor paints it; no image asset."""
+
+    type: str = "gradient"
+    strength: RealNum = BACKDROP_STRENGTH
+    place: str = "band"
+
+
+def _coerce_backdrop(v: object) -> object:
+    """`true`, `gradient` and `solid` are the default scrim. A mapping sets the knobs."""
+    if v is None or isinstance(v, TextBackdrop):
+        return v
+    if v is True:
+        return {}
+    if isinstance(v, str):
+        return {"type": v}
+    if v is False:
+        raise ValueError("omit backdrop to turn it off")
+    return v
+
+
 class TextBlock(Frozen):
     from_: TimeExpr = Field(alias="from")
     to: TimeExpr
     fade_in: DurationStr | None = None
     fade_out: DurationStr | None = None
     blur: float = 10.0
+    # Absent stays out of model_dump so a film with no scrim keeps its segment hash.
+    backdrop: Annotated[TextBackdrop | None, BeforeValidator(_coerce_backdrop)] = Field(
+        default=None, exclude_if=lambda v: v is None
+    )
     lines: list[TextLine]
 
 
@@ -278,6 +401,44 @@ class Fx(Frozen):
     pos: tuple[float, float] | None = None
 
 
+class ExpectSpan(Frozen):
+    """One designed black or frozen window. Times are film-start expressions, so markers work."""
+
+    black: tuple[TimeExpr, TimeExpr] | None = None
+    frozen: tuple[TimeExpr, TimeExpr] | None = None
+    why: str | None = None
+
+    @model_validator(mode="after")
+    def _one_kind(self) -> ExpectSpan:
+        if self.black is None and self.frozen is None:
+            raise ValueError("need black or frozen")
+        if self.black is not None and self.frozen is not None:
+            raise ValueError("set black or frozen, not both")
+        if self.why is None:
+            return self
+        why = self.why.strip()
+        if not why or "\n" in self.why or "\r" in self.why:
+            raise ValueError("why must be one non-empty line")
+        if why != self.why:
+            return self.model_copy(update={"why": why})
+        return self
+
+
+class LoudnessTarget(Frozen):
+    """Override `check`'s integrated-loudness target. `tol` is LU around `i`."""
+
+    i: RealNum
+    tol: RealNum = 1.0
+
+
+class CheckSpec(Frozen):
+    expect: list[ExpectSpan] = Field(default_factory=list)
+    loudness: LoudnessTarget | None = None
+    digits: Literal["none", "spec"] | None = None
+    faces: Literal["none"] | None = None
+    sample: StrictInt = 3  # strict: YAML `true` must not coerce to 1
+
+
 class Spec(Frozen):
     video: Video
     assets: str = "assets"
@@ -288,6 +449,7 @@ class Spec(Frozen):
     text: list[TextBlock] = Field(default_factory=list)
     subs: list[Sub] = Field(default_factory=list)
     tracks: Tracks | None = None
+    check: CheckSpec | None = None
 
 
 def _yaml_path(loc: tuple) -> str:
@@ -295,6 +457,8 @@ def _yaml_path(loc: tuple) -> str:
     for x in loc:
         if x == "in_":
             x = "in"
+        if x in ("look_name", "look_lut"):  # discriminator tags, not spec keys
+            continue
         if isinstance(x, int):
             if parts:
                 parts[-1] = f"{parts[-1]}[{x}]"
@@ -333,10 +497,19 @@ def _from_pydantic(exc: ValidationError) -> list[str]:
         if "bare number" in msg:
             msg = "bare number"
             hint = "use 22f, 4b or 1.5s"
+        elif re.search(r"shots\[\d+\]\.range(\[\d+\])?$", path) and err["type"] in (
+            "too_short", "too_long", "tuple_type", "missing"
+        ):
+            msg = "need [start, end]"
+            hint = "use [start, end] like [1.5s, 4s]"
         elif "whole pixel" in msg:
             hint = "use integer source-px"
         elif "not a boolean" in msg:
             hint = "use a number"
+        elif msg in ("need black or frozen", "set black or frozen, not both"):
+            hint = "use black: [0s, 2s] or frozen: [logo, logo+0.5s]"
+        elif msg == "why must be one non-empty line":
+            hint = "a short reason, one line"
         lines.append(_line(path, msg, hint))
     return lines
 
@@ -499,6 +672,8 @@ def _unrounded_durs(spec: Spec) -> list[tuple[str, str]]:
     for i, sh in enumerate(spec.shots):
         if sh.clip_in is not None:
             out.append((f"shots[{i}].clip_in", sh.clip_in))
+        if sh.pre is not None:
+            out.append((f"shots[{i}].pre", sh.pre))
         if sh.morph is not None:
             out.append((f"shots[{i}].morph.at", sh.morph.at))
             out.append((f"shots[{i}].morph.dur", sh.morph.dur))
@@ -537,6 +712,8 @@ def _time_strings(spec: Spec) -> list[str]:
     for sh in spec.shots:
         if sh.until is not None:
             out.append(sh.until)
+        if sh.range is not None:
+            out.extend(sh.range)
     for fx in spec.fx:
         if isinstance(fx.at, str):
             out.append(fx.at)
@@ -554,16 +731,78 @@ def _time_strings(spec: Spec) -> list[str]:
                 out.append(line.dur)
             if line.sweep:
                 out.extend(line.sweep)
+    for sh in spec.shots:
+        if sh.card is None:
+            continue
+        for line in sh.card.text:
+            out.append(line.at)
+            if line.stagger:
+                out.append(line.stagger)
+            if line.dur:
+                out.append(line.dur)
+            if line.sweep:
+                out.extend(line.sweep)
     for sub in spec.subs:
         out.extend([sub.from_, sub.to])
     if spec.tracks is not None:
         for keys in (spec.tracks.dust, spec.tracks.glow, spec.tracks.bars):
             out.extend(k.t for k in keys)
+    if spec.check is not None:
+        for item in spec.check.expect:
+            pair = item.black if item.black is not None else item.frozen
+            if pair:
+                out.extend(pair)
     return out
 
 
+def _needs_assets_dir(shots: object) -> bool:
+    """False when the film's only media is path clips. Blanks may sit beside them.
+
+    A stem, a photo, or a blank-only film still needs the assets folder.
+    """
+    from montaj.project import clip_is_file
+
+    if not isinstance(shots, list) or not shots:
+        return True
+    saw_path = False
+    for shot in shots:
+        if not isinstance(shot, dict):
+            return True
+        if shot.get("photo") is not None or shot.get("wall") is not None:
+            return True
+        morph = shot.get("morph")
+        if isinstance(morph, dict) and morph.get("photo") is not None:
+            return True
+        clip = shot.get("clip")
+        if clip is not None:
+            pid = _photo_id(clip)
+            if isinstance(pid, str) and clip_is_file(pid):
+                saw_path = True
+                continue
+            return True
+        if shot.get("blank") is True:
+            continue
+        return True
+    return not saw_path
+
+
+def _note_path_clip(shot: dict, i: int, spec_dir: Path, assets_dir: Path, errors: list[str]) -> None:
+    from montaj.project import AssetMissing, clip_is_file, resolve_clip
+
+    clip = shot.get("clip")
+    if clip is None:
+        return
+    pid = _photo_id(clip)
+    if not isinstance(pid, str) or not clip_is_file(pid):
+        return
+    try:
+        resolve_clip(spec_dir, assets_dir, pid)
+    except AssetMissing as e:
+        errors.append(_line(f"shots[{i}].clip", str(e), e.hint))
+
+
 def _collect_photos(data: object, assets_dir: Path, spec_dir: Path, errors: list[str]) -> None:
-    from montaj.project import find_clip, find_photo
+    from montaj.project import clip_is_file, find_clip, find_photo
 
     if not isinstance(data, dict):
         return
@@ -574,12 +813,16 @@ def _collect_photos(data: object, assets_dir: Path, spec_dir: Path, errors: list
             errors.append(
                 _line("audio.track", f"{audio['track']!r} not found", "path relative to the spec file")
             )
-    if not assets_dir.is_dir():
-        rel = data.get("assets", "assets")
-        errors.append(_line("assets", f"{rel!r} not a directory", "create it or fix the path"))
-        return
     shots = data.get("shots")
     if not isinstance(shots, list):
+        shots = []
+    if not assets_dir.is_dir():
+        if _needs_assets_dir(shots):
+            rel = data.get("assets", "assets")
+            errors.append(_line("assets", f"{rel!r} not a directory", "create it or fix the path"))
+        for i, shot in enumerate(shots):
+            if isinstance(shot, dict):
+                _note_path_clip(shot, i, spec_dir, assets_dir, errors)
         return
     for i, shot in enumerate(shots):
         if not isinstance(shot, dict):
@@ -591,7 +834,10 @@ def _collect_photos(data: object, assets_dir: Path, spec_dir: Path, errors: list
         if "clip" in shot and shot["clip"] is not None:
             pid = _photo_id(shot["clip"])
             if isinstance(pid, str):
-                _require_photo(assets_dir, pid, f"shots[{i}].clip", errors, find_clip)
+                if clip_is_file(pid):
+                    _note_path_clip(shot, i, spec_dir, assets_dir, errors)
+                else:
+                    _require_photo(assets_dir, pid, f"shots[{i}].clip", errors, find_clip)
         morph = shot.get("morph")
         if isinstance(morph, dict) and morph.get("photo") is not None:
             pid = _photo_id(morph["photo"])
@@ -608,6 +854,35 @@ def _collect_photos(data: object, assets_dir: Path, spec_dir: Path, errors: list
                             _require_photo(
                                 assets_dir, pid, f"shots[{i}].wall.prints[{j}].photo", errors, find_photo
                             )
+        seq = shot.get("sequence")
+        if isinstance(seq, dict):
+            items = seq.get("items")
+            if isinstance(items, list):
+                for j, item in enumerate(items):
+                    found = _sequence_photo_id(item)
+                    if found is not None:
+                        pid, suffix = found
+                        _require_photo(
+                            assets_dir, pid, f"shots[{i}].sequence.items[{j}]{suffix}", errors, find_photo
+                        )
+
+
+def _sequence_photo_id(item: object) -> tuple[str, str] | None:
+    """`(photo id, path suffix)` for one raw sequence entry, or None for a colour."""
+    if isinstance(item, bool):
+        return None
+    if isinstance(item, int):
+        return str(item), ""
+    if isinstance(item, str):
+        text = item.strip()
+        if not text or text.startswith("#"):
+            return None
+        return text, ""
+    if isinstance(item, dict) and item.get("photo") is not None:
+        pid = _photo_id(item["photo"])
+        if isinstance(pid, str):
+            return pid, ".photo"
+    return None
 
 
 def _require_photo(assets_dir: Path, pid: str, path: str, errors: list[str], find_photo) -> None:
@@ -730,6 +1005,16 @@ def _snap_forward_to_grid(u: float, beat0: float, period: float) -> float:
     return beat0 + math.ceil((u - beat0) / period) * period
 
 
+def _length_conflict(has_hold: bool, has_until: bool, has_range: bool) -> str:
+    if has_hold and has_until and not has_range:
+        return "hold and until are mutually exclusive"
+    if has_range and has_hold and not has_until:
+        return "range and hold are mutually exclusive"
+    if has_range and has_until and not has_hold:
+        return "range and until are mutually exclusive"
+    return "hold, until and range are mutually exclusive"
+
+
 def layout_shots(
     spec: Spec,
     markers: dict[str, float],
@@ -752,11 +1037,13 @@ def layout_shots(
     for i, sh in enumerate(spec.shots):
         has_hold = sh.hold is not None
         has_until = sh.until is not None
-        if has_hold and has_until:
-            errors.append(_line(f"shots[{i}]", "hold and until are mutually exclusive", "remove one"))
+        has_range = sh.range is not None
+        chosen = has_hold + has_until + has_range
+        if chosen > 1:
+            errors.append(_line(f"shots[{i}]", _length_conflict(has_hold, has_until, has_range), "remove one"))
             bounds.append(None)
             continue
-        if not has_hold and not has_until:
+        if chosen == 0:
             errors.append(_line(f"shots[{i}]", "need hold or until", "set one"))
             bounds.append(None)
             continue
@@ -769,6 +1056,24 @@ def layout_shots(
                 continue
             until_times[f"shots[{i}].until"] = until_f
             end_u = until_f
+        elif sh.range is not None:
+            # Source span, not a film-start time: `1b` is one beat long, and beat0 is not added.
+            start_f = _dur_frames(sh.range[0], fps, bpm, f"shots[{i}].range[0]", errors)
+            end_f = _dur_frames(sh.range[1], fps, bpm, f"shots[{i}].range[1]", errors)
+            if start_f is None or end_f is None:
+                bounds.append(None)
+                continue
+            if end_f <= start_f:
+                errors.append(
+                    _line(
+                        f"shots[{i}].range",
+                        f"end must be after start ({sh.range[0]} .. {sh.range[1]})",
+                        "use a later end",
+                    )
+                )
+                bounds.append(None)
+                continue
+            end_u = u + (end_f - start_f)
         else:
             span = _dur_frames(sh.hold, fps, bpm, f"shots[{i}].hold", errors)
             if span is None:
@@ -779,7 +1084,15 @@ def layout_shots(
                 end_u = _snap_forward_to_grid(end_u, beat0, period)
         end = round_frame(end_u)
         if end <= start:
-            if has_until:
+            if has_range:
+                errors.append(
+                    _line(
+                        f"shots[{i}].range",
+                        f"shorter than one frame ({sh.range[0]} .. {sh.range[1]})",
+                        "lengthen the range",
+                    )
+                )
+            elif has_until:
                 errors.append(
                     _line(
                         f"shots[{i}].until",
@@ -856,6 +1169,90 @@ def _load_word_starts(
     return out
 
 
+class _Events:
+    """One read of each `assets/<stem>.events.json` per validate. Not process-global."""
+
+    def __init__(self, assets: Path | None, errors: list[str]):
+        self.assets = assets
+        self.errors = errors
+        self._cache: dict[str, list[dict] | None] = {}
+
+    def get(self, stem: str, path: str) -> list[dict] | None:
+        if stem in self._cache:
+            return self._cache[stem]
+        rows = _read_events(self.assets, stem, path, self.errors)
+        self._cache[stem] = rows
+        return rows
+
+
+def _assets_dir(spec: Spec, spec_dir: Path | None) -> Path | None:
+    if spec_dir is None:
+        return None
+    rel = Path(spec.assets)
+    return rel if rel.is_absolute() else spec_dir / rel
+
+
+def _read_events(assets: Path | None, stem: str, path: str, errors: list[str]) -> list[dict] | None:
+    if assets is None:
+        errors.append(_line(path, f"no events for {stem!r}", "load the spec from disk"))
+        return None
+    file = assets / f"{stem}.events.json"
+    if not file.is_file():
+        errors.append(_line(path, f"no events for {stem!r}", f"add assets/{stem}.events.json"))
+        return None
+    return load_events_file(file, f"assets/{stem}.events.json", errors)
+
+
+def _clip_in_from_event(
+    sh: Shot, i: int, fps: int, times: dict[str, float], events: _Events, errors: list[str]
+) -> str | None:
+    """Matched event time minus `pre`, as a duration string. None if this shot already errored."""
+    path = f"shots[{i}]"
+    if sh.pre is not None and f"shots[{i}].pre" not in times:
+        return None
+    sel = compile_at_event(sh.at_event, f"shots[{i}].at_event", errors)
+    if sel is None or sh.clip is None or fps <= 0:
+        return None
+    rows = events.get(sh.clip, path)
+    if rows is None:
+        return None
+    if not rows:
+        errors.append(_line(path, f"no events in {sh.clip}", "have: none"))
+        return None
+    t = _event_seconds(match_event(rows, sel), sh.clip, path, errors)
+    if t is None:
+        return None
+    pre_s = times.get(f"shots[{i}].pre", 0.0) / fps
+    clip_s = t - pre_s
+    if clip_s < -1e-9:
+        errors.append(
+            _line(
+                f"shots[{i}].pre",
+                f"{sh.pre} starts before the clip",
+                f"event at {t:.6g}s",
+            )
+        )
+        return None
+    return format_seconds(0.0 if clip_s < 0 else clip_s)
+
+
+def _event_seconds(found: Hit | Miss, stem: str, path: str, errors: list[str]) -> float | None:
+    if isinstance(found, Miss):
+        errors.append(_line(path, f"no event {found.label} in {stem}", found.hint))
+        return None
+    t = float(found.event["t"])
+    if t < 0:
+        errors.append(
+            _line(
+                path,
+                f"event at {t:.6g}s is before the clip start",
+                "run montaj ingest-rec so t is video time",
+            )
+        )
+        return None
+    return t
+
+
 def resolve_markers(
     spec: Spec,
     spec_dir: Path | None,
@@ -866,6 +1263,7 @@ def resolve_markers(
     beat0: float = 0.0,
     markers_json: object | None = None,
     markers_loaded: bool = False,
+    events: _Events | None = None,
 ) -> dict[str, float]:
     """Resolve `markers` to float frames. Acyclic name→name refs are allowed."""
     uses_word = [
@@ -908,6 +1306,20 @@ def resolve_markers(
                     errors.append(_line(path, f"unknown word {i}", f"have: {have}"))
             else:
                 resolved[name] = word_s[i] * fps
+            continue
+        if is_event_marker(text):
+            compiled = compile_event_marker(text, path, errors)
+            if compiled is not None and fps > 0:
+                stem, sel = compiled
+                book = events if events is not None else _Events(_assets_dir(spec, spec_dir), errors)
+                rows = book.get(stem, path)
+                if rows is not None:
+                    if not rows:
+                        errors.append(_line(path, f"no events in {stem}", "have: none"))
+                    else:
+                        t = _event_seconds(match_event(rows, sel), stem, path, errors)
+                        if t is not None:
+                            resolved[name] = t * fps
             continue
         if _DUR.match(text):
             val = _parse_time(text, {}, fps, bpm, path, errors, beat0=beat0)
@@ -953,6 +1365,21 @@ def _check_color(path: str, color: str | None, errors: list[str]) -> None:
         errors.append(_line(path, f"unknown colour {color!r}", "use cream, gold, ink or #rrggbb"))
 
 
+def _check_backdrop(path: str, bd: TextBackdrop, errors: list[str]) -> None:
+    if bd.type not in BACKDROP_TYPES:
+        errors.append(_line(f"{path}.type", f"unknown {bd.type!r}", "use gradient or solid"))
+    if not math.isfinite(bd.strength) or bd.strength < 0 or bd.strength > 1:
+        errors.append(
+            _line(
+                f"{path}.strength",
+                f"must be from 0 to 1, got {_fmt_num(bd.strength)}",
+                "use a fraction",
+            )
+        )
+    if bd.place not in BACKDROP_PLACES:
+        errors.append(_line(f"{path}.place", f"unknown {bd.place!r}", "use bottom, top or band"))
+
+
 def _choices(names: tuple[str, ...]) -> str:
     return " or ".join(names)
 
@@ -961,9 +1388,91 @@ def _whole_number(v: float) -> bool:
     return isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v) and v == int(v)
 
 
-def _check_finish(spec: Spec, errors: list[str]) -> None:
-    if spec.video.look not in LOOK_NAMES:
-        errors.append(_line("video.look", f"unknown {spec.video.look!r}", f"use {_choices(LOOK_NAMES)}"))
+def _check_clip_range(
+    spec: Spec,
+    spec_dir: Path,
+    i: int,
+    sh: Shot,
+    bpm: float | None,
+    errors: list[str],
+) -> None:
+    """Reject a range that runs past the source, or a file that is not a video."""
+    from montaj.encode import EncodeError, probe
+    from montaj.project import resolve_clip
+
+    if spec.video.fps <= 0 or sh.clip is None or sh.range is None:
+        return
+    try:
+        path = resolve_clip(spec_dir, spec_dir / spec.assets, sh.clip)
+    except FileNotFoundError:
+        return
+    try:
+        info = probe(path, log=spec_dir / "build" / "spec.log")
+    except EncodeError:
+        errors.append(_line(f"shots[{i}].clip", f"cannot read {sh.clip!r}", "file is not a video"))
+        return
+    # probe() falls back to the container duration, so an audio-only file needs its own check.
+    if info.width <= 0 or info.height <= 0:
+        errors.append(_line(f"shots[{i}].clip", f"{sh.clip!r} has no video stream", "file is not a video"))
+        return
+    if info.duration <= 0:
+        errors.append(
+            _line(f"shots[{i}].clip", f"cannot read duration of {sh.clip!r}", "file is not a video")
+        )
+        return
+    bag: list[str] = []
+    start_f = _dur_frames(sh.range[0], spec.video.fps, bpm, f"shots[{i}].range[0]", bag)
+    if start_f is not None and start_f / spec.video.fps >= info.duration - 1e-6:
+        errors.append(
+            _line(
+                f"shots[{i}].range",
+                f"starts at {sh.range[0]}, clip is {info.duration:.3f}s",
+                "start inside the clip",
+            )
+        )
+        return
+    end_f = _dur_frames(sh.range[1], spec.video.fps, bpm, f"shots[{i}].range[1]", bag)
+    if end_f is None:
+        return
+    # Container duration is often a frame short of n/fps. One frame of slack.
+    if end_f / spec.video.fps > info.duration + 1.0 / spec.video.fps:
+        errors.append(
+            _line(
+                f"shots[{i}].range",
+                f"ends at {sh.range[1]}, clip is {info.duration:.3f}s",
+                "shorten the range",
+            )
+        )
+
+
+def _check_lut_look(look: LutLook, errors: list[str], spec_dir: Path | None) -> None:
+    from montaj.cube import load_cube
+
+    for name in ("strength", "vignette", "grain"):
+        v = getattr(look, name)
+        if not math.isfinite(v) or not 0.0 <= v <= 1.0:
+            errors.append(_line(f"video.look.{name}", f"must be 0..1, got {_fmt_num(v)}", "use a number from 0 to 1"))
+    if not look.lut.lower().endswith(".cube"):
+        errors.append(_line("video.look.lut", f"{look.lut!r} is not a .cube file", "use a path ending in .cube"))
+        return
+    if spec_dir is None:
+        return
+    path = spec_dir / look.lut
+    if not path.is_file():
+        errors.append(_line("video.look.lut", f"{look.lut!r} not found", "path relative to the spec file"))
+        return
+    try:
+        load_cube(path)
+    except (OSError, ValueError) as e:
+        errors.append(_line("video.look.lut", f"{look.lut!r}: {e}", "use a 3D .cube up to 65 points (or a 1D .cube)"))
+
+
+def _check_finish(spec: Spec, errors: list[str], spec_dir: Path | None = None) -> None:
+    look = spec.video.look
+    if isinstance(look, LutLook):
+        _check_lut_look(look, errors, spec_dir)
+    elif look not in LOOK_NAMES:
+        errors.append(_line("video.look", f"unknown {look!r}", f"use {', '.join(LOOK_NAMES)} or {{lut: file.cube}}"))
     intro = spec.video.intro
     if intro is not None and intro.type not in INTRO_TYPES:
         errors.append(
@@ -981,10 +1490,55 @@ def _check_ease(path: str, ease: str, errors: list[str]) -> None:
         errors.append(_line(path, f"unknown {ease!r}", EASE_HINT))
 
 
+def _validate_sequence(
+    seq: SequenceSpec,
+    i: int,
+    fps: int,
+    bpm: float | None,
+    parsed: dict[str, int],
+    errors: list[str],
+) -> None:
+    path = f"shots[{i}].sequence.every"
+    raw = seq.every
+    if isinstance(raw, str):
+        matched = _DUR.match(raw.strip())
+        if matched and matched.group(2) == "b":
+            errors.append(_line(path, "beats are not allowed", "use 12f or 0.4s"))
+        else:
+            n = parse_dur(raw, fps, bpm, path, errors)
+            if n is not None and n < 1:
+                errors.append(_line(path, f"must be at least 1 frame, got {n}f", "use 1f or longer"))
+            elif n is not None:
+                parsed[path] = n
+    elif isinstance(raw, int) and not isinstance(raw, bool):
+        if raw < 1:
+            errors.append(_line(path, f"must be at least 1 frame, got {raw}f", "use 1f or longer"))
+        else:
+            parsed[path] = raw
+    items_path = f"shots[{i}].sequence.items"
+    if len(seq.items) < 2:
+        errors.append(_line(items_path, "need at least two items", "add a photo or #rrggbb"))
+    for j, item in enumerate(seq.items):
+        ip = f"{items_path}[{j}]"
+        has_photo = item.photo is not None
+        has_color = item.color is not None
+        if has_photo and has_color:
+            errors.append(_line(ip, "photo and color are mutually exclusive", "set one"))
+        elif not has_photo and not has_color:
+            errors.append(_line(ip, "need a photo or #rrggbb", "set photo: or color:"))
+        if has_color and (not isinstance(item.color, str) or not _HEX.match(item.color)):
+            errors.append(_line(f"{ip}.color", f"unknown colour {item.color!r}", "use #rrggbb"))
+
+
 def validate_spec(
     spec: Spec, errors: list[str], spec_dir: Path | None = None
-) -> tuple[dict[str, int], dict[str, float], dict[str, float], float | None, float]:
-    """Fill `errors`; return (rounded frames, float frames, markers, bpm, beat0 frames)."""
+) -> tuple[dict[str, int], dict[str, float], dict[str, float], float | None, float, dict[int, str]]:
+    """Fill `errors`; return (rounded frames, float frames, markers, bpm, beat0 frames, clip_in).
+
+    `clip_in` is the duration string `at_event` resolved for each shot index. The
+    authoring spec keeps `at_event`; `resolve` copies this onto the shot the
+    renderer seeks, so the segment hash sees the picked time.
+    """
     fps = spec.video.fps
     specified_bpm = spec.video.bpm is not None
     if fps <= 0:
@@ -1034,6 +1588,7 @@ def validate_spec(
             )
         )
 
+    events = _Events(_assets_dir(spec, spec_dir), errors)
     markers = resolve_markers(
         spec,
         spec_dir,
@@ -1043,6 +1598,7 @@ def validate_spec(
         beat0=beat0,
         markers_json=markers_json,
         markers_loaded=markers_loaded,
+        events=events,
     )
 
     parsed: dict[str, int] = {}
@@ -1076,25 +1632,72 @@ def validate_spec(
         parsed[f"shots[{i}].end"] = end
         holds.append(h)
 
+    clip_ins: dict[int, str] = {}
     for i, sh in enumerate(spec.shots):
         h = holds[i]
         has_p = sh.photo is not None
         has_w = sh.wall is not None
         has_c = sh.clip is not None
         has_b = sh.blank
-        n_src = has_p + has_w + has_c + has_b
+        has_s = sh.sequence is not None
+        has_card = sh.card is not None
+        n_src = has_p + has_w + has_c + has_b + has_s + has_card
         if n_src > 1:
             errors.append(
-                _line(f"shots[{i}]", "photo, wall, clip and blank are mutually exclusive", "remove extra")
+                _line(
+                    f"shots[{i}]",
+                    "photo, wall, clip, blank, sequence and card are mutually exclusive",
+                    "remove extra",
+                )
             )
         elif n_src == 0:
-            errors.append(_line(f"shots[{i}]", "need photo, wall, clip or blank", "add one"))
+            errors.append(_line(f"shots[{i}]", "need photo, wall, clip, blank, sequence or card", "add one"))
+        if sh.card is not None:
+            _validate_card(sh.card, i, fps, bpm, errors)
         if not has_p:
             for name in ("drift", "frame", "morph", "tone", "pulse"):
                 if getattr(sh, name) is not None:
                     errors.append(_line(f"shots[{i}].{name}", f"{name} needs photo", "add photo:"))
         if sh.clip_in is not None and not has_c:
             errors.append(_line(f"shots[{i}].clip_in", "clip_in needs clip", "add clip:"))
+        if sh.range is not None and not has_c:
+            errors.append(_line(f"shots[{i}].range", "range needs clip", "add clip:"))
+        if sh.range is not None and sh.clip_in is not None:
+            errors.append(
+                _line(f"shots[{i}]", "range and clip_in are mutually exclusive", "range is [start, end]")
+            )
+        if (
+            sh.range is not None
+            and has_c
+            and sh.clip_in is None
+            and sh.hold is None
+            and sh.until is None
+            and h is not None
+            and spec_dir is not None
+        ):
+            _check_clip_range(spec, spec_dir, i, sh, bpm, errors)
+        if sh.sequence is not None:
+            _validate_sequence(sh.sequence, i, fps, bpm, parsed, errors)
+            for name in ("crop", "focus", "zoom"):
+                if getattr(sh, name) is not None:
+                    errors.append(_line(f"shots[{i}].{name}", "not used on a sequence", "remove it"))
+        if sh.at_event is not None:
+            if not has_c:
+                errors.append(_line(f"shots[{i}].at_event", "at_event needs clip", "add clip:"))
+            elif sh.range is not None:
+                errors.append(
+                    _line(f"shots[{i}]", "range and at_event are mutually exclusive", "remove one")
+                )
+            elif sh.clip_in is not None:
+                errors.append(
+                    _line(f"shots[{i}]", "clip_in and at_event are mutually exclusive", "remove one")
+                )
+            else:
+                got = _clip_in_from_event(sh, i, fps, times, events, errors)
+                if got is not None:
+                    clip_ins[i] = got
+        if sh.pre is not None and sh.at_event is None:
+            errors.append(_line(f"shots[{i}].pre", "pre needs at_event", "remove pre or add at_event"))
         if sh.zoom is not None and sh.drift is not None:
             errors.append(_line(f"shots[{i}]", "zoom and drift are mutually exclusive", "remove one"))
         if sh.pulse is not None:
@@ -1164,9 +1767,22 @@ def validate_spec(
             continue
         if tr.type not in TRANS_TYPES:
             errors.append(
-                _line(f"shots[{i}].in.type", f"unknown {tr.type!r}", "use cut, fade, swirl or whip")
+                _line(f"shots[{i}].in.type", f"unknown {tr.type!r}", TRANS_HINT)
             )
             continue
+        if tr.zoom is not None and tr.type != "wall-pullback":
+            errors.append(
+                _line(f"shots[{i}].in.zoom", "zoom is for wall-pullback", "remove zoom")
+            )
+        if tr.type == "wall-pullback" and tr.zoom is not None:
+            if not math.isfinite(tr.zoom) or tr.zoom <= 1:
+                errors.append(
+                    _line(
+                        f"shots[{i}].in.zoom",
+                        f"must be finite and > 1, got {_fmt_num(tr.zoom)}",
+                        "use a zoom above 1, for example 3.2",
+                    )
+                )
         if tr.type == "cut":
             continue
         if tr.type == "whip" and tr.axis not in ("x", "y"):
@@ -1184,7 +1800,7 @@ def validate_spec(
             errors.append(
                 _line(f"shots[{i}].in", "no previous shot to transition from", "remove in or use type: fade")
             )
-        if tr.type in ("fade", "swirl"):
+        if tr.type in INCOMING_TRANS:
             if h is not None and d > h:
                 errors.append(
                     _line(
@@ -1213,7 +1829,9 @@ def validate_spec(
                 )
 
     _reject_overlap_windows(spec, holds, parsed, errors)
-    _check_finish(spec, errors)
+    _check_finish(spec, errors, spec_dir)
+    if spec.check is not None and not 1 <= spec.check.sample <= 30:
+        errors.append(_line("check.sample", f"must be 1 to 30, got {spec.check.sample}", "use sample: 3"))
 
     for i, fx in enumerate(spec.fx):
         kinds = [fx.leak is not None, fx.flash is not None, fx.hit is not None, fx.burst is not None]
@@ -1242,7 +1860,132 @@ def validate_spec(
 
     _validate_text(spec, markers, fps, bpm, times, errors, beat0=beat0)
     _validate_tracks(spec, markers, fps, bpm, times, errors, beat0=beat0)
-    return parsed, times, markers, bpm, beat0
+    _validate_check(spec, markers, fps, bpm, times, errors, beat0=beat0)
+    return parsed, times, markers, bpm, beat0, clip_ins
+
+
+def _card_duration(
+    raw: object, fps: int, bpm: float | None, path: str, errors: list[str]
+) -> float | None:
+    """A card line clock is a duration from the shot start, not a film marker."""
+    if isinstance(raw, str) and _DUR.match(raw.strip()):
+        return _dur_frames(raw, fps, bpm, path, errors)
+    shown = raw if isinstance(raw, str) else repr(raw)
+    bare = isinstance(raw, (int, float)) or (isinstance(raw, str) and _BARE.match(raw.strip()))
+    if bare:
+        errors.append(_line(path, "bare number", "time from this shot's start: 0s, 12f or 1b"))
+    else:
+        errors.append(
+            _line(path, f"invalid duration {shown!r}", "time from this shot's start: 0s, 12f or 1b")
+        )
+    return None
+
+
+def _check_text_line(path: str, line: TextLine, errors: list[str]) -> None:
+    if line.style not in TEXT_STYLES:
+        errors.append(_line(f"{path}.style", f"unknown {line.style!r}", "use serif, script, caps or deva"))
+    if line.italic and line.style != "serif":
+        errors.append(_line(f"{path}.italic", "italic is serif-only", "set style: serif"))
+    if line.by not in TEXT_BY:
+        errors.append(_line(f"{path}.by", f"unknown {line.by!r}", "use word or char"))
+    if line.reveal not in TEXT_REVEAL:
+        errors.append(_line(f"{path}.reveal", f"unknown {line.reveal!r}", "use rise or pop"))
+    _check_color(f"{path}.color", line.color, errors)
+    for name in ("y", "size", "weight", "tracking", "line_height", "rise", "indent"):
+        v = getattr(line, name)
+        if v is None:
+            continue
+        positive = name in ("size", "weight", "line_height")
+        if not math.isfinite(v) or (positive and v <= 0):
+            need = "finite and > 0" if positive else "finite"
+            errors.append(
+                _line(f"{path}.{name}", f"must be {need}, got {_fmt_num(v)}", f"use a design-px {name}")
+            )
+
+
+def _validate_card(
+    card: CardSpec, index: int, fps: int, bpm: float | None, errors: list[str]
+) -> None:
+    path = f"shots[{index}].card"
+    if not isinstance(card.color, str) or not _HEX.match(card.color):
+        errors.append(_line(f"{path}.color", f"expected #rrggbb, got {card.color!r}", "use #112233"))
+    if not card.text:
+        errors.append(_line(f"{path}.text", "need at least one line", "add a line"))
+    for j, line in enumerate(card.text):
+        p = f"{path}.text[{j}]"
+        _check_text_line(p, line, errors)
+        _card_duration(line.at, fps, bpm, f"{p}.at", errors)
+        if line.stagger is not None:
+            _card_duration(line.stagger, fps, bpm, f"{p}.stagger", errors)
+        if line.dur is not None:
+            _card_duration(line.dur, fps, bpm, f"{p}.dur", errors)
+        if line.sweep:
+            for k, raw in enumerate(line.sweep):
+                _card_duration(raw, fps, bpm, f"{p}.sweep[{k}]", errors)
+
+
+def _sec_label(frames: float, fps: int) -> str:
+    seconds = frames / float(fps) if fps > 0 else frames
+    text = f"{seconds:.4f}".rstrip("0").rstrip(".")
+    return f"{text}s"
+
+
+def _validate_check(
+    spec: Spec,
+    markers: dict[str, float],
+    fps: int,
+    bpm: float | None,
+    times: dict[str, float],
+    errors: list[str],
+    *,
+    beat0: float = 0.0,
+) -> None:
+    """Resolve `check.expect` spans and the optional loudness target.
+
+    A span that never shows up in the render is not an error here: `check` reports it
+    as INFO, so a stale annotation survives an edit instead of failing validate.
+    """
+    if spec.check is None:
+        return
+    loud = spec.check.loudness
+    if loud is not None:
+        if not math.isfinite(loud.i):
+            errors.append(
+                _line("check.loudness.i", f"must be finite, got {_fmt_num(loud.i)}", "use i: -14")
+            )
+        if not math.isfinite(loud.tol) or loud.tol < 0:
+            errors.append(
+                _line(
+                    "check.loudness.tol",
+                    f"must be >= 0, got {_fmt_num(loud.tol)}",
+                    "use tol: 1",
+                )
+            )
+    for i, item in enumerate(spec.check.expect):
+        kind = "black" if item.black is not None else "frozen"
+        pair = item.black if item.black is not None else item.frozen
+        if pair is None:
+            continue
+        ends: list[float | None] = []
+        for j, raw in enumerate(pair):
+            val = _parse_time(
+                raw, markers, fps, bpm, f"check.expect[{i}].{kind}[{j}]", errors, beat0=beat0
+            )
+            ends.append(val)
+        if ends[0] is None or ends[1] is None:
+            continue
+        start, end = ends[0], ends[1]
+        if end <= start:
+            errors.append(
+                _line(
+                    f"check.expect[{i}].{kind}",
+                    f"ends at or before the start ({_sec_label(start, fps)} to {_sec_label(end, fps)})",
+                    "end must be later than start",
+                )
+            )
+            continue
+        times[f"check.expect[{i}].start"] = start
+        times[f"check.expect[{i}].end"] = end
 
 
 def _validate_text(
@@ -1260,19 +2003,13 @@ def _validate_text(
             val = _parse_time(raw, markers, fps, bpm, f"text[{i}].{field}", errors, beat0=beat0)
             if val is not None:
                 times[f"text[{i}].{field}"] = val
+        if block.backdrop is not None:
+            _check_backdrop(f"text[{i}].backdrop", block.backdrop, errors)
         if not block.lines:
             errors.append(_line(f"text[{i}].lines", "need at least one line", "add a line"))
         for j, line in enumerate(block.lines):
             p = f"text[{i}].lines[{j}]"
-            if line.style not in TEXT_STYLES:
-                errors.append(_line(f"{p}.style", f"unknown {line.style!r}", "use serif, script, caps or deva"))
-            if line.italic and line.style != "serif":
-                errors.append(_line(f"{p}.italic", "italic is serif-only", "set style: serif"))
-            if line.by not in TEXT_BY:
-                errors.append(_line(f"{p}.by", f"unknown {line.by!r}", "use word or char"))
-            if line.reveal not in TEXT_REVEAL:
-                errors.append(_line(f"{p}.reveal", f"unknown {line.reveal!r}", "use rise or pop"))
-            _check_color(f"{p}.color", line.color, errors)
+            _check_text_line(p, line, errors)
             val = _parse_time(line.at, markers, fps, bpm, f"{p}.at", errors, beat0=beat0)
             if val is not None:
                 times[f"{p}.at"] = val
@@ -1321,7 +2058,7 @@ def _validate_tracks(
 
 
 def _trans_window(kind: str, start: int, dur: int) -> tuple[float, float]:
-    if kind in ("fade", "swirl"):
+    if kind in INCOMING_TRANS:
         return float(start), float(start + dur)
     half = dur / 2
     return float(start) - half, float(start) + half
@@ -1338,7 +2075,7 @@ def _reject_overlap_windows(
     wins: list[tuple[int, float, float]] = []
     for i, sh in enumerate(spec.shots):
         tr = sh.in_
-        if tr is None or tr.type not in ("fade", "swirl", "whip"):
+        if tr is None or tr.type not in (*INCOMING_TRANS, "whip"):
             continue
         d = parsed.get(f"shots[{i}].in.dur")
         st = starts[i]

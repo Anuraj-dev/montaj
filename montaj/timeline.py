@@ -2,13 +2,49 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from montaj.render.core import EASE as EASE_FN, key as eval_key
-from montaj.spec import Shot, Spec, SpecError, _format_beat0, parse_wh, round_frame, validate_spec
+from montaj.spec import (
+    INCOMING_TRANS,
+    WALL_PULLBACK_ZOOM,
+    Shot,
+    Spec,
+    SpecError,
+    TextBackdrop,
+    _format_beat0,
+    parse_wh,
+    round_frame,
+    validate_spec,
+)
 
 _TRACK_DEFAULT = {"dust": "linear", "glow": "linear", "bars": "sine"}
+
+
+def transition_overlap(kind: str | None, dur_frames: float) -> float:
+    """Frames of the previous shot still on screen while this transition plays.
+
+    A fade or swirl runs for the whole `dur`. A whip is centred on the cut, so
+    only half of it still shows the outgoing shot. A cut shows nothing past the hold.
+    """
+    if kind is None or kind == "cut" or dur_frames <= 0:
+        return 0.0
+    if kind == "whip":
+        return float(dur_frames) / 2.0
+    if kind in INCOMING_TRANS:
+        return float(dur_frames)
+    return 0.0
+
+
+def clip_read_frames(hold_frames: int, overlap_frames: float) -> int:
+    """Output frames read from a clip: the hold, plus the outgoing overlap.
+
+    `ceil(overlap - 1e-6)` keeps a fractional whip from dropping a frame and
+    treats a zero overlap as zero (ceil of a tiny negative is 0).
+    """
+    return int(hold_frames) + int(math.ceil(float(overlap_frames) - 1e-6))
 
 
 @dataclass(frozen=True)
@@ -35,18 +71,54 @@ class Blank:
 
 
 @dataclass(frozen=True)
+class Sequence:
+    """One shot cycling `spec.sequence.items`. The renderer picks the item from `t`."""
+
+    shot: int
+    t0: int  # shot start frame: the item clock, so it reaches the segment hash
+
+
+@dataclass(frozen=True)
+class Card:
+    """Solid colour and text as one picture. `t0`/`end` are the shot's frames.
+
+    `span` covers the transition overlap, plus one frame, so motion-blur samples
+    at the edge still show the glyphs. Line clocks are durations from `t0`.
+    """
+
+    shot: int
+    t0: int
+    end: int
+    span: tuple[float, float]
+
+
+@dataclass(frozen=True)
 class Trans:
     kind: str
-    a: Still | Wall | Clip | Blank | Trans
-    b: Still | Wall | Clip | Blank | Trans
+    a: Still | Wall | Clip | Blank | Sequence | Card | Trans
+    b: Still | Wall | Clip | Blank | Sequence | Card | Trans
     t0: float
     dur: float
     axis: str = "x"
     center: tuple[float, float] | None = None
     blur: float = 0.0
+    zoom: float | None = None
 
 
-type Scene = Still | Wall | Clip | Blank | Trans
+type Scene = Still | Wall | Clip | Blank | Sequence | Card | Trans
+
+
+def sequence_index(start: int, every: int, n: int, t: float) -> int:
+    """Item index at time `t`. The clock starts at the shot start.
+
+    A whip samples the incoming shot before that start. Those frames hold item 0
+    instead of wrapping onto the last item.
+    """
+    if n <= 0:
+        raise ValueError("empty sequence")
+    if every <= 0 or t < start:
+        return 0
+    return int(math.floor((t - start) / float(every))) % n
 
 
 @dataclass(frozen=True)
@@ -80,6 +152,7 @@ class ResolvedText:
     fade_out: float
     blur: float
     lines: tuple[ResolvedLine, ...]
+    backdrop: TextBackdrop | None = None
 
 
 @dataclass(frozen=True)
@@ -89,6 +162,16 @@ class ResolvedSub:
     text: str
     size: float | None = None
     color: str | None = None
+
+
+@dataclass(frozen=True)
+class ResolvedExpect:
+    """One `check.expect` span in seconds. The renderer never reads it."""
+
+    kind: str
+    start: float
+    end: float
+    why: str | None = None
 
 
 @dataclass(frozen=True)
@@ -125,13 +208,22 @@ class Segment:
     end: int
 
 
-def _base_scene(shot: ResolvedShot, span: tuple[int, int] | None = None) -> Still | Wall | Clip | Blank:
+def _base_scene(
+    shot: ResolvedShot,
+    span: tuple[int, int] | None = None,
+    card_span: tuple[float, float] | None = None,
+) -> Still | Wall | Clip | Blank | Sequence | Card:
     if shot.kind == "blank":
         return Blank()
+    if shot.kind == "card":
+        window = card_span or (float(shot.start) - 1.0, float(shot.end) + 1.0)
+        return Card(shot=shot.index, t0=shot.start, end=shot.end, span=window)
     if shot.kind == "wall":
         return Wall(shot=shot.index, t0=shot.start)
     if shot.kind == "clip":
         return Clip(shot=shot.index, t0=shot.start)
+    if shot.kind == "sequence":
+        return Sequence(shot=shot.index, t0=shot.start)
     return Still(shot=shot.index, span=span)
 
 
@@ -232,6 +324,8 @@ class Timeline:
     _tracks: dict[str, list] = field(default_factory=dict)
     _fade_out: tuple[int, int] | None = None
     _spans: dict[int, tuple[int, int] | None] = field(default_factory=dict)
+    _card_spans: dict[int, tuple[float, float]] = field(default_factory=dict)
+    check_expects: list[ResolvedExpect] = field(default_factory=list)
 
     def plan(self, f: int) -> FramePlan:
         if not 0 <= f < self.n_frames:
@@ -239,7 +333,7 @@ class Timeline:
         scene: Scene | None = None
         for sh in self.shots:
             if sh.start <= f < sh.end:
-                scene = _base_scene(sh, self._spans.get(sh.index))
+                scene = _base_scene(sh, self._spans.get(sh.index), self._card_spans.get(sh.index))
                 break
         for w0, w1, tr in self._windows:
             if w0 <= f < w1:
@@ -298,29 +392,71 @@ def _track_at(keys: list, t: float) -> float:
     return float(eval_key(float(t), keys))
 
 
-def _shot_with_frame_keys(sh: Shot, i: int, parsed: dict[str, int]) -> Shot:
-    if sh.wall is None:
+def _materialize_transition(sh: Shot) -> Shot:
+    """Write the wall-pullback zoom default onto the shot the hash dumps."""
+    tr = sh.in_
+    if tr is None or tr.type != "wall-pullback" or tr.zoom is not None:
         return sh
-    pos = [
-        key.model_copy(update={"t": parsed[f"shots[{i}].wall.camera.pos[{k}].t"]})
-        for k, key in enumerate(sh.wall.camera.pos)
-    ]
-    zoom = [
-        key.model_copy(update={"t": parsed[f"shots[{i}].wall.camera.zoom[{k}].t"]})
-        for k, key in enumerate(sh.wall.camera.zoom)
-    ]
-    cam = sh.wall.camera.model_copy(update={"pos": pos, "zoom": zoom})
-    return sh.model_copy(update={"wall": sh.wall.model_copy(update={"camera": cam})})
+    return sh.model_copy(update={"in_": tr.model_copy(update={"zoom": WALL_PULLBACK_ZOOM})})
+
+
+def _shot_with_frame_keys(sh: Shot, i: int, parsed: dict[str, int]) -> Shot:
+    if sh.wall is not None:
+        pos = [
+            key.model_copy(update={"t": parsed[f"shots[{i}].wall.camera.pos[{k}].t"]})
+            for k, key in enumerate(sh.wall.camera.pos)
+        ]
+        zoom = [
+            key.model_copy(update={"t": parsed[f"shots[{i}].wall.camera.zoom[{k}].t"]})
+            for k, key in enumerate(sh.wall.camera.zoom)
+        ]
+        cam = sh.wall.camera.model_copy(update={"pos": pos, "zoom": zoom})
+        sh = sh.model_copy(update={"wall": sh.wall.model_copy(update={"camera": cam})})
+    every = parsed.get(f"shots[{i}].sequence.every")
+    if sh.sequence is not None and every is not None:
+        sh = sh.model_copy(update={"sequence": sh.sequence.model_copy(update={"every": every})})
+    return sh
+
+
+def _with_picked_clip_in(sh: Shot, clip_in: str | None) -> Shot:
+    """Materialise an `at_event` pick as `clip_in`, so the segment hash sees the resolved time."""
+    if sh.at_event is None:
+        return sh
+    return sh.model_copy(update={"clip_in": clip_in, "at_event": None, "pre": None})
 
 
 def _shot_kind(sh: Shot) -> str:
     if sh.blank:
         return "blank"
+    if sh.card is not None:
+        return "card"
     if sh.wall is not None:
         return "wall"
     if sh.clip is not None:
         return "clip"
+    if sh.sequence is not None:
+        return "sequence"
     return "still"
+
+
+def _card_window(resolved: list[ResolvedShot], i: int, parsed: dict[str, int]) -> tuple[float, float]:
+    """Visible overlap of a card, padded by one frame for motion-blur samples."""
+    sh = resolved[i]
+    v0 = float(sh.start)
+    tr = sh.spec.in_
+    if tr is not None and tr.type == "whip":
+        dur = parsed.get(f"shots[{i}].in.dur")
+        if dur is not None:
+            v0 -= dur / 2.0
+    v1 = float(sh.end)
+    if i + 1 < len(resolved):
+        nxt = resolved[i + 1]
+        ntr = nxt.spec.in_
+        if ntr is not None:
+            nd = parsed.get(f"shots[{i + 1}].in.dur")
+            if nd is not None:
+                v1 = float(nxt.start) + transition_overlap(ntr.type, float(nd))
+    return (v0 - 1.0, v1 + 1.0)
 
 
 def _visible_span(resolved: list[ResolvedShot], i: int, parsed: dict[str, int]) -> tuple[int, int] | None:
@@ -342,7 +478,7 @@ def _visible_span(resolved: list[ResolvedShot], i: int, parsed: dict[str, int]) 
     if i + 1 < len(resolved):
         nxt = resolved[i + 1]
         ntr = nxt.spec.in_
-        if ntr is not None and ntr.type in ("fade", "swirl", "whip"):
+        if ntr is not None and ntr.type in (*INCOMING_TRANS, "whip"):
             nd = parsed.get(f"shots[{i + 1}].in.dur")
             if nd is not None:
                 v1 = float(nxt.start) + (nd / 2.0 if ntr.type == "whip" else nd)
@@ -390,7 +526,17 @@ def _resolve_texts(spec: Spec, times: dict[str, float], fps: int) -> list[Resolv
                     indent=line.indent,
                 )
             )
-        out.append(ResolvedText(from_=frm, to=to, fade_in=fi, fade_out=fo, blur=block.blur, lines=tuple(lines)))
+        out.append(
+            ResolvedText(
+                from_=frm,
+                to=to,
+                fade_in=fi,
+                fade_out=fo,
+                blur=block.blur,
+                lines=tuple(lines),
+                backdrop=block.backdrop,
+            )
+        )
     return out
 
 
@@ -411,7 +557,7 @@ def _resolve_tracks(spec: Spec, times: dict[str, float]) -> dict[str, list]:
 
 def resolve(spec: Spec, spec_dir: Path) -> Timeline:
     errors: list[str] = []
-    parsed, times, markers, bpm, beat0 = validate_spec(spec, errors, spec_dir=spec_dir)
+    parsed, times, markers, bpm, beat0, clip_ins = validate_spec(spec, errors, spec_dir=spec_dir)
     size = parse_wh(spec.video.size, "video.size", errors, even=True)
     if errors:
         raise SpecError(errors)
@@ -434,32 +580,44 @@ def resolve(spec: Spec, spec_dir: Path) -> Timeline:
                 start=start,
                 end=end,
                 kind=_shot_kind(sh),
-                spec=_shot_with_frame_keys(sh, i, parsed),
+                spec=_materialize_transition(
+                    _shot_with_frame_keys(_with_picked_clip_in(sh, clip_ins.get(i)), i, parsed)
+                ),
             )
         )
     n_frames = resolved[-1].end if resolved else 0
     segments = [Segment(index=i, start=s.start, end=s.end) for i, s in enumerate(resolved)]
     spans = {i: _visible_span(resolved, i, parsed) for i in range(len(resolved))}
 
+    card_spans = {
+        i: _card_window(resolved, i, parsed) for i, sh in enumerate(resolved) if sh.kind == "card"
+    }
     windows: list[tuple[float, float, Trans]] = []
     for i, sh in enumerate(resolved):
         tr = sh.spec.in_
         if tr is None or tr.type == "cut":
             continue
         dur = float(parsed[f"shots[{i}].in.dur"])
-        b = _base_scene(sh, spans[i])
+        b = _base_scene(sh, spans[i], card_spans.get(i))
         if i == 0:
             a = Blank()
         else:
             prev = resolved[i - 1]
-            a = _base_scene(prev, spans[prev.index])
-        if tr.type in ("fade", "swirl"):
+            a = _base_scene(prev, spans[prev.index], card_spans.get(prev.index))
+        if tr.type in INCOMING_TRANS:
             t0 = float(sh.start)
             center = tr.center
             if tr.type == "swirl" and center is None and i > 0:
                 center = resolved[i - 1].spec.focus
+            zoom = float(tr.zoom) if tr.type == "wall-pullback" else None
             windows.append(
-                (t0, t0 + dur, Trans(kind=tr.type, a=a, b=b, t0=t0, dur=dur, center=center, blur=tr.blur))
+                (
+                    t0,
+                    t0 + dur,
+                    Trans(
+                        kind=tr.type, a=a, b=b, t0=t0, dur=dur, center=center, blur=tr.blur, zoom=zoom,
+                    ),
+                )
             )
         elif tr.type == "whip":
             t0 = float(sh.start) - dur / 2
@@ -533,4 +691,21 @@ def resolve(spec: Spec, spec_dir: Path) -> Timeline:
         _tracks=_resolve_tracks(spec, times),
         _fade_out=fade_out,
         _spans=spans,
+        _card_spans=card_spans,
+        check_expects=_resolved_expects(spec, times),
     )
+
+
+def _resolved_expects(spec: Spec, times: dict[str, float]) -> list[ResolvedExpect]:
+    if spec.check is None or spec.video.fps <= 0:
+        return []
+    fps = float(spec.video.fps)
+    out: list[ResolvedExpect] = []
+    for i, item in enumerate(spec.check.expect):
+        start = times.get(f"check.expect[{i}].start")
+        end = times.get(f"check.expect[{i}].end")
+        if start is None or end is None:
+            continue
+        kind = "black" if item.black is not None else "frozen"
+        out.append(ResolvedExpect(kind, start / fps, end / fps, item.why))
+    return out

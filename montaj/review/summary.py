@@ -29,11 +29,21 @@ def shot_label(sh: ResolvedShot) -> str:
         return str(spec.clip)
     if spec.photo is not None:
         return str(spec.photo)
+    if spec.sequence is not None:
+        return "sequence"
+    if spec.card is not None:
+        return "card"
     return "blank"
 
 
 def first_text(tl: Timeline, sh: ResolvedShot) -> str:
-    """First line whose appearance (`at`) falls in the shot. Block overlap is half-open."""
+    """First line whose appearance (`at`) falls in the shot. Block overlap is half-open.
+
+    A card's text is the shot picture, so the strip shows its first line.
+    """
+    card = sh.spec.card
+    if card is not None and card.text:
+        return card.text[0].text
     found: tuple[float, str] | None = None
     for block in tl.texts:
         if not (block.from_ < sh.end and block.to > sh.start):

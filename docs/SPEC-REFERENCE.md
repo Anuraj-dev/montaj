@@ -1,12 +1,16 @@
 # Spec reference
 
-Photo fields (`crop`, `focus`, swirl `center`, wall `at`) are source-image pixels. `zoom`, the wall grid and leak size are design pixels of a 1080-wide frame, so a half-size preview matches the final framing. Durations are `22f` (frames), `4b` (beats on the grid) or `1.5s`; a bare number is an error. The beat grid is `video.bpm` plus a phase `beat0` (see below). A plain beat time (`at: 8b`, `until: 16b`, a marker defined as `8b`) means `beat0 + 8` beats; durations (`hold`, `dur`, `stagger`, `in.dur`) and offsets (`ch1+2b`) are spans. A time expression is a duration from film start, or `<marker>[±duration]` (`ch1`, `ch1+2.4s`, `pre2-6f`). Marker names are `[a-z][a-z0-9_]*`. Marker values may be a duration, `word:<i>` (start of word `i` in `audio.markers`), or another marker plus an optional duration offset; cycles are an error.
+Photo fields (`crop`, `focus`, swirl `center`, wall `at`) are source-image pixels. `zoom`, the wall grid and leak size are design pixels of a 1080-wide frame, so a half-size preview matches the final framing. Durations are `22f` (frames), `4b` (beats on the grid) or `1.5s`; a bare number is an error. The beat grid is `video.bpm` plus a phase `beat0` (see below). A plain beat time (`at: 8b`, `until: 16b`, a marker defined as `8b`) means `beat0 + 8` beats; durations (`hold`, `dur`, `stagger`, `in.dur`) and offsets (`ch1+2b`) are spans. A time expression is a duration from film start, or `<marker>[±duration]` (`ch1`, `ch1+2.4s`, `pre2-6f`). Marker names are `[a-z][a-z0-9_]*`. Marker values may be a duration, `event:<clip>/<field>=<value>[,<field>~=<substring>][#n]` (time of that event in `assets/<clip>.events.json`, same contract as `at_event`), `word:<i>` (start of word `i` in `audio.markers`), or another marker plus an optional duration offset; cycles are an error.
 
 - `video.size` — string, required — output `WxH`, both numbers even. Preview halves each side, rounded down to even.
 - `video.fps` — integer, required — frames per second.
 - `video.bpm` — number, default none — beats per minute. If omitted, `audio.markers` `bpm` sets the grid (beats follow the analysed song). Needed, one way or the other, when any duration uses `b`.
 - `video.beat0` — duration (`f` or `s`), default see text — time of the first beat. Default: `0s` when `video.bpm` is set; else `beats[0]` from `audio.markers`.
-- `video.look` — `warm-film` or `golden-film`, required — finish preset applied to every frame. See looks below.
+- `video.look` — `warm-film`, `golden-film`, `clean`, `cool-tech` or a mapping with `lut`, required — finish preset applied to every frame. See looks below.
+- `video.look.lut` — path to a `.cube` file, required in the mapping form — relative to the spec file. 3D up to 65 points per side, or 1D. The file bytes are part of the cache key.
+- `video.look.strength` — number 0..1, default `1` — mix from the ungraded picture (`0`) to the LUT result (`1`).
+- `video.look.vignette` — number 0..1, default `0` — edge darkening, applied after the LUT. `0.1` is subtle.
+- `video.look.grain` — number 0..1, default `0` — film grain mix; `1` is the golden-film grain.
 - `video.background` — `#rrggbb`, default `#000000` — colour that shows through a fade from or to nothing.
 - `video.intro` — mapping, default none — opening treatment on the first frames.
 - `video.intro.type` — `white-lift`, required with intro — a white bloom that settles onto the picture, plus a short lift from white.
@@ -17,10 +21,13 @@ Photo fields (`crop`, `focus`, swirl `center`, wall `at`) are source-image pixel
 - `video.motion_blur` — integer, default `1` — sub-frames averaged into each frame. `1` is off. Preview uses at most 2. Text and subtitles are composited once at the integer frame, after that average.
 - `assets` — string, default `assets` — photo folder relative to the spec file. A photo is the file stem (`jpg`, `jpeg`, `png` or `webp`).
 - `shots` — list, required — played in order. Each shot starts when the previous one ends.
-- `shots[].photo` — string, photo or wall or clip — stem of the still. An integer in the YAML is read as a string. Mutually exclusive with `wall` and `clip`.
-- `shots[].clip` — string, photo or wall or clip — stem of a video file in `assets/` (`mp4`, `mov`, `webm`, `mkv`). Mutually exclusive with `photo` and `wall`.
-- `shots[].clip_in` — duration, default `0s` — source offset into the clip.
-- `shots[].hold` — duration, hold or until — how long this shot is on screen. Exactly one of `hold` or `until`. A whole-beat hold (`4b`) ends on a beat of the grid (moving forward if the shot started off-beat), and beat holds never drift from rounding.
+- `shots[].photo` — string, one source: photo, wall, clip, blank, sequence or card — stem of the still. An integer in the YAML is read as a string. Mutually exclusive with the other sources.
+- `shots[].clip` — string, one source: photo, wall, clip, blank, sequence or card — video source. A stem (`intro`) is a file in `assets/` (`mp4`, `mov`, `webm`, `mkv`). A directory or a video suffix (`../old/out/final.mp4`) is a path relative to the spec file, or absolute. Mutually exclusive with the other sources. `check` warns `shots[i] <stem> runs <t>s past its clip` when the hold plus the outgoing fade, swirl, or half a whip, after `clip_in`, reads past the file.
+- `shots[].clip_in` — duration, default `0s` — source offset into the clip. Mutually exclusive with `range`.
+- `shots[].at_event` — mapping, default none — pick `clip_in` from `assets/<clip>.events.json`: `{kind, <field>: value, contains: {<field>: substring}, nth}`; `nth` is 1-based among matches. A miss is an error listing the values present. Needs `clip`; exclusive with `clip_in` and `range`. The resolved time is written into the shot, so changing `nth` re-renders only that shot.
+- `shots[].pre` — duration, default `0s` — start this long before the `at_event` time (clamped error if before the clip start). Needs `at_event`.
+- `shots[].range` — `[start, end]` durations, default none — source span of `clip` played as this shot. Needs `clip`. Shot length is `end − start` and does not snap to the beat grid. Playback stops at `end`: an outgoing transition holds the last frame. The file needs a video stream and `start` must fall inside it. Mutually exclusive with `hold`, `until` and `clip_in`.
+- `shots[].hold` — duration, hold, until or range — how long this shot is on screen. Exactly one of `hold`, `until` or `range`. A whole-beat hold (`4b`) ends on a beat of the grid (moving forward if the shot started off-beat), and beat holds never drift from rounding.
 - `shots[].until` — time expression, hold or until — the shot ends at this time from film start. Must fall after the shot's start.
 - `shots[].drift` — mapping, default none — Ken Burns zoom/pan on a photo. Needs `photo`. Mutually exclusive with `zoom`.
 - `shots[].drift.zoom` — `[from, to]`, default `[1, 1]` — scale over the shot's visible span.
@@ -38,18 +45,25 @@ Photo fields (`crop`, `focus`, swirl `center`, wall `at`) are source-image pixel
 - `shots[].morph.dur` — duration, required with morph — how long the circle takes to open.
 - `shots[].morph.center` — `[x, y]`, default none — screen fraction where the circle is centred.
 - `shots[].pulse` — `heartbeat`, default none — beat-locked scale pulse on the grid tempo, phased from the shot start. Needs `photo` and a grid (`video.bpm` or `audio.markers`).
-- `shots[].blank` — boolean, default false — show only `video.background`. Mutually exclusive with `photo`, `wall` and `clip`. Holds and fades like any other shot.
+- `shots[].blank` — boolean, default false — show only `video.background`. Mutually exclusive with the other sources. Holds and fades like any other shot.
+- `shots[].sequence` — mapping, one source: photo, wall, clip, blank, sequence or card — cycle photos or colours across this shot. Mutually exclusive with the other sources.
+- `shots[].sequence.every` — duration (`f` or `s`), required — how long each item stays. Rounds to a whole frame of at least 1. Beats and booleans are an error. `check` treats each step as a designed hold but still flags a freeze that runs across an item change.
+- `shots[].sequence.items` — list, required — at least two. A photo stem, a quoted `#rrggbb`, `{photo: stem}` or `{color: "#rrggbb"}`. The list repeats until the shot ends.
+- `shots[].card` — mapping, one source: photo, wall, clip, blank, sequence or card — a solid colour and text as this shot's picture, with no blank shot and no `text` block. Mutually exclusive with the other sources.
+- `shots[].card.color` — `#rrggbb`, required — the card's background.
+- `shots[].card.text` — list, required — lines with the same fields as `text[].lines[]`. `at`, `stagger`, `dur` and `sweep` are durations from this shot's start (`0s`, `12f`, `1b`), not film markers. The colour and the lines are one picture, so a fade or whip carries both.
 - `shots[].crop` — `[x0, y0, x1, y1]`, default the full image — the part of the photo that is shown.
 - `shots[].focus` — `[x, y]`, default the crop centre — the photo point placed at the screen centre.
 - `shots[].zoom` — number, default cover — design pixels per photo pixel. Cover fits the crop with a hair of overscan.
 - `shots[].in` — mapping, default none — how this shot arrives from the previous one. Omit `in` for a cut. See transitions.
-- `shots[].in.type` — `cut`, `fade`, `swirl` or `whip`, required inside `in` — which transition.
+- `shots[].in.type` — `cut`, `fade`, `swirl`, `whip`, `wall-pullback` or `burn-white`, required inside `in` — which transition.
 - `shots[].in.dur` — duration, required except for a cut — length of the transition. It has to fit in the shots it overlaps.
 - `shots[].in.center` — `[x, y]`, default the outgoing shot's focus — where a swirl opens, in the outgoing photo.
 - `shots[].in.axis` — `x` or `y`, default `x` — which way a whip travels.
 - `shots[].in.blur` — number, default `0` — design-px blur on fading layers. Shot 0 may use `fade` (from `video.background`); other transitions on shot 0 stay an error.
+- `shots[].in.zoom` — number, default `3.2` — wall-pullback only. Magnification of the incoming frame at the start; the camera eases to 1. Must be > 1.
 - `shots[].flash` — number, default none — white flash on this shot's first frame, fading out over the next 6 frames.
-- `shots[].wall` — mapping, photo or wall — a flat field of prints. The camera only pans and zooms. Mutually exclusive with `photo`.
+- `shots[].wall` — mapping, one source: photo, wall, clip, blank, sequence or card — a flat field of prints. The camera only pans and zooms. Mutually exclusive with the other sources.
 - `wall.grid` — `WxH` string, required — distance between print cells, in world design pixels.
 - `wall.seed` — integer, required — seed for the jitter. Random draws happen in `prints` list order.
 - `wall.jitter` — number, required — a non-straight print shifts by up to this many pixels in x, then in y.
@@ -93,6 +107,10 @@ Photo fields (`crop`, `focus`, swirl `center`, wall `at`) are source-image pixel
 - `text[].fade_in` — duration, default `0s` — block fade in. `0` is instant.
 - `text[].fade_out` — duration, default `0.8s` — block fade out; the block blurs by `(1 − a)·blur`.
 - `text[].blur` — number, default `10` — design-px blur while the block fades.
+- `text[].backdrop` — mapping, `true`, `gradient` or `solid`, default none — dark scrim behind the block, painted by the compositor. `true` is the default gradient. Fades with the block.
+- `text[].backdrop.type` — `gradient` or `solid`, default `gradient` — `gradient` fades out; `solid` is flat over the same area.
+- `text[].backdrop.strength` — number, default `0.8` — opacity of the darkest part, from 0 to 1.
+- `text[].backdrop.place` — `bottom`, `top` or `band`, default `band` — `band` covers the lines (full strength on the line box, cosine fade across a pad of 48 design px or 0.45× the line size); `bottom` and `top` keep the outer 28% of the frame fully dark, then fade across the next 22%.
 - `text[].lines` — list, required — the lines in this block.
 - `text[].lines[].text` — string, required — the line.
 - `text[].lines[].style` — `serif`, `script`, `caps` or `deva`, default `serif`.
@@ -126,6 +144,14 @@ Photo fields (`crop`, `focus`, swirl `center`, wall `at`) are source-image pixel
 - `tracks.*[].t` — time expression, required — when this key is reached.
 - `tracks.*[].v` — number, required — value at this key.
 - `tracks.*[].ease` — easing name, default `linear` for dust and glow, `sine` for bars — the curve into this key.
+- `check` — mapping, default none — designed QA exceptions. The renderer does not read this, so it does not change the segment hash.
+- `check.expect` — list, default none — black or frozen spans `check` treats as designed. A span that matches no detected span prints `INFO expect <kind> <start>–<end>s not found`.
+- `check.expect[].black` — `[start, end]` time expressions, black or frozen — a designed black window. Set this or `frozen`, not both. `end` must be later than `start`.
+- `check.expect[].frozen` — `[start, end]` time expressions, black or frozen — a designed hold. Set this or `black`, not both. `end` must be later than `start`.
+- `check.expect[].why` — string, default none — one line, added when this span matches a detected one.
+- `check.loudness` — mapping, default none — replaces the `-14` LUFS target used by `check`.
+- `check.loudness.i` — number, required with loudness — integrated-loudness target, in LUFS.
+- `check.loudness.tol` — number, default `1` — how far the measurement may sit from `i`, in LU.
 
 Transitions (`shots[].in`):
 
@@ -133,11 +159,17 @@ Transitions (`shots[].in`):
 - `fade` — crossfade across the first `dur` frames of the incoming shot.
 - `swirl` — a swirling wipe that opens around `center`, across the first `dur` frames of the incoming shot.
 - `whip` — both shots slide along `axis`. The move is `dur` frames long and centred on the cut, half on each side.
+- `wall-pullback` — camera eases with `outc` from `zoom` (default 3.2) down to the incoming frame. The outgoing frame shrinks as an opaque centre card, then dissolves, so the incoming shot opens as a wall. First `dur` frames of the incoming shot.
+- `burn-white` — the outgoing shot burns to white over the first half (highlights clip first) and the incoming shot emerges from white over the second half. First `dur` frames of the incoming shot.
 
 Looks (`video.look`):
 
 - `warm-film` — sharpen, softer contrast, lifted blacks, a vignette, and amber leaks. Uses `shots[].flash`, `fx[].flash`, `fx[].leak`, `video.intro`, and a glow outro. Ignores `fx[].hit`, `fx[].burst`, and `tracks` (`dust`, `glow`, `bars`). `outro: {type: fade}` still fades the frame to black.
 - `golden-film` — `tracks.glow` leaks, `tracks.dust`, `fx[].hit`, `fx[].burst`, `tracks.bars`, and grain. Ignores `shots[].flash`, `fx[].flash`, `fx[].leak`, `video.intro`, and a glow outro. Does not fade to black unless the spec sets `outro: {type: fade}`.
+
+- `clean` — near-identity: light sharpen, no contrast curve, true blacks, a faint vignette. No cast, so screen recordings keep their colours. Uses `shots[].flash`, `fx[].flash`, and `outro: {type: fade}`. Ignores `fx[].leak`, `fx[].hit`, `fx[].burst`, `tracks`, `video.intro`, and a glow outro.
+- `cool-tech` — `clean` plus teal-leaning shadows, cooler whites, a slight contrast curve and a light vignette. Same fx as `clean`.
+- `{lut: …}` — the LUT applied to the untouched picture, then `vignette` and `grain`. Same fx as `clean`.
 
 Easing (the curve into a camera key):
 
@@ -167,3 +199,12 @@ The script compiles to one list of clicks and scrolls. The same file always sche
 - `actions[].scroll.x` — number, default `0` — horizontal target.
 - `actions[].scroll.y` — number, default `0` — vertical target.
 - `actions[].scroll.dur` — duration (`f` or `s`), default `0s` — straight move from the position already scheduled before this action's first frame. `0` jumps. Each scroll keeps its own line; a later action does not rewrite it. The move has to end inside `dur`.
+
+Content guards (under `check`, read by `montaj check` only; they never change the render):
+
+- `check.digits` — `none` or `spec`, default off — OCR the sampled frames. `none`: any on-screen digit warns. `spec`: a digit run warns unless it appears in `text[].lines[].text`, `subs[].text` or `shots[].frame.caption`. Needs the `tesseract` binary.
+- `check.faces` — `none`, default off — a face in a sampled frame warns. Needs `uv sync --extra guards` (OpenCV).
+- `check.sample` — integer 1 to 30, default `3` — frames sampled per shot, evenly across the shot. Output: `WARN digits shot=<n> frame=<f> "<digits>"`, `WARN faces shot=<n> frame=<f> (<k>)`; a missing backend gives `ERR <guard>: <install hint>`.
+
+## Event logs (screen recordings)
+`montaj ingest-rec raw/take.mp4 --events raw/take.events.json` copies the recording to `assets/` and writes `assets/<stem>.events.json`. Input and output are a JSON list `[{"t": 3.42, "kind": "state", ...fields}]`; `t` is finite seconds. Input `t` is seconds from record start; ingest subtracts the container `start_time` (earliest stream), so in `assets/` `t` is seconds on the clock `clip_in` seeks. Re-ingesting different video bytes under the same stem without `--events` deletes the old `<stem>.events.json`. Rows stay in log order. Field values are exact-matched (numbers numerically; a missing field never equals `null`); in `event:` markers `true`/`false`/`null` are JSON literals and `"true"` quoted is the string; `contains:` / `~=` match substrings of string fields.

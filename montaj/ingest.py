@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import shutil
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
@@ -117,3 +118,84 @@ def ingest(
     if write_sheet:
         contact_sheet(thumbs, sheet_path or Path("build") / "ingest-sheet.jpg")
     return infos
+
+@dataclass(frozen=True)
+class RecInfo:
+    """One ingested screen recording. `t0` is the container start_time the events were shifted by."""
+
+    stem: str
+    path: Path
+    events_path: Path | None
+    duration: float
+    fps: float
+    audio_streams: int
+    n_events: int
+    t0: float
+
+
+def _probe_rec(src: Path) -> tuple[float, int]:
+    """(container start_time seconds, audio stream count) from ffprobe.
+
+    Input `-ss` is relative to the container start, so that is the clock events use.
+    """
+    from montaj.encode import FFPROBE, capture
+
+    raw = capture(
+        [FFPROBE, "-v", "error", "-print_format", "json", "-show_entries",
+         "stream=codec_type:format=start_time", str(src)],
+        desc="ffprobe",
+    )
+    data = json.loads(raw or "{}")
+    streams = data.get("streams", [])
+    try:
+        t0 = float(data.get("format", {}).get("start_time") or 0.0)
+    except ValueError:
+        t0 = 0.0
+    return t0, sum(1 for s in streams if s.get("codec_type") == "audio")
+
+
+def _same_bytes(a: Path, b: Path) -> bool:
+    return a.stat().st_size == b.stat().st_size and _sha(a) == _sha(b)
+
+
+def ingest_rec(
+    video: Path | str, assets_dir: Path | str, *, events: Path | str | None = None, log: Path | str | None = None
+) -> RecInfo:
+    """Copy a recording into `assets_dir` and write `<stem>.events.json` normalised to video time.
+
+    The input log is seconds from record start; the output `t` is seconds from the file's
+    container start (`events.normalise_events`), the clock `clip_in` seeks against.
+    """
+    from montaj.encode import EncodeError, probe
+    from montaj.events import dump_events, load_events_file, normalise_events
+
+    video = Path(video)
+    if not video.is_file():
+        raise IngestError(f"ingest-rec: {video} is not a file")
+    if video.suffix.lower() not in (".mp4", ".mov", ".webm", ".mkv"):
+        raise IngestError(f"ingest-rec: {video.name} is not mp4, mov, webm or mkv")
+    try:
+        info = probe(video, log=log)
+        t0, n_audio = _probe_rec(video)
+    except EncodeError as exc:
+        raise IngestError(f"ingest-rec: cannot probe {video.name}: {exc}") from exc
+    rows: list[dict] = []
+    if events is not None:
+        errors: list[str] = []
+        loaded = load_events_file(Path(events), Path(events).name, errors)
+        if loaded is None:
+            raise IngestError("ingest-rec: " + "; ".join(errors))
+        rows = normalise_events(loaded, t0)
+    assets_dir = Path(assets_dir)
+    assets_dir.mkdir(parents=True, exist_ok=True)
+    dest = assets_dir / f"{video.stem}{video.suffix.lower()}"
+    events_path = None
+    if dest.resolve() != video.resolve():
+        # A different recording under the same stem must not inherit the old one's events.
+        if dest.exists() and events is None and not _same_bytes(video, dest):
+            (assets_dir / f"{video.stem}.events.json").unlink(missing_ok=True)
+        shutil.copyfile(video, dest)
+    if events is not None:
+        events_path = assets_dir / f"{video.stem}.events.json"
+        events_path.write_text(dump_events(rows))
+    return RecInfo(video.stem, dest, events_path, info.duration, info.fps, n_audio, len(rows), t0)
