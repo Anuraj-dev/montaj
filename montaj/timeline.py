@@ -2,13 +2,47 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from montaj.render.core import EASE as EASE_FN, key as eval_key
-from montaj.spec import Shot, Spec, SpecError, _format_beat0, parse_wh, round_frame, validate_spec
+from montaj.spec import (
+    Shot,
+    Spec,
+    SpecError,
+    TextBackdrop,
+    _format_beat0,
+    parse_wh,
+    round_frame,
+    validate_spec,
+)
 
 _TRACK_DEFAULT = {"dust": "linear", "glow": "linear", "bars": "sine"}
+
+
+def transition_overlap(kind: str | None, dur_frames: float) -> float:
+    """Frames of the previous shot still on screen while this transition plays.
+
+    A fade or swirl runs for the whole `dur`. A whip is centred on the cut, so
+    only half of it still shows the outgoing shot. A cut shows nothing past the hold.
+    """
+    if kind is None or kind == "cut" or dur_frames <= 0:
+        return 0.0
+    if kind == "whip":
+        return float(dur_frames) / 2.0
+    if kind in ("fade", "swirl"):
+        return float(dur_frames)
+    return 0.0
+
+
+def clip_read_frames(hold_frames: int, overlap_frames: float) -> int:
+    """Output frames read from a clip: the hold, plus the outgoing overlap.
+
+    `ceil(overlap - 1e-6)` keeps a fractional whip from dropping a frame and
+    treats a zero overlap as zero (ceil of a tiny negative is 0).
+    """
+    return int(hold_frames) + int(math.ceil(float(overlap_frames) - 1e-6))
 
 
 @dataclass(frozen=True)
@@ -80,6 +114,7 @@ class ResolvedText:
     fade_out: float
     blur: float
     lines: tuple[ResolvedLine, ...]
+    backdrop: TextBackdrop | None = None
 
 
 @dataclass(frozen=True)
@@ -89,6 +124,16 @@ class ResolvedSub:
     text: str
     size: float | None = None
     color: str | None = None
+
+
+@dataclass(frozen=True)
+class ResolvedExpect:
+    """One `check.expect` span in seconds. The renderer never reads it."""
+
+    kind: str
+    start: float
+    end: float
+    why: str | None = None
 
 
 @dataclass(frozen=True)
@@ -232,6 +277,7 @@ class Timeline:
     _tracks: dict[str, list] = field(default_factory=dict)
     _fade_out: tuple[int, int] | None = None
     _spans: dict[int, tuple[int, int] | None] = field(default_factory=dict)
+    check_expects: list[ResolvedExpect] = field(default_factory=list)
 
     def plan(self, f: int) -> FramePlan:
         if not 0 <= f < self.n_frames:
@@ -390,7 +436,17 @@ def _resolve_texts(spec: Spec, times: dict[str, float], fps: int) -> list[Resolv
                     indent=line.indent,
                 )
             )
-        out.append(ResolvedText(from_=frm, to=to, fade_in=fi, fade_out=fo, blur=block.blur, lines=tuple(lines)))
+        out.append(
+            ResolvedText(
+                from_=frm,
+                to=to,
+                fade_in=fi,
+                fade_out=fo,
+                blur=block.blur,
+                lines=tuple(lines),
+                backdrop=block.backdrop,
+            )
+        )
     return out
 
 
@@ -533,4 +589,20 @@ def resolve(spec: Spec, spec_dir: Path) -> Timeline:
         _tracks=_resolve_tracks(spec, times),
         _fade_out=fade_out,
         _spans=spans,
+        check_expects=_resolved_expects(spec, times),
     )
+
+
+def _resolved_expects(spec: Spec, times: dict[str, float]) -> list[ResolvedExpect]:
+    if spec.check is None or spec.video.fps <= 0:
+        return []
+    fps = float(spec.video.fps)
+    out: list[ResolvedExpect] = []
+    for i, item in enumerate(spec.check.expect):
+        start = times.get(f"check.expect[{i}].start")
+        end = times.get(f"check.expect[{i}].end")
+        if start is None or end is None:
+            continue
+        kind = "black" if item.black is not None else "frozen"
+        out.append(ResolvedExpect(kind, start / fps, end / fps, item.why))
+    return out
