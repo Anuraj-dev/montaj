@@ -10,8 +10,8 @@ from montaj.render.canvas import Canvas
 from montaj.render.core import outc
 from montaj.render import text as text_mod
 from montaj.render.text import (
-    OX, OY, RasterImage, RasterLine, RasterSet, Sub, TextBlock, TextLine, Unit, draw_text, line_markup,
-    raster_caption, raster_line, raster_lines, raster_subs, sine,
+    OX, OY, RasterImage, RasterLine, RasterSet, Sub, TextBackdrop, TextBlock, TextLine, Unit, draw_text,
+    line_markup, raster_caption, raster_line, raster_lines, raster_subs, sine,
 )
 
 GREY = 128 / 255
@@ -452,3 +452,121 @@ def test_renderer_forwards_sub_size_and_color(tmp_path, monkeypatch):
     Renderer(tl, tmp_path, Canvas(32, 32, device="cpu"))._ensure_rasters()
     assert seen and seen[0][0].size == 80
     assert seen[0][0].color == "#112233"
+
+
+def _luma(rgb: torch.Tensor) -> float:
+    return float(0.299 * rgb[0] + 0.587 * rgb[1] + 0.114 * rgb[2])
+
+
+class _Stage:
+    def __init__(self, h: int, k: float = 1.0, w: int = 32):
+        self.W, self.H, self.k = w, h, k
+
+
+def _cream_line():
+    """A caption whose box sits in design px, with an opaque cream glyph and no shadow."""
+    cream = torch.tensor([251 / 255, 241 / 255, 220 / 255, 1.0])
+    fill = cream.view(4, 1, 1).expand(4, 8, 8).contiguous()
+    unit = Unit("Hi", fill, None, (20.0, 104.0, 8.0, 8.0), None, (20.0, 104.0, 8.0, 8.0), False)
+    raster = RasterLine((unit,), (20.0, 100.0, 16.0, 20.0), None, None, 1.0, False)
+    line = TextLine("Hi", "serif", 100, at=0, size=20, line_height=1, dur=1, stagger=0, rise=0, shadow=False)
+    return line, raster
+
+
+def test_backdrop_gradient_keeps_a_caption_readable():
+    # k != 1 so the band is design px (line.y), not device rows. No image file is read.
+    line, raster = _cream_line()
+    cv = _Stage(120, k=0.5)
+    white = torch.ones(3, cv.H, cv.W)
+    block = TextBlock(0, 200, 0, 0, 0, (line,), TextBackdrop())
+    painted = draw_text(cv, white, [block], [], 30.0, [raster], fps=30)
+    assert torch.equal(white, torch.ones_like(white))
+    # Device row 54 is design y 109, on the line and beside the glyph (glyph x starts at 10).
+    plate = painted[:, 54, 0]
+    glyph = painted[:, 54, 12]
+    assert _luma(plate) == pytest.approx(0.2, abs=1e-4)
+    assert _luma(glyph) > 0.9
+    assert (_luma(glyph) + 0.05) / (_luma(plate) + 0.05) >= 3.0
+    assert _luma(painted[:, 2, 0]) > 0.98
+    assert _luma(painted[:, 110, 0]) > 0.98
+    # Row 38 is design y 77, in the pad above the line: a fade, not a second bar.
+    assert _luma(plate) + 0.15 < _luma(painted[:, 38, 0]) < 0.95
+    bare = TextBlock(0, 200, 0, 0, 0, (line,))
+    plain = draw_text(cv, white, [bare], [], 30.0, [raster], fps=30)
+    assert _luma(plain[:, 54, 0]) == pytest.approx(1.0, abs=1e-5)
+
+
+def test_backdrop_place_strength_and_block_fade():
+    line = TextLine("Hi", "serif", 100, at=0, size=20, line_height=1, dur=1, stagger=0, rise=0, shadow=False)
+    raster = RasterLine((), (0.0, 0.0, 0.0, 0.0), None, None, 1.0, False)
+    cv = _Stage(240)
+
+    def paint(bd, t=30.0, fade_in=0.0):
+        block = TextBlock(0, 200, fade_in, 0, 0, (line,), bd)
+        img = torch.ones(3, cv.H, cv.W)
+        return draw_text(cv, img, [block], [], t, [raster], fps=30)
+
+    bottom = paint(TextBackdrop("gradient", 0.8, "bottom"))
+    assert _luma(bottom[:, 220, 0]) == pytest.approx(0.2, abs=1e-4)
+    assert _luma(bottom[:, 4, 0]) > 0.98
+    fade_row = _luma(bottom[:, 140, 0])
+    assert _luma(bottom[:, 220, 0]) + 0.15 < fade_row < 0.95
+    solid = paint(TextBackdrop("solid", 0.8, "bottom"))
+    assert _luma(solid[:, 140, 0]) == pytest.approx(_luma(solid[:, 220, 0]), abs=1e-4)
+    assert _luma(solid[:, 4, 0]) > 0.98
+    top = paint(TextBackdrop("gradient", 0.8, "top"))
+    assert _luma(top[:, 4, 0]) == pytest.approx(0.2, abs=1e-4)
+    assert _luma(top[:, 220, 0]) > 0.98
+    softer = paint(TextBackdrop("gradient", 0.4, "bottom"))
+    assert _luma(softer[:, 220, 0]) == pytest.approx(0.6, abs=1e-4)
+    band = paint(TextBackdrop("solid", 0.8, "band"))
+    # Solid band covers the pad (design y 52..168 at k=1) at full strength.
+    assert _luma(band[:, 76, 0]) == pytest.approx(0.2, abs=1e-4)
+    assert _luma(band[:, 4, 0]) > 0.98
+    fading = TextBackdrop("gradient", 0.8, "bottom")
+    assert _luma(paint(fading, t=0.0, fade_in=10.0)[:, 220, 0]) == pytest.approx(1.0, abs=1e-5)
+    assert _luma(paint(fading, t=5.0, fade_in=10.0)[:, 220, 0]) == pytest.approx(0.6, abs=1e-4)
+    assert _luma(paint(fading, t=10.0, fade_in=10.0)[:, 220, 0]) == pytest.approx(0.2, abs=1e-4)
+    assert _luma(paint(fading, t=-1.0)[:, 220, 0]) == pytest.approx(1.0, abs=1e-5)
+
+
+def test_backdrop_defaults_match_the_spec():
+    from montaj.spec import BACKDROP_STRENGTH
+    from montaj.spec import TextBackdrop as SpecBackdrop
+
+    assert SpecBackdrop().type == TextBackdrop().type == "gradient"
+    assert SpecBackdrop().place == TextBackdrop().place == "band"
+    assert SpecBackdrop().strength == TextBackdrop().strength == BACKDROP_STRENGTH == 0.8
+
+
+def test_renderer_forwards_backdrop(tmp_path, monkeypatch):
+    from montaj.render.canvas import Canvas
+    from montaj.render.frame import Renderer
+    from montaj.render import frame as frame_mod
+    from montaj.spec import load_spec
+    from montaj.timeline import resolve
+
+    def fake_raster_lines(lines, *, scale, cache_dir, chromium=None):
+        return [RasterLine((), (0.0, 0.0, 0.0, 0.0), None, None, scale, False) for _ in lines]
+
+    monkeypatch.setattr(frame_mod, "raster_lines", fake_raster_lines)
+    (tmp_path / "assets").mkdir()
+    spec_path = tmp_path / "montaj.yaml"
+    spec_path.write_text(
+        "video:\n  size: 1080x1920\n  fps: 30\n  look: warm-film\n"
+        "assets: assets\nshots:\n  - {blank: true, hold: 30f}\n"
+        "text:\n"
+        "  - from: 0s\n    to: 1s\n    backdrop: {type: solid, strength: 0.4, place: bottom}\n"
+        "    lines:\n      - {text: hi, y: 1600, at: 0s}\n"
+        "  - from: 0s\n    to: 1s\n    backdrop: true\n"
+        "    lines:\n      - {text: yo, y: 400, at: 0s}\n"
+        "  - from: 0s\n    to: 1s\n"
+        "    lines:\n      - {text: plain, y: 800, at: 0s}\n"
+    )
+    tl = resolve(load_spec(spec_path), tmp_path)
+    renderer = Renderer(tl, tmp_path, Canvas(32, 32, device="cpu"))
+    renderer._ensure_rasters()
+    solid, default, plain = (block.backdrop for block in renderer._blocks)
+    assert solid is not None and (solid.type, solid.strength, solid.place) == ("solid", 0.4, "bottom")
+    assert default is not None and (default.type, default.strength, default.place) == ("gradient", 0.8, "band")
+    assert plain is None

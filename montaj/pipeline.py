@@ -79,6 +79,9 @@ def _asset_shas(spec: Spec, spec_dir: Path) -> dict[str, str]:
         key = f"clip:{cid}"
         if key not in out:
             out[key] = file_sha(find_clip(assets, cid))
+    look = spec.video.look
+    if not isinstance(look, str):
+        out[f"lut:{look.lut}"] = file_sha(spec_dir / look.lut)
     return out
 
 
