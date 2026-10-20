@@ -308,7 +308,7 @@ def _errors(tmp_path: Path, shots: str, *, video: str | None = None, extra: str 
 
 def test_unknown_look_names_the_presets(tmp_path: Path):
     errs = _errors(tmp_path, "  - {photo: a, hold: 10f}\n", video="size: 1080x1920\n  fps: 30\n  look: noir")
-    assert "video.look: unknown 'noir' (use warm-film or golden-film)" in errs
+    assert "video.look: unknown 'noir' (use warm-film, golden-film, clean, cool-tech or {lut: file.cube})" in errs
 
 
 def test_look_names_match_finish_presets():

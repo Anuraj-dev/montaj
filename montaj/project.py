@@ -135,6 +135,9 @@ def segment_hash(
         "shots": shots,
         "photos": photos,
     }
+    look = tl.spec.video.look
+    if not isinstance(look, str):  # the .cube bytes, not just its path, decide the pixels
+        payload["lut"] = asset_sha[f"lut:{look.lut}"]
     if text_ids:
         payload["texts"] = {
             str(i): tl.spec.text[i].model_dump(mode="json", by_alias=True)

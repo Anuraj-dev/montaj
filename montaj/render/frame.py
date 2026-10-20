@@ -21,7 +21,7 @@ from montaj.project import find_clip, find_photo
 from montaj.render.canvas import Canvas
 from montaj.render.clip import ClipSource, window_key
 from montaj.render.core import Photo, fit_s, sine, still
-from montaj.render.finish import LOOKS, finish
+from montaj.render.finish import LOOKS, finish, lut_texture
 from montaj.render.shots import (
     card_frame,
     css_blur,
@@ -195,6 +195,7 @@ class Renderer:
         self._rasters: RasterSet | None = None
         self._captions: _LRU = _LRU(caps["captions"])
         self._shot: int | None = None
+        self._lut = None
         self._owners: dict[str, dict[tuple, set[int]]] = {"photos": {}, "bgs": {}, "cards": {}}
 
     def begin_segment(self, shots) -> None:
@@ -585,6 +586,14 @@ class Renderer:
 
     def _look(self):
         name = self.tl.spec.video.look
+        if not isinstance(name, str):
+            # `look: {lut: …}`. The texture is parsed once per Renderer; strength/vignette/grain ride along.
+            if self._lut is None:
+                from montaj.cube import load_cube
+
+                self._lut = lut_texture(load_cube(self._dir / name.lut), self.cv.device)
+            return {"kind": "graded", "lut": self._lut, "strength": name.strength,
+                    "vignette": name.vignette, "grain": name.grain}
         look = LOOKS.get(name)
         if look is None:
             have = ", ".join(LOOKS)
