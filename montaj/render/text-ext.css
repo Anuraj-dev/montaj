@@ -1,0 +1,23 @@
+/* Styles added after the first release (sans, mono, chip, alignment). Kept apart from text.css so films
+   that use none of them keep their cached segments. Loaded after text.css; see project._text_asset_shas. */
+
+
+@font-face { font-family: 'Inter'; src: url('../fonts/inter-latin-400-normal.woff2') format('woff2'); font-weight: 400; font-style: normal; }
+@font-face { font-family: 'Inter'; src: url('../fonts/inter-latin-600-normal.woff2') format('woff2'); font-weight: 600; font-style: normal; }
+@font-face { font-family: 'Inter'; src: url('../fonts/inter-latin-700-normal.woff2') format('woff2'); font-weight: 700; font-style: normal; }
+@font-face { font-family: 'JBMono'; src: url('../fonts/jetbrains-mono-latin-400-normal.woff2') format('woff2'); font-weight: 400; font-style: normal; }
+@font-face { font-family: 'JBMono'; src: url('../fonts/jetbrains-mono-latin-700-normal.woff2') format('woff2'); font-weight: 700; font-style: normal; }
+
+/* Sans and mono: product / tech voice. Faces ship at the weights spec.py allows. */
+.sans { font-family: 'Inter', sans-serif; font-weight: 400; font-size: 48px;
+  text-shadow: 0 2px 16px rgba(0,0,0,.55); }
+.mono { font-family: 'JBMono', monospace; font-weight: 400; font-size: 32px;
+  text-shadow: 0 2px 16px rgba(0,0,0,.55); }
+.al-left { text-align: left; padding-left: 72px; box-sizing: border-box; }
+.al-right { text-align: right; padding-right: 72px; box-sizing: border-box; }
+/* Chip: rounded translucent pill behind the line. Rastered once, apart from the glyph units. */
+.chip { display: inline-block; padding: .38em .95em; border-radius: 999px;
+  background: var(--chip, rgba(18,20,26,.62)); border: 1px solid rgba(255,255,255,.16);
+  box-shadow: 0 4px 24px rgba(0,0,0,.35); }
+.dot { display: inline-block; width: .42em; height: .42em; border-radius: 50%;
+  margin-right: .6em; vertical-align: .08em; background: var(--dot, #4cd6a0); }

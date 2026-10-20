@@ -43,6 +43,7 @@ _VIEW = (1800, 4200)
 _REV = "1"
 _HERE = Path(__file__).resolve().parent
 _CSS = _HERE / "text.css"
+_CSS_EXT = _HERE / "text-ext.css"  # styles added after the first release; see project._text_asset_shas
 _FONTS = _HERE.parent / "fonts"
 
 # film.html:31–33 stops. Opaque, so premul interpolation is the straight sRGB lerp.
@@ -326,7 +327,7 @@ def _sub_cache_key(sub: Sub, scale: float, css: bytes, fonts: bytes) -> str:
 
 
 def _css_bytes() -> bytes:
-    return _CSS.read_bytes()
+    return _CSS.read_bytes() + _CSS_EXT.read_bytes()
 
 
 def _css_text() -> str:
@@ -1242,7 +1243,7 @@ def _cursor_on(line: TextLine, n: int, t: float, fps: float) -> bool:
     if t < line.at:
         return False
     stagger, _dur = _timing(line, fps)
-    typing = line.at + n * stagger
+    typing = line.at + max(0, n - 1) * stagger  # last character's reveal
     if t < typing:
         return True
     return int((t - typing) / (_BLINK * fps)) % 2 == 0

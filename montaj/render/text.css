@@ -9,12 +9,6 @@
 @font-face { font-family: 'Tiro'; src: url('../fonts/tiro-devanagari-hindi-devanagari-400-normal.woff2') format('woff2'); font-weight: 400; font-style: normal; unicode-range: U+0900-097F, U+200C-200D, U+25CC, U+A8E0-A8FF; }
 @font-face { font-family: 'Tiro'; src: url('../fonts/tiro-devanagari-hindi-latin-400-normal.woff2') format('woff2'); font-weight: 400; font-style: normal; unicode-range: U+0000-00FF; }
 
-@font-face { font-family: 'Inter'; src: url('../fonts/inter-latin-400-normal.woff2') format('woff2'); font-weight: 400; font-style: normal; }
-@font-face { font-family: 'Inter'; src: url('../fonts/inter-latin-600-normal.woff2') format('woff2'); font-weight: 600; font-style: normal; }
-@font-face { font-family: 'Inter'; src: url('../fonts/inter-latin-700-normal.woff2') format('woff2'); font-weight: 700; font-style: normal; }
-@font-face { font-family: 'JBMono'; src: url('../fonts/jetbrains-mono-latin-400-normal.woff2') format('woff2'); font-weight: 400; font-style: normal; }
-@font-face { font-family: 'JBMono'; src: url('../fonts/jetbrains-mono-latin-700-normal.woff2') format('woff2'); font-weight: 700; font-style: normal; }
-
 :root { --cream: #fbf1dc; --gold: #f0c77e; --ink: #4a2c1a; }
 
 .txt { position: absolute; left: 0; width: 1080px; text-align: center; white-space: nowrap;
@@ -29,19 +23,6 @@
   color: var(--gold); text-shadow: 0 2px 16px rgba(0,0,0,.8); }
 .deva { font-family: 'Tiro', serif; font-weight: 400; font-size: 62px; line-height: 1.5;
   text-shadow: 0 4px 24px rgba(0,0,0,.8); }
-/* Sans and mono: product / tech voice. Faces ship at the weights spec.py allows. */
-.sans { font-family: 'Inter', sans-serif; font-weight: 400; font-size: 48px;
-  text-shadow: 0 2px 16px rgba(0,0,0,.55); }
-.mono { font-family: 'JBMono', monospace; font-weight: 400; font-size: 32px;
-  text-shadow: 0 2px 16px rgba(0,0,0,.55); }
-.al-left { text-align: left; padding-left: 72px; box-sizing: border-box; }
-.al-right { text-align: right; padding-right: 72px; box-sizing: border-box; }
-/* Chip: rounded translucent pill behind the line. Rastered once, apart from the glyph units. */
-.chip { display: inline-block; padding: .38em .95em; border-radius: 999px;
-  background: var(--chip, rgba(18,20,26,.62)); border: 1px solid rgba(255,255,255,.16);
-  box-shadow: 0 4px 24px rgba(0,0,0,.35); }
-.dot { display: inline-block; width: .42em; height: .42em; border-radius: 50%;
-  margin-right: .6em; vertical-align: .08em; background: var(--dot, #4cd6a0); }
 /* Gold fill is per unit (.gold .w), sized to that unit's own box. film.html 31–33. */
 .goldtext, .gold .w { background: linear-gradient(100deg, #b87a35 0%, #f7dca0 30%, #fff6de 45%, #e9b566 60%, #a86d2c 100%);
   background-size: 300% 100%; background-position: var(--bp, 50% 0); -webkit-background-clip: text;

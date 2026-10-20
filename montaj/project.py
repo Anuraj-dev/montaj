@@ -85,8 +85,26 @@ def _lookup_sha(asset_sha: dict[str, str], stem: str, kind: str) -> str:
     return asset_sha[stem]
 
 
-def _text_asset_shas() -> dict[str, str]:
-    """sha of text.css (if present) and every file in montaj/fonts/."""
+# Faces and licence files added after the first release, by the style that needs them. They are
+# left out of the base digest so films that use none of them keep their cached segments.
+_EXT_FONT_STYLE = {"inter-latin-600": "sans", "inter-latin-700": "sans", "jetbrains-mono-": "mono"}
+
+
+def _ext_font_style(name: str) -> str | None:
+    """Style owning an added font file; "" for licence files (never rendered); None for a base file."""
+    if name.startswith("OFL-"):
+        return ""
+    for prefix, style in _EXT_FONT_STYLE.items():
+        if name.startswith(prefix):
+            return style
+    return None
+
+
+def _text_asset_shas(ext_styles: frozenset[str] | None = None) -> dict[str, str]:
+    """sha of text.css and the base fonts, plus text-ext.css and the faces of `ext_styles` when given.
+
+    `ext_styles` is None for a segment that uses nothing added after the first release.
+    """
     pkg = Path(__file__).parent
     out: dict[str, str] = {}
     css = pkg / "render" / "text.css"
@@ -95,9 +113,25 @@ def _text_asset_shas() -> dict[str, str]:
     fonts = pkg / "fonts"
     if fonts.is_dir():
         for p in sorted(fonts.iterdir()):
-            if p.is_file():
+            if not p.is_file():
+                continue
+            style = _ext_font_style(p.name)
+            if style is None or (ext_styles is not None and style in ext_styles):
                 out[p.name] = file_sha(p)
+    if ext_styles is not None:
+        out["text-ext.css"] = file_sha(pkg / "render" / "text-ext.css")
     return out
+
+
+def _uses_ext_text(block) -> frozenset[str] | None:
+    """Styles of a block whose lines use anything added after the first release, else None."""
+    used = False
+    styles: set[str] = set()
+    for ln in block.lines:
+        styles.add(ln.style)
+        used |= (ln.style in ("sans", "mono") or ln.reveal == "type" or ln.cursor
+                 or ln.align != "center" or ln.box != "none")
+    return frozenset(styles) if used else None
 
 
 # Plan fields added after the first release. A None value is left out of the hash input so
@@ -165,8 +199,15 @@ def segment_hash(
         tl.shots[i].spec.frame is not None and tl.shots[i].spec.frame.caption
         for i in referenced
     )
+    ext: set[str] = set()
+    used_ext = False
+    for i in text_ids:
+        got = _uses_ext_text(tl.spec.text[i])
+        if got is not None:
+            used_ext = True
+            ext |= got
     if text_ids or sub_ids or captions:
-        payload["text_assets"] = _text_asset_shas()
+        payload["text_assets"] = _text_asset_shas(frozenset(ext)) if used_ext else _text_asset_shas()
     if tl.markers:
         payload["markers"] = {k: tl.markers[k] for k in sorted(tl.markers)}
     if clips:

@@ -118,7 +118,7 @@ Photo fields (`crop`, `focus`, swirl `center`, wall `at`) are source-image pixel
 - `text[].lines[].stagger` — duration, default `0.16s` word / `0.07s` char — delay between units.
 - `text[].lines[].dur` — duration, default `0.9s` — reveal length of one unit.
 - `text[].lines[].rise` — number, default `26` — design-px rise of each unit.
-- `text[].lines[].reveal` — `rise`, `pop` or `type`, default `rise`. `type` is a typewriter: one char per `stagger` (default `0.05s`), no rise or blur, each char instant (`dur` default `0s`); forces `by: char`.
+- `text[].lines[].reveal` — `rise`, `pop` or `type`, default `rise`. `type` is a typewriter: one char per `stagger` (default `0.05s`), no rise or blur, each char instant (`dur` is rejected); forces `by: char`.
 - `text[].lines[].sweep` — `[from, to]` time expressions, default the block window — gold gradient travels 100%→0% across it.
 - `text[].lines[].shadow` — boolean, default true — false drops the text shadow (ink lines).
 - `text[].lines[].indent` — number, default `0` — extra `margin-left` in em, on top of the centred line.

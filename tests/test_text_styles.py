@@ -66,14 +66,19 @@ def test_typewriter_timing_is_one_instant_char_per_stagger():
 
 
 def test_cursor_solid_while_typing_then_blinks():
-    line = TextLine("abcd", "mono", 0, 0, reveal="type", cursor=True)
     fps = 30.0
-    typing_end = 4 * 0.05 * fps
-    assert not text_mod._cursor_on(line, 4, -1, fps)
-    assert text_mod._cursor_on(line, 4, typing_end - 0.1, fps)
-    assert text_mod._cursor_on(line, 4, typing_end + 1, fps)
-    assert not text_mod._cursor_on(line, 4, typing_end + 0.53 * fps + 1, fps)
-    assert text_mod._cursor_on(line, 4, typing_end + 1.06 * fps + 1, fps)
+    for n, stagger in ((4, None), (2, 30.0)):  # the second case pins "blink starts at the last char, not one stagger later"
+        line = TextLine("ab" * (n // 2), "mono", 0, 0, reveal="type", cursor=True, stagger=stagger)
+        # the actual moment the last character is revealed, found by scanning the reveal, not by formula
+        t = 0.0
+        while not all(k == 1.0 for k in _unit_ks(line, n, t, fps)):
+            t += 0.01
+        last = t
+        assert not text_mod._cursor_on(line, n, -1, fps)
+        assert text_mod._cursor_on(line, n, last - 0.1, fps)
+        assert text_mod._cursor_on(line, n, last + 0.53 * fps - 0.2, fps)  # still solid half a period after the last char
+        assert not text_mod._cursor_on(line, n, last + 0.53 * fps + 0.2, fps)
+        assert text_mod._cursor_on(line, n, last + 1.06 * fps + 0.2, fps)
 
 
 def test_bad_values_are_one_line_errors(tmp_path):
@@ -151,3 +156,62 @@ def test_draw_typewriter_with_cursor_and_chip(tmp_path):
     on = draw_text(cv, img, [block], [], 5 * 0.05 * 30 + 1, [r], fps=30.0)[3].sum()
     off = draw_text(cv, img, [block], [], 5 * 0.05 * 30 + 0.53 * 30 + 1, [r], fps=30.0)[3].sum()
     assert off < on
+
+
+def test_typewriter_rejects_dur_and_lower_third_rejects_nonfinite_y(tmp_path):
+    assert any(".dur" in e and "instantly" in e for e in _errors(tmp_path, LINE % "reveal: type, dur: 2s"))
+    assert any(".y" in e and "finite" in e for e in _errors(tmp_path, "text:\n  - from: 0s\n    to: 1s\n    lines:\n      - {text: a, y: .nan, at: 0s}\n"))
+    bad = "text:\n  - from: 0s\n    to: 1s\n    lower_third: {title: A, y: .nan}\n"
+    assert any("lower_third.y" in e and "finite" in e for e in _errors(tmp_path, bad))
+
+
+# Segment hashes of a film using only pre-existing text features, computed from `main` before the
+# sans/mono/typewriter/chip patch (spec: serif+italic, script+gold+char, caps+pop, one sub, one caption).
+_LEGACY_TEXT = """text:
+  - from: 0s
+    to: 2s
+    lines:
+      - {text: Hello, y: 600, at: 0s, style: serif, italic: true}
+      - {text: World, y: 800, at: 0.2s, style: script, gold: true, by: char}
+  - from: 2s
+    to: 4s
+    lines:
+      - {text: CAPS, y: 400, at: 2s, style: caps, reveal: pop}
+subs:
+  - {from: 1s, to: 3s, text: sub line}
+"""
+_LEGACY_HASHES = [
+    "55fd4439767e06e5d47f97404cba5e148afad9efa18480713194d5c4329752a7",
+    "e5e5f70659169fa0909d6779e8e4be1ee66fe48223898232ef168a990efa4289",
+]
+
+
+def _hashes(tmp: Path, text: str) -> list[str]:
+    from montaj.project import segment_hash
+
+    p = _write(tmp, "  - {photo: a, hold: 2s, frame: {caption: hi}}\n  - {photo: a, hold: 3s}\n", ["a"], extra=text)
+    tl = resolve(load_spec(p), tmp)
+    return [segment_hash(tl, seg, {"photo:a": "aa", "a": "aa"}, "test") for seg in tl.segments]
+
+
+def test_legacy_text_subtitle_and_caption_segment_hashes_are_unchanged(tmp_path):
+    assert _hashes(tmp_path, _LEGACY_TEXT) == _LEGACY_HASHES
+
+
+def test_using_a_new_text_feature_changes_the_hash(tmp_path):
+    mono = _LEGACY_TEXT.replace("y: 400, at: 2s, style: caps, reveal: pop", "y: 400, at: 2s, style: mono, reveal: type, cursor: true")
+    got = _hashes(tmp_path, mono)
+    assert got[0] != _LEGACY_HASHES[0] and got[1] != _LEGACY_HASHES[1]  # both segments overlap the typed block
+    (tmp_path / "b").mkdir()
+    only = _hashes(tmp_path / "b", _LEGACY_TEXT.replace("style: caps, reveal: pop", "style: caps, align: left"))
+    assert only != _LEGACY_HASHES
+
+
+def test_added_font_files_reach_only_the_hash_of_segments_using_that_style():
+    from montaj.project import _text_asset_shas
+
+    base = _text_asset_shas()
+    assert not any(k.startswith(("inter-latin-6", "inter-latin-7", "jetbrains", "OFL")) or k == "text-ext.css" for k in base)
+    sans = _text_asset_shas(frozenset({"sans"}))
+    assert "inter-latin-700-normal.woff2" in sans and not any(k.startswith("jetbrains") for k in sans)
+    assert "text-ext.css" in sans

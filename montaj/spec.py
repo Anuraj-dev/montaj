@@ -273,11 +273,12 @@ class TextLine(Frozen):
     sweep: tuple[TimeExpr, TimeExpr] | None = None
     shadow: bool = True
     indent: float = 0.0
-    align: str = "center"
-    box: str = "none"
-    box_color: str | None = None
-    dot: str | None = None
-    cursor: bool = False
+    # Added after the first release: left out of the dump at their default so older films keep their hashes.
+    align: str = Field(default="center", exclude_if=lambda v: v == "center")
+    box: str = Field(default="none", exclude_if=lambda v: v == "none")
+    box_color: str | None = Field(default=None, exclude_if=lambda v: v is None)
+    dot: str | None = Field(default=None, exclude_if=lambda v: v is None)
+    cursor: bool = Field(default=False, exclude_if=lambda v: v is False)
 
 
 class LowerThird(Frozen):
@@ -297,6 +298,8 @@ def _expand_lower_third(data: object) -> object:
     lt = LowerThird.model_validate(raw)
     if lt.side not in TEXT_SIDES:
         raise ValueError(f"lower_third.side unknown {lt.side!r}; use {_choices(TEXT_SIDES)}")
+    if not math.isfinite(lt.y):
+        raise ValueError(f"lower_third.y must be finite, got {_fmt_num(lt.y)}; use a design-px y")
     if data.get("lines"):
         raise ValueError("lower_third replaces lines; use one or the other")
     at = lt.at if lt.at is not None else data.get("from")
@@ -1554,6 +1557,10 @@ def _validate_text(
                 errors.append(_line(f"{p}.align", f"unknown {line.align!r}", "use center, left or right"))
             if line.box != "chip" and (line.dot is not None or line.box_color is not None):
                 errors.append(_line(f"{p}.box", "dot and box_color need a box", "set box: chip"))
+            if line.reveal == "type" and line.dur is not None:
+                errors.append(_line(f"{p}.dur", "typewriter characters appear instantly", "remove dur, or use reveal: rise"))
+            if not math.isfinite(line.y):
+                errors.append(_line(f"{p}.y", f"must be finite, got {_fmt_num(line.y)}", "use a design-px y"))
             if line.cursor and line.reveal != "type":
                 errors.append(_line(f"{p}.cursor", "cursor needs the typewriter reveal", "set reveal: type"))
             allowed = TEXT_WEIGHTS.get(line.style)
