@@ -113,6 +113,25 @@ Photo fields (`crop`, `focus`, swirl `center`, wall `at`) are source-image pixel
 - `audio.markers` — string, default none — JSON `{bpm, beats: [s…], words: [{i, w, s, e}, …]}` from `montaj music analyze`, relative to the spec file. Needed for `word:` markers; supplies the beat grid when `video.bpm` is omitted. `bpm` must be > 0 and `beats` ≥ 0.
 - `audio.fade_out` — duration, default `0s` — afade at the end of the film.
 - `audio.loudnorm` — boolean, default true — loudnorm `-14` LUFS, TP `-1.5`, LRA `11`.
+- `audio.edit` — list, default none — beat-grid edits of the music, applied in order before everything else; each op sees the music as the earlier ops left it. Times are music times (`20b`, `12.5s`; beats sit on the film's grid), not markers. `word:` markers follow the edit; a word inside a cut is gone. Every op must end inside the music as it stands then (a `loop: [3s, 6s]` on a 4 s track is an error).
+- `audio.edit[].cut` — `[start, end]`, one of cut or loop — removes that span. The join gets a 12 ms equal-power crossfade; the music is exactly the cut shorter.
+- `audio.edit[].loop` — `[start, end]`, one of cut or loop — repeats that span.
+- `audio.edit[].times` — whole number ≥ 2, default `2` — loop only: total plays of the span.
+- `audio.clips` — list, default none — voice and SFX placed on the film's clock, mixed with the music into one stereo 48 kHz wav in `build/audio/` (cached by input bytes). Without `clips`, `edit` and `duck`, `audio.track` is muxed untouched. A mix over -0.2 dBFS is scaled down and `check` warns.
+- `audio.clips[].src` — string, required — file relative to the spec (extension optional; wav/flac/mp3/ogg/m4a, or a video file's audio) or `synth:whoosh`, `synth:riser`, `synth:boom`, `synth:tick`, `synth:glitch` (seeded, deterministic).
+- `audio.clips[].at` — time expression or list of them, required — start time(s) from film start (`0.8s`, `2b`, `logo`). A list places the clip once per time.
+- `audio.clips[].offset` — signed duration (`ms`, `s`, `f`, `b`), default `0s` — added to every `at`, e.g. `-0.16s` to land a whoosh before the cut. Anything before the film start is dropped.
+- `audio.clips[].id` — string, default none — name `duck.under` refers to. Several clips may share an id.
+- `audio.clips[].stream` — whole number, default `0` — which audio stream of a video file (`0:a:N`).
+- `audio.clips[].in` — duration, default `0s` — start inside the source.
+- `audio.clips[].out` — duration, default end of source — end inside the source; must be after `in`.
+- `audio.clips[].gain` — dB string, default `0dB` — level, e.g. `-10dB`; within ±120 dB.
+- `audio.clips[].pan` — number in `[-1, 1]`, default `0` — constant-power pan, `-1` left.
+- `audio.duck` — mapping, default none — dips the music (not other clips) while the named clips speak: RMS over 120 ms above -45 dB, eased by attack and release.
+- `audio.duck.under` — list of clip ids, required — which clips trigger the duck.
+- `audio.duck.depth` — dB string below 0, default `-6dB` — how far the music drops.
+- `audio.duck.attack` — duration (`40ms`), default `40ms` — time to reach the depth.
+- `audio.duck.release` — duration, default `200ms` — time to come back.
 - `text` — list, default none — overlay blocks. Each line reveals unit by unit.
 - `text[].from` — time expression, required — block visible window start.
 - `text[].to` — time expression, required — block visible window end.

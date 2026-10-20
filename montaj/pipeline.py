@@ -9,12 +9,13 @@ from pathlib import Path
 import torch
 
 from montaj import __version__
+from montaj.audio.mix import plan_audio, render_mix
 from montaj.encode import Encoder, concat, mux
 from montaj.gpulock import hold as gpu_hold
 from montaj.project import file_sha, find_photo, resolve_clip, segment_hash
 from montaj.render.canvas import Canvas
 from montaj.render.frame import Renderer
-from montaj.spec import Spec, _dur_frames, load_spec
+from montaj.spec import Spec, _dur_frames, _parse_beat0, load_spec
 from montaj.timeline import Card, Clip, Segment, Sequence, Still, Trans, Wall, resolve
 
 # Bump when a pixel changes. Concatenated onto __version__ inside every segment hash.
@@ -155,6 +156,16 @@ def render(spec_path: Path, mode: str = "preview") -> RenderResult:
                 spec.audio.fade_out, spec.video.fps, tl.spec.video.bpm, "audio.fade_out", [],
             )
             fade_s = 0.0 if frames is None else frames / float(spec.video.fps)
+        # Clips, edits and ducking become one mixed wav in build/audio/; mux treats it as the track.
+        # CPU only, so it runs outside the GPU lock. Specs without them keep `audio.track` as is.
+        plan = plan_audio(
+            tl.spec, spec_dir, tl.markers, spec.video.fps, tl.spec.video.bpm,
+            _parse_beat0(tl.spec.video.beat0, spec.video.fps, []) or 0.0, [],
+        )
+        if plan is not None and plan.active:
+            track, stats = render_mix(plan, spec_dir / "build", log=log)
+            _log(log, f"audio mix {track.name} {stats.clips} clips duck {stats.duck_db:.1f}dB "
+                      f"peak {stats.peak_dbfs:+.1f}dBFS clipped={stats.clipped}")
 
     rendered = 0
     cached = 0

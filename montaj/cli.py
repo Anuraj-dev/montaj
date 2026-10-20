@@ -18,6 +18,7 @@ import yaml
 from montaj.audio import analyze as analyze_audio
 from montaj.audio import compose as compose_audio
 from montaj.audio import music as music_gen
+from montaj.audio.mix import check_lines
 from montaj.audio.music import parse_duration
 from montaj.doctor import doctor
 from montaj.encode import MediaInfo, export, probe
@@ -598,6 +599,18 @@ def _av_tol(root: Path) -> float | None:
     return 1.0 / float(spec.video.fps)
 
 
+def _audio_mix_lines(root: Path) -> list[str]:
+    """Mix stats from the last render, when the spec mixes clips, edits or ducking."""
+    stats_file = root / "build" / "audio-mix.json"
+    spec_file = root / "montaj.yaml"
+    if not stats_file.is_file() or not spec_file.is_file():
+        return []
+    audio = load_spec(spec_file).audio
+    if audio is None or not (audio.clips or audio.edit or audio.duck):
+        return []
+    return check_lines(json.loads(stats_file.read_text()))
+
+
 def _clip_overruns(root: Path) -> list[str]:
     """Clip shots whose timeline read runs past the source. No spec means no new lines."""
     spec_file = root / "montaj.yaml"
@@ -623,6 +636,7 @@ def _cmd_check(ns: argparse.Namespace, root: Path) -> list[str]:
         tl = resolve(spec, root)
         lines += content_guards(tl, _video(root, ns.video), root / "build" / "guards",
                                 log=root / "build" / "qa.log")
+    lines += _audio_mix_lines(root)
     lines.extend(_clip_overruns(root))
     errs = sum(line.startswith("ERR") for line in lines)
     warns = sum(line.startswith("WARN") for line in lines)

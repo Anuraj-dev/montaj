@@ -406,11 +406,39 @@ class Tracks(Frozen):
     bars: list[TrackKey] = Field(default_factory=list)
 
 
+class AudioEdit(Frozen):
+    cut: tuple[TimeExpr, TimeExpr] | None = None
+    loop: tuple[TimeExpr, TimeExpr] | None = None
+    times: int | None = None
+
+
+class AudioClip(Frozen):
+    id: str | None = None
+    src: str
+    stream: int | None = None
+    in_: DurationStr | None = Field(default=None, alias="in")
+    out: DurationStr | None = None
+    at: TimeExpr | list[TimeExpr]
+    offset: DurationStr | None = None
+    gain: str | None = None
+    pan: RealNum | None = None
+
+
+class AudioDuck(Frozen):
+    under: list[str]
+    depth: str = "-6dB"
+    attack: DurationStr = "40ms"
+    release: DurationStr = "200ms"
+
+
 class Audio(Frozen):
     track: str
     markers: str | None = None
     fade_out: DurationStr | None = None
     loudnorm: bool = True
+    edit: list[AudioEdit] = Field(default_factory=list)
+    clips: list[AudioClip] = Field(default_factory=list)
+    duck: AudioDuck | None = None
 
 
 class Fx(Frozen):
@@ -765,6 +793,9 @@ def _time_strings(spec: Spec) -> list[str]:
     for v in spec.markers.values():
         if isinstance(v, str):
             out.append(v)
+    from montaj.audio.mix import time_strings
+
+    out.extend(time_strings(spec))
     for sh in spec.shots:
         if sh.until is not None:
             out.append(sh.until)
@@ -1342,6 +1373,10 @@ def resolve_markers(
             word_s = _load_word_starts(
                 spec, spec_dir, errors, data=markers_json, loaded=markers_loaded
             )
+            if spec.audio.edit:
+                from montaj.audio.mix import shift_words
+
+                word_s = shift_words(spec, word_s, fps, bpm, beat0)
 
     for name in spec.markers:
         if not _NAME.match(name):
@@ -1806,6 +1841,10 @@ def validate_spec(
         markers_loaded=markers_loaded,
         events=events,
     )
+    if spec.audio is not None:
+        from montaj.audio.mix import plan_audio
+
+        plan_audio(spec, spec_dir, markers, fps, bpm, beat0, errors)
 
     parsed: dict[str, int] = {}
     times: dict[str, float] = {}
