@@ -14,6 +14,7 @@ import os
 import re
 import struct
 import subprocess
+import uuid
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
@@ -35,6 +36,8 @@ _INF = 1e12
 
 _DB = re.compile(r"^([+-]?(?:\d+(?:\.\d*)?|\.\d+))\s*dB$")
 _SPAN = re.compile(r"^([+-]?(?:\d+(?:\.\d*)?|\.\d+))(ms|s|f|b)$")
+MAX_GAIN_DB = 120.0  # beyond this 10**(dB/20) is no sane level (and float32 overflows near 760 dB)
+_EDIT_SLACK_S = 0.005  # probed duration vs decoded samples
 _TIME_HINT = "use 12s, 360f, 16b or a marker"
 _SPAN_HINT = "use 40ms, 0.5s, 12f or 1b"
 
@@ -123,7 +126,11 @@ def _db(raw: object, path: str, errors: list[str]) -> float | None:
     if not m:
         errors.append(_line(path, f"invalid level {raw!r}", "use -6dB"))
         return None
-    return float(m.group(1))
+    value = float(m.group(1))
+    if not math.isfinite(value) or abs(value) > MAX_GAIN_DB:
+        errors.append(_line(path, f"level {raw!r} is out of range", f"use between -{MAX_GAIN_DB:.0f}dB and +{MAX_GAIN_DB:.0f}dB"))
+        return None
+    return value
 
 
 def _edit_time(raw: object, fps: int, bpm: float | None, beat0: float, path: str,
@@ -132,6 +139,8 @@ def _edit_time(raw: object, fps: int, bpm: float | None, beat0: float, path: str
     if not isinstance(raw, str) or not _DUR.match(raw.strip()):
         errors.append(_line(path, f"invalid music time {raw!r}", "edit points are music times: 20b or 12.5s"))
         return None
+    if fps <= 0:
+        return None  # validate_spec reports video.fps; no time can be resolved without it
     frames = _parse_time(raw, {}, fps, bpm, path, errors, beat0=beat0)
     return None if frames is None else frames / fps
 
@@ -168,9 +177,21 @@ def edit_ops(edits: list, fps: int, bpm: float | None, beat0: float, errors: lis
     return ops
 
 
-def _pieces(ops: list[EditOp]) -> list[tuple[float, float]]:
+def edit_range_error(ops: list[EditOp] | tuple[EditOp, ...], total_s: float) -> tuple[int, str] | None:
+    """`(op index, message)` for the first op that reaches past the music as it stands then."""
+    cur = total_s
+    for i, op in enumerate(ops):
+        if op.b > cur + _EDIT_SLACK_S:
+            return i, (f"{op.kind} ends at {op.b:.3f}s but the music is {cur:.3f}s long at that point "
+                       f"(earlier edits count)")
+        span = op.b - op.a
+        cur += -span if op.kind == "cut" else span * (op.times - 1)
+    return None
+
+
+def _pieces(ops: list[EditOp], total_s: float = _INF) -> list[tuple[float, float]]:
     """Source ranges `(start, length)` seconds that make up the edited music, in play order."""
-    pieces: list[tuple[float, float]] = [(0.0, _INF)]
+    pieces: list[tuple[float, float]] = [(0.0, total_s)]
 
     def take(lo: float, hi: float) -> list[tuple[float, float]]:
         out, cur = [], 0.0
@@ -248,6 +269,11 @@ def plan_audio(spec, spec_dir: Path | None, markers: dict[str, float], fps: int,
         return None
     root = spec_dir or Path(".")
     ops = edit_ops(a.edit, fps, bpm, beat0, errors)
+    if ops and len(ops) == len(a.edit):
+        total = _track_seconds(root / a.track)
+        bad = edit_range_error(ops, total) if total is not None else None
+        if bad is not None:
+            errors.append(_line(f"audio.edit[{bad[0]}]", bad[1], "keep edit points inside the track"))
     clips: list[Placed] = []
     for i, c in enumerate(a.clips):
         base = f"audio.clips[{i}]"
@@ -291,6 +317,20 @@ def plan_audio(spec, spec_dir: Path | None, markers: dict[str, float], fps: int,
         if None not in (depth, att, rel):
             duck = DuckPlan(tuple(d.under), depth, att, rel)
     return MixPlan(str((root / a.track).resolve()), tuple(ops), tuple(clips), duck)
+
+
+def _track_seconds(path: Path) -> float | None:
+    """Container duration of the music, or None when it cannot be probed (reported elsewhere)."""
+    if not path.is_file():
+        return None
+    proc = subprocess.run(
+        [FFPROBE, "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", str(path)],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+    try:
+        value = float(proc.stdout.decode().strip())
+    except ValueError:
+        return None
+    return value if math.isfinite(value) and value > 0 else None
 
 
 def _clip_src(raw: str, root: Path, path: str, errors: list[str]) -> str | None:
@@ -396,9 +436,19 @@ def write_wav(path: Path, audio: np.ndarray) -> None:
     header = (b"RIFF" + struct.pack("<I", 36 + len(data)) + b"WAVEfmt " +
               struct.pack("<IHHIIHH", 16, 3, 2, SR, SR * 8, 8, 32) + b"data" + struct.pack("<I", len(data)))
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(f".{path.name}.{os.getpid()}.partial")
-    tmp.write_bytes(header + data)
-    os.replace(tmp, path)
+    _publish(path, header + data)
+
+
+def _publish(path: Path, data: bytes) -> None:
+    """Write `data` to a unique temp name beside `path`, then rename: readers never see a partial file."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.{uuid.uuid4().hex}.partial")
+    try:
+        tmp.write_bytes(data)
+        os.replace(tmp, path)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
 
 
 # --- mixing ------------------------------------------------------------------------------------
@@ -416,10 +466,13 @@ def _slice(x: np.ndarray, lo: int, hi: int) -> np.ndarray:
 def apply_edits(music: np.ndarray, ops: tuple[EditOp, ...] | list[EditOp]) -> np.ndarray:
     """Splice `music` per `ops`. Joins get an equal-power crossfade that keeps the length exact."""
     n = len(music)
+    bad = edit_range_error(ops, n / SR)
+    if bad is not None:
+        raise EncodeError(f"mix: audio.edit[{bad[0]}] {bad[1]}", "keep edit points inside the track")
     parts: list[list[int]] = []
-    for s, length in _pieces(list(ops)):
+    for s, length in _pieces(list(ops), n / SR):
         s0 = round(s * SR)
-        s1 = n if length >= _INF / 2 else min(n, round((s + length) * SR))
+        s1 = min(n, round((s + length) * SR))
         if s0 >= n or s1 <= s0:
             continue
         if parts and parts[-1][1] == s0:
@@ -548,8 +601,8 @@ def render_mix(plan: MixPlan, build_dir: Path, *, log: Path | None = None) -> tu
         audio, stats = mix_audio(plan, log=log)
         stats = MixStats(**{**asdict(stats), "hash": digest})
         write_wav(wav, audio)
-        meta.write_text(json.dumps(asdict(stats)))
-    (build_dir / "audio-mix.json").write_text(json.dumps(asdict(stats)))
+        _publish(meta, json.dumps(asdict(stats)).encode())
+    _publish(build_dir / "audio-mix.json", json.dumps(asdict(stats)).encode())
     return wav, stats
 
 
@@ -565,4 +618,4 @@ def check_lines(stats: dict) -> list[str]:
 
 
 __all__ = ["DuckPlan", "EditOp", "MixPlan", "MixStats", "Placed", "apply_edits", "check_lines",
-           "duck_gain", "edit_ops", "plan_audio", "plan_hash", "render_mix", "shift_words", "synth"]
+           "duck_gain", "edit_ops", "edit_range_error", "plan_audio", "plan_hash", "render_mix", "shift_words", "synth"]

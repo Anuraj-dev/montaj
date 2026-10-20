@@ -92,7 +92,7 @@ Photo fields (`crop`, `focus`, swirl `center`, wall `at`) are source-image pixel
 - `audio.markers` — string, default none — JSON `{bpm, beats: [s…], words: [{i, w, s, e}, …]}` from `montaj music analyze`, relative to the spec file. Needed for `word:` markers; supplies the beat grid when `video.bpm` is omitted. `bpm` must be > 0 and `beats` ≥ 0.
 - `audio.fade_out` — duration, default `0s` — afade at the end of the film.
 - `audio.loudnorm` — boolean, default true — loudnorm `-14` LUFS, TP `-1.5`, LRA `11`.
-- `audio.edit` — list, default none — beat-grid edits of the music, applied in order before everything else; each op sees the music as the earlier ops left it. Times are music times (`20b`, `12.5s`; beats sit on the film's grid), not markers. `word:` markers follow the edit; a word inside a cut is gone.
+- `audio.edit` — list, default none — beat-grid edits of the music, applied in order before everything else; each op sees the music as the earlier ops left it. Times are music times (`20b`, `12.5s`; beats sit on the film's grid), not markers. `word:` markers follow the edit; a word inside a cut is gone. Every op must end inside the music as it stands then (a `loop: [3s, 6s]` on a 4 s track is an error).
 - `audio.edit[].cut` — `[start, end]`, one of cut or loop — removes that span. The join gets a 12 ms equal-power crossfade; the music is exactly the cut shorter.
 - `audio.edit[].loop` — `[start, end]`, one of cut or loop — repeats that span.
 - `audio.edit[].times` — whole number ≥ 2, default `2` — loop only: total plays of the span.
@@ -104,7 +104,7 @@ Photo fields (`crop`, `focus`, swirl `center`, wall `at`) are source-image pixel
 - `audio.clips[].stream` — whole number, default `0` — which audio stream of a video file (`0:a:N`).
 - `audio.clips[].in` — duration, default `0s` — start inside the source.
 - `audio.clips[].out` — duration, default end of source — end inside the source; must be after `in`.
-- `audio.clips[].gain` — dB string, default `0dB` — level, e.g. `-10dB`.
+- `audio.clips[].gain` — dB string, default `0dB` — level, e.g. `-10dB`; within ±120 dB.
 - `audio.clips[].pan` — number in `[-1, 1]`, default `0` — constant-power pan, `-1` left.
 - `audio.duck` — mapping, default none — dips the music (not other clips) while the named clips speak: RMS over 120 ms above -45 dB, eased by attack and release.
 - `audio.duck.under` — list of clip ids, required — which clips trigger the duck.

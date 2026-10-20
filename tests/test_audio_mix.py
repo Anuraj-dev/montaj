@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import shutil
 import subprocess
+import threading
 import wave
 from pathlib import Path
 
@@ -74,11 +75,31 @@ def test_cut_keeps_length_minus_cut_and_crossfades_the_join() -> None:
     assert np.max(np.abs(np.diff(out[j - 400 : j + 400, 0]))) < 0.1  # no click at the join
 
 
-def test_loop_plays_the_section_times_total() -> None:
-    music = np.stack([tone(4.0)] * 2, axis=1).astype(np.float32)
+def section_hz(x: np.ndarray, sec: int) -> float:
+    """Dominant frequency of the middle half of output second `sec` (clear of any crossfade)."""
+    seg = x[sec * SR + SR // 4 : sec * SR + 3 * SR // 4, 0]
+    return float(np.argmax(np.abs(np.fft.rfft(seg))) * SR / len(seg))
+
+
+def test_loop_plays_the_section_times_total_in_order() -> None:
+    hz = [200.0, 300.0, 400.0, 500.0]  # one distinguishable tone per second
+    left = np.concatenate([tone(1.0, f) for f in hz])
+    music = np.stack([left, left], axis=1).astype(np.float32)
     out = mix.apply_edits(music, [EditOp("loop", 1.0, 2.0, 3)])
     assert len(out) == len(music) + 2 * SR
-    assert np.allclose(out[3 * SR + 1000 : 3 * SR + 2000], music[SR + 1000 : SR + 2000], atol=1e-6)
+    assert [round(section_hz(out, i)) for i in range(6)] == [200, 300, 300, 300, 400, 500]
+
+
+def test_edits_apply_sequentially_to_the_finite_track() -> None:
+    music = np.stack([tone(4.0)] * 2, axis=1).astype(np.float32)
+    assert mix.edit_range_error([EditOp("loop", 3.0, 6.0, 2)], 4.0) is not None
+    ops = [EditOp("loop", 3.0, 4.0, 2), EditOp("cut", 4.0, 5.0, 1)]  # 4s -> 5s -> 4s
+    assert mix.edit_range_error(ops, 4.0) is None
+    assert len(mix.apply_edits(music, ops)) == 4 * SR
+    with pytest.raises(Exception, match=r"audio\.edit\[0\]"):
+        mix.apply_edits(music, [EditOp("loop", 3.0, 6.0, 2)])
+    with pytest.raises(Exception, match=r"audio\.edit\[1\]"):
+        mix.apply_edits(music, [EditOp("loop", 3.0, 4.0, 2), EditOp("cut", 5.5, 6.0, 1)])
 
 
 def test_edit_ops_resolve_beats_on_the_grid_and_reject_bad_ranges() -> None:
@@ -230,6 +251,10 @@ def test_plain_audio_block_is_not_a_mix(tmp_path: Path) -> None:
     ("  clips:\n    - {id: voice, src: sfx/whoosh, at: 1s}\n  duck: {under: [voice], depth: 3dB}\n",
      "must be below 0 dB"),
     ("  edit:\n    - {cut: [4b, 2b]}\n", "need 0 <= start < end"),
+    ("  edit:\n    - {loop: [3s, 6s]}\n    - {cut: [4s, 5s]}\n", "audio.edit[0]: loop ends at 6.000s"),
+    ("  edit:\n    - {loop: [1s, 2s]}\n    - {cut: [5s, 6s]}\n", "audio.edit[1]: cut ends at 6.000s"),
+    ("  clips:\n    - {src: sfx/whoosh, at: 1s, gain: 10000dB}\n", "out of range"),
+    ("  clips:\n    - {src: sfx/whoosh, at: 1s, gain: " + "9" * 400 + "dB}\n", "out of range"),
     ("  edit:\n    - {cut: [intro, 2b]}\n", "invalid music time"),
     ("  edit:\n    - {loop: [1b, 2b], times: 1}\n", "whole number >= 2"),
     ("  edit:\n    - {cut: [1b, 2b], times: 2}\n", "times needs loop"),
@@ -338,3 +363,87 @@ def test_mixed_wav_goes_through_the_two_pass_mux(tmp_path: Path) -> None:
     out = mux(video, wav, tmp_path / "out.mp4", log=tmp_path / "mux.log")
     info = probe(out)
     assert info.has_audio and abs(info.audio_duration - 2.0) < 0.1
+
+
+def test_zero_fps_reports_an_error_not_a_traceback(tmp_path: Path) -> None:
+    spec_path = write_spec(tmp_path, "  edit:\n    - {cut: [0f, 1f]}\n")
+    spec_path.write_text(spec_path.read_text().replace("fps: 30", "fps: 0"))
+    with pytest.raises(SpecError) as exc:
+        load_spec(spec_path)
+    assert "video.fps" in str(exc.value)
+
+
+def test_render_mix_publishes_metadata_atomically(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A second renderer arriving while the first is mid-publish must not read a half-written file."""
+    music = write_wav(tmp_path / "m.wav", tone(1.0))
+    plan = MixPlan(str(music), clips=(Placed(None, "synth:tick", 0, 0.0, None, 0.2, 0.0, 0.0),))
+    build = tmp_path / "build"
+    gate, release = threading.Event(), threading.Event()
+    real_write = Path.write_text
+
+    def stall(self: Path) -> None:
+        # Whatever the implementation does to a final metadata path, stall right after it is created.
+        if self.parent.name == "audio" and self.suffix == ".json" and not self.name.startswith("."):
+            gate.set()
+            release.wait(timeout=10)
+
+    def slow_write(self: Path, data: str, *a: object, **k: object) -> int:
+        if self.parent.name == "audio" and self.suffix == ".json" and not self.name.startswith("."):
+            self.write_bytes(b"")  # truncated, visible, not yet filled
+            stall(self)
+        return real_write(self, data, *a, **k)
+
+    monkeypatch.setattr(Path, "write_text", slow_write)
+    errors: list[BaseException] = []
+
+    def first() -> None:
+        try:
+            mix.render_mix(plan, build)
+        except BaseException as exc:  # noqa: BLE001
+            errors.append(exc)
+        finally:
+            gate.set()  # the first renderer finished without ever stalling
+
+    t = threading.Thread(target=first)
+    t.start()
+    gate.wait(timeout=30)
+    try:
+        wav, stats = mix.render_mix(plan, build)
+    finally:
+        release.set()
+        t.join(timeout=30)
+    assert not errors and stats.clips == 1 and wav.is_file()
+    assert not [p for p in (build / "audio").iterdir() if p.name.endswith(".partial")]
+
+
+def test_concurrent_renders_share_one_mix(tmp_path: Path) -> None:
+    music = write_wav(tmp_path / "m.wav", tone(1.0))
+    plan = MixPlan(str(music), clips=(Placed(None, "synth:tick", 0, 0.0, None, 0.2, 0.0, 0.0),))
+    barrier = threading.Barrier(4)
+    results: list[object] = []
+
+    def run() -> None:
+        barrier.wait(timeout=30)
+        try:
+            results.append(mix.render_mix(plan, tmp_path / "build")[1])
+        except BaseException as exc:  # noqa: BLE001
+            results.append(exc)
+
+    threads = [threading.Thread(target=run) for _ in range(4)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=60)
+    assert len(results) == 4 and all(isinstance(r, mix.MixStats) for r in results)
+
+
+def test_audio_mix_fields_do_not_change_segment_hashes(tmp_path: Path) -> None:
+    from montaj.project import segment_hash
+
+    def hashes(audio: str) -> list[str]:
+        root = tmp_path / ("a" if audio else "b")
+        root.mkdir()
+        tl = resolve(load_spec(write_spec(root, audio)), root)
+        return [segment_hash(tl, seg, {}, "e1") for seg in tl.segments]
+
+    assert hashes("") == hashes("  edit:\n    - {cut: [1b, 2b]}\n  clips:\n    - {src: sfx/whoosh, at: 1s}\n")
