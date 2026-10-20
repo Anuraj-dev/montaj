@@ -149,3 +149,21 @@ Easing (the curve into a camera key):
 - `inc` — creeps, then arrives quickly.
 - `expo` — very slow, then very fast, then very slow.
 - `ramp` — slow, fast through the middle, then slow again.
+
+Capture (`montaj capture SCRIPT`):
+
+The script compiles to one list of clicks and scrolls. The same file always schedules the same actions on the same frames. `montaj capture SCRIPT` plays that list and writes a clip. Progress is `build/capture.log`. Stdout is `OK <path> <dur> <WxH> <MB>`.
+
+- `url` — string, required — page to record. `http`, `https` or `file`.
+- `size` — `WxH`, default `3840x2160` — viewport in pixels, both even. This is the 4K default.
+- `fps` — integer, default `60` — frames per second. Must be >= 1.
+- `dur` — duration (`f` or `s`), required — recording length. Beats are an error (there is no grid). Times snap to frames.
+- `css` — string, default none — stylesheet injected after load, before the first frame. The same text every run.
+- `out` — path, default `<assets>/<script stem>.mp4` — clip path. Relative to the project unless absolute. `.mp4` or `.mov`. `<assets>` is `montaj.yaml`'s `assets` folder, else `assets`, so `shots[].clip` can name the stem.
+- `actions` — list, default none — clicks and scrolls in list order.
+- `actions[].at` — duration (`f` or `s`), required — when the action starts, from the capture start. Must land on a frame inside `dur`.
+- `actions[].click` — string, click or scroll — CSS selector. The click runs at `at`, then that frame is shot.
+- `actions[].scroll` — number or mapping, click or scroll — target in CSS pixels. A number sets `y` and leaves `x` at 0.
+- `actions[].scroll.x` — number, default `0` — horizontal target.
+- `actions[].scroll.y` — number, default `0` — vertical target.
+- `actions[].scroll.dur` — duration (`f` or `s`), default `0s` — straight move from the position already scheduled before this action's first frame. `0` jumps. Each scroll keeps its own line; a later action does not rewrite it. The move has to end inside `dur`.
