@@ -137,6 +137,8 @@ At `W=1080, H=1920` every primitive must match film2.py within mean |Δ| < 1e-3 
   times, 0.0 … 59.5). `sheets(video, out, times)` writes that list ≤ 12 frames a page: `out`, then `<stem>-2`, ….
 - `check(video) -> list[str]`: duration, size, fps, black frames (`blackdetect`), frozen spans
   (`freezedetect`, ignoring spans the caller marks as intended), integrated loudness, A/V duration offset.
+  `montaj check` also warns when a clip shot's read window (hold plus the outgoing fade, swirl, or half
+  a whip, after `clip_in`) runs past the source: `WARN shots[i] <stem> runs <t>s past its clip`.
 - `doctor() -> list[str]`: CUDA + capability, NVENC, ffmpeg/ffprobe, chromium, free VRAM, plus the known traps.
 - All of them log to `build/*.log` and never print progress; the CLI prints the one result line.
 
