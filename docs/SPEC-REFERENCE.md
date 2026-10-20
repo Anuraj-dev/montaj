@@ -18,7 +18,7 @@ Photo fields (`crop`, `focus`, swirl `center`, wall `at`) are source-image pixel
 - `assets` — string, default `assets` — photo folder relative to the spec file. A photo is the file stem (`jpg`, `jpeg`, `png` or `webp`).
 - `shots` — list, required — played in order. Each shot starts when the previous one ends.
 - `shots[].photo` — string, photo or wall or clip or sequence — stem of the still. An integer in the YAML is read as a string. Mutually exclusive with `wall`, `clip` and `sequence`.
-- `shots[].clip` — string, photo or wall or clip or sequence — stem of a video file in `assets/` (`mp4`, `mov`, `webm`, `mkv`). Mutually exclusive with `photo`, `wall` and `sequence`.
+- `shots[].clip` — string, photo or wall or clip or sequence — stem of a video file in `assets/` (`mp4`, `mov`, `webm`, `mkv`). Mutually exclusive with `photo`, `wall` and `sequence`. `check` warns `shots[i] <stem> runs <t>s past its clip` when the hold plus the outgoing fade, swirl, or half a whip, after `clip_in`, reads past the file.
 - `shots[].clip_in` — duration, default `0s` — source offset into the clip.
 - `shots[].hold` — duration, hold or until — how long this shot is on screen. Exactly one of `hold` or `until`. A whole-beat hold (`4b`) ends on a beat of the grid (moving forward if the shot started off-beat), and beat holds never drift from rounding.
 - `shots[].until` — time expression, hold or until — the shot ends at this time from film start. Must fall after the shot's start.
@@ -96,6 +96,10 @@ Photo fields (`crop`, `focus`, swirl `center`, wall `at`) are source-image pixel
 - `text[].fade_in` — duration, default `0s` — block fade in. `0` is instant.
 - `text[].fade_out` — duration, default `0.8s` — block fade out; the block blurs by `(1 − a)·blur`.
 - `text[].blur` — number, default `10` — design-px blur while the block fades.
+- `text[].backdrop` — mapping, `true`, `gradient` or `solid`, default none — dark scrim behind the block, painted by the compositor. `true` is the default gradient. Fades with the block.
+- `text[].backdrop.type` — `gradient` or `solid`, default `gradient` — `gradient` fades out; `solid` is flat over the same area.
+- `text[].backdrop.strength` — number, default `0.8` — opacity of the darkest part, from 0 to 1.
+- `text[].backdrop.place` — `bottom`, `top` or `band`, default `band` — `band` covers the lines (full strength on the line box, cosine fade across a pad of 48 design px or 0.45× the line size); `bottom` and `top` keep the outer 28% of the frame fully dark, then fade across the next 22%.
 - `text[].lines` — list, required — the lines in this block.
 - `text[].lines[].text` — string, required — the line.
 - `text[].lines[].style` — `serif`, `script`, `caps` or `deva`, default `serif`.
@@ -129,6 +133,14 @@ Photo fields (`crop`, `focus`, swirl `center`, wall `at`) are source-image pixel
 - `tracks.*[].t` — time expression, required — when this key is reached.
 - `tracks.*[].v` — number, required — value at this key.
 - `tracks.*[].ease` — easing name, default `linear` for dust and glow, `sine` for bars — the curve into this key.
+- `check` — mapping, default none — designed QA exceptions. The renderer does not read this, so it does not change the segment hash.
+- `check.expect` — list, default none — black or frozen spans `check` treats as designed. A span that matches no detected span prints `INFO expect <kind> <start>–<end>s not found`.
+- `check.expect[].black` — `[start, end]` time expressions, black or frozen — a designed black window. Set this or `frozen`, not both. `end` must be later than `start`.
+- `check.expect[].frozen` — `[start, end]` time expressions, black or frozen — a designed hold. Set this or `black`, not both. `end` must be later than `start`.
+- `check.expect[].why` — string, default none — one line, added when this span matches a detected one.
+- `check.loudness` — mapping, default none — replaces the `-14` LUFS target used by `check`.
+- `check.loudness.i` — number, required with loudness — integrated-loudness target, in LUFS.
+- `check.loudness.tol` — number, default `1` — how far the measurement may sit from `i`, in LU.
 
 Transitions (`shots[].in`):
 

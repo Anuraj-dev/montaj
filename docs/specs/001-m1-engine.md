@@ -133,8 +133,12 @@ At `W=1080, H=1920` every primitive must match film2.py within mean |Δ| < 1e-3 
   `<assets>/<stem>.jpg` (q 92) + `assets.json` (`stem, w, h, sha`), and one numbered contact sheet
   `build/ingest-sheet.jpg` ≤ 1536 px wide (stem printed on each tile).
 - `sheet(video, out, at=None, n=12)`: ≤ 12 frames, one image ≤ 1536 px, timestamp on each tile.
+  `every_times(duration, interval)` is `0, interval, 2*interval, …` inside the duration (60s at 0.5s → 120
+  times, 0.0 … 59.5). `sheets(video, out, times)` writes that list ≤ 12 frames a page: `out`, then `<stem>-2`, ….
 - `check(video) -> list[str]`: duration, size, fps, black frames (`blackdetect`), frozen spans
   (`freezedetect`, ignoring spans the caller marks as intended), integrated loudness, A/V duration offset.
+  `montaj check` also warns when a clip shot's read window (hold plus the outgoing fade, swirl, or half
+  a whip, after `clip_in`) runs past the source: `WARN shots[i] <stem> runs <t>s past its clip`.
 - `doctor() -> list[str]`: CUDA + capability, NVENC, ffmpeg/ffprobe, chromium, free VRAM, plus the known traps.
 - All of them log to `build/*.log` and never print progress; the CLI prints the one result line.
 
@@ -169,7 +173,7 @@ render(spec_path: Path, mode: "preview" | "final") -> RenderResult(path, n_frame
 | `ingest --photos FOLDER` | `OK <n> photos sheet=build/ingest-sheet.jpg` |
 | `validate` | `OK montaj.yaml 840f 28.00s 13 shots 13 segments` or one `ERR` line per spec error |
 | `render [--preview\|--final]` (default preview) | `OK out/preview.mp4 28.00s 540x960 4.1MB rendered 2/13 cached 11/13 in 31.2s` |
-| `sheet [--at 1.5,3,9] [--video PATH]` | `OK build/sheet.jpg 12 frames` (default video: newest of out/final.mp4, out/preview.mp4) |
+| `sheet [--at 1.5,3,9] [--every 0.5s] [--video PATH]` | default `OK build/sheet.jpg 12 frames`. `--every` samples that interval from 0 and pages at 12 frames: `OK build/sheet.jpg build/sheet-2.jpg … N frames`. `--at` still caps at 12. `--at` and `--every` together are an error. Default video: newest of out/final.mp4, out/preview.mp4 |
 | `check [--video PATH]` | the QA lines, then `OK check` / `WARN check: <n> warnings` |
 | `export --target master\|whatsapp` | `OK out/<target>.mp4 <size>MB` |
 Exit code 0 on OK/WARN, 1 on ERR. `--json` prints one JSON object instead of the text lines.
