@@ -93,6 +93,10 @@ Photo fields (`crop`, `focus`, swirl `center`, wall `at`) are source-image pixel
 - `text[].fade_in` — duration, default `0s` — block fade in. `0` is instant.
 - `text[].fade_out` — duration, default `0.8s` — block fade out; the block blurs by `(1 − a)·blur`.
 - `text[].blur` — number, default `10` — design-px blur while the block fades.
+- `text[].backdrop` — mapping, `true`, `gradient` or `solid`, default none — dark scrim behind the block, painted by the compositor. `true` is the default gradient. Fades with the block.
+- `text[].backdrop.type` — `gradient` or `solid`, default `gradient` — `gradient` fades out; `solid` is flat over the same area.
+- `text[].backdrop.strength` — number, default `0.8` — opacity of the darkest part, from 0 to 1.
+- `text[].backdrop.place` — `bottom`, `top` or `band`, default `band` — `band` covers the lines (full strength on the line box, cosine fade across a pad of 48 design px or 0.45× the line size); `bottom` and `top` keep the outer 28% of the frame fully dark, then fade across the next 22%.
 - `text[].lines` — list, required — the lines in this block.
 - `text[].lines[].text` — string, required — the line.
 - `text[].lines[].style` — `serif`, `script`, `caps` or `deva`, default `serif`.

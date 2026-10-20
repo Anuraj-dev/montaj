@@ -94,6 +94,10 @@ Rules and fields:
   `0.9s`), `rise` (design px, default 26), `reveal` (`rise` | `pop`, default `rise`),
   `sweep` (`[from, to]` time expressions; gold gradient travels 100%→0% across it; default the block window),
   `shadow` (bool; default true — false = no text shadow, film.html's ink lines).
+- `text[].backdrop` — optional scrim behind the block, not a line (see SPEC-REFERENCE). `true`, `gradient`
+  or `solid` uses the defaults; a mapping sets `type` (`gradient`|`solid`), `strength` (0..1, default 0.8)
+  and `place` (`band`|`bottom`|`top`, default `band`). The compositor paints it (no image asset). It fades
+  and blurs with the block. Omitted, it stays out of `model_dump`, so the segment hash is unchanged.
 - Every new field gets one line in `docs/SPEC-REFERENCE.md`.
 
 ## Text styles (montaj/render/text.css; film.html lines 24–35)

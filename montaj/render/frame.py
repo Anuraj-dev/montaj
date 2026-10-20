@@ -38,6 +38,7 @@ from montaj.render.text import (
     RasterLine,
     RasterSet,
     Sub,
+    TextBackdrop,
     TextBlock,
     TextLine,
     Unit,
@@ -514,6 +515,11 @@ class Renderer:
             reveal=ln.reveal, sweep=ln.sweep, shadow=ln.shadow, indent=ln.indent,
         )
 
+    def _backdrop(self, src) -> TextBackdrop | None:
+        if src is None:
+            return None
+        return TextBackdrop(src.type, float(src.strength), src.place)
+
     def _ensure_rasters(self) -> None:
         """One pass per Renderer. A disk hit starts no browser; a miss batches each kind."""
         if self._rasters_ready:
@@ -532,7 +538,12 @@ class Renderer:
         for block in self.tl.texts:
             lines = tuple(self._line(ln) for ln in block.lines)
             flat.extend(lines)
-            blocks.append(TextBlock(block.from_, block.to, block.fade_in, block.fade_out, block.blur, lines))
+            blocks.append(
+                TextBlock(
+                    block.from_, block.to, block.fade_in, block.fade_out, block.blur, lines,
+                    self._backdrop(block.backdrop),
+                )
+            )
         subs = tuple(Sub(s.from_, s.to, s.text, size=s.size, color=s.color) for s in self.tl.subs)
         device = self.cv.device
         scale = float(self.cv.k)

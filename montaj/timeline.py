@@ -7,7 +7,16 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from montaj.render.core import EASE as EASE_FN, key as eval_key
-from montaj.spec import Shot, Spec, SpecError, _format_beat0, parse_wh, round_frame, validate_spec
+from montaj.spec import (
+    Shot,
+    Spec,
+    SpecError,
+    TextBackdrop,
+    _format_beat0,
+    parse_wh,
+    round_frame,
+    validate_spec,
+)
 
 _TRACK_DEFAULT = {"dust": "linear", "glow": "linear", "bars": "sine"}
 
@@ -105,6 +114,7 @@ class ResolvedText:
     fade_out: float
     blur: float
     lines: tuple[ResolvedLine, ...]
+    backdrop: TextBackdrop | None = None
 
 
 @dataclass(frozen=True)
@@ -415,7 +425,17 @@ def _resolve_texts(spec: Spec, times: dict[str, float], fps: int) -> list[Resolv
                     indent=line.indent,
                 )
             )
-        out.append(ResolvedText(from_=frm, to=to, fade_in=fi, fade_out=fo, blur=block.blur, lines=tuple(lines)))
+        out.append(
+            ResolvedText(
+                from_=frm,
+                to=to,
+                fade_in=fi,
+                fade_out=fo,
+                blur=block.blur,
+                lines=tuple(lines),
+                backdrop=block.backdrop,
+            )
+        )
     return out
 
 

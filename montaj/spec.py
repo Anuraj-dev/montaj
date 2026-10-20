@@ -21,6 +21,9 @@ TEXT_STYLES = ("serif", "script", "caps", "deva")
 TEXT_BY = ("word", "char")
 TEXT_REVEAL = ("rise", "pop")
 TEXT_COLORS = ("cream", "gold", "ink")
+BACKDROP_TYPES = ("gradient", "solid")
+BACKDROP_PLACES = ("bottom", "top", "band")
+BACKDROP_STRENGTH = 0.8
 _DUR = re.compile(r"^([+-]?(?:\d+(?:\.\d*)?|\.\d+))([fbs])$")
 _BARE = re.compile(r"^[+-]?(?:\d+(?:\.\d*)?|\.\d+)$")
 _WH = re.compile(r"^(\d+)x(\d+)$")
@@ -232,12 +235,37 @@ class TextLine(Frozen):
     indent: float = 0.0
 
 
+class TextBackdrop(Frozen):
+    """Dark scrim behind a text block. The compositor paints it; no image asset."""
+
+    type: str = "gradient"
+    strength: RealNum = BACKDROP_STRENGTH
+    place: str = "band"
+
+
+def _coerce_backdrop(v: object) -> object:
+    """`true`, `gradient` and `solid` are the default scrim. A mapping sets the knobs."""
+    if v is None or isinstance(v, TextBackdrop):
+        return v
+    if v is True:
+        return {}
+    if isinstance(v, str):
+        return {"type": v}
+    if v is False:
+        raise ValueError("omit backdrop to turn it off")
+    return v
+
+
 class TextBlock(Frozen):
     from_: TimeExpr = Field(alias="from")
     to: TimeExpr
     fade_in: DurationStr | None = None
     fade_out: DurationStr | None = None
     blur: float = 10.0
+    # Absent stays out of model_dump so a film with no scrim keeps its segment hash.
+    backdrop: Annotated[TextBackdrop | None, BeforeValidator(_coerce_backdrop)] = Field(
+        default=None, exclude_if=lambda v: v is None
+    )
     lines: list[TextLine]
 
 
@@ -953,6 +981,21 @@ def _check_color(path: str, color: str | None, errors: list[str]) -> None:
         errors.append(_line(path, f"unknown colour {color!r}", "use cream, gold, ink or #rrggbb"))
 
 
+def _check_backdrop(path: str, bd: TextBackdrop, errors: list[str]) -> None:
+    if bd.type not in BACKDROP_TYPES:
+        errors.append(_line(f"{path}.type", f"unknown {bd.type!r}", "use gradient or solid"))
+    if not math.isfinite(bd.strength) or bd.strength < 0 or bd.strength > 1:
+        errors.append(
+            _line(
+                f"{path}.strength",
+                f"must be from 0 to 1, got {_fmt_num(bd.strength)}",
+                "use a fraction",
+            )
+        )
+    if bd.place not in BACKDROP_PLACES:
+        errors.append(_line(f"{path}.place", f"unknown {bd.place!r}", "use bottom, top or band"))
+
+
 def _choices(names: tuple[str, ...]) -> str:
     return " or ".join(names)
 
@@ -1260,6 +1303,8 @@ def _validate_text(
             val = _parse_time(raw, markers, fps, bpm, f"text[{i}].{field}", errors, beat0=beat0)
             if val is not None:
                 times[f"text[{i}].{field}"] = val
+        if block.backdrop is not None:
+            _check_backdrop(f"text[{i}].backdrop", block.backdrop, errors)
         if not block.lines:
             errors.append(_line(f"text[{i}].lines", "need at least one line", "add a line"))
         for j, line in enumerate(block.lines):
