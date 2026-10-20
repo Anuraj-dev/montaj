@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from montaj.render.core import EASE as EASE_FN, key as eval_key
-from montaj.spec import Shot, Spec, SpecError, _format_beat0, parse_wh, round_frame, validate_spec
+from montaj.spec import AFTER_CUT, Shot, Spec, SpecError, _format_beat0, parse_wh, round_frame, validate_spec
 
 _TRACK_DEFAULT = {"dust": "linear", "glow": "linear", "bars": "sine"}
 
@@ -44,6 +44,9 @@ class Trans:
     axis: str = "x"
     center: tuple[float, float] | None = None
     blur: float = 0.0
+    strength: float = 1.0
+    seed: int = 0
+    color: str = "#000000"
 
 
 type Scene = Still | Wall | Clip | Blank | Trans
@@ -103,6 +106,7 @@ class FramePlan:
     subs: tuple[int, ...] = ()
     hits: tuple[tuple[float, float], ...] = ()
     bursts: tuple[tuple[int, float, float, float, int], ...] = ()
+    splits: tuple[tuple[int, float, int], ...] = ()
     dust: float = 0.0
     glow: float = 0.0
     bars: float = 0.0
@@ -228,6 +232,7 @@ class Timeline:
     texts: list[ResolvedText] = field(default_factory=list)
     subs: list[ResolvedSub] = field(default_factory=list)
     _hits: list[tuple[float, float]] = field(default_factory=list)
+    _splits: list[tuple[int, float, int]] = field(default_factory=list)
     _bursts: list[tuple[int, float, float, float, int]] = field(default_factory=list)
     _tracks: dict[str, list] = field(default_factory=dict)
     _fade_out: tuple[int, int] | None = None
@@ -263,6 +268,7 @@ class Timeline:
         hits = tuple((at, k) for at, k in self._hits if -3 <= f - at < hit_hi)
         burst_hi = 3.4 * self.fps
         bursts = tuple(b for b in self._bursts if 0 <= f - b[1] <= burst_hi)
+        splits = tuple(s for s in self._splits if 0 <= f - s[0] < s[2])
         dust = _r6(_track_at(self._tracks.get("dust") or [], f))
         # film.html 427: leaks fade out over the film's last 2 s. Folded into the plan so the
         # renderer never reads the film length and only the tail segments hash it.
@@ -281,6 +287,7 @@ class Timeline:
             subs=subs,
             hits=hits,
             bursts=bursts,
+            splits=splits,
             dust=dust,
             glow=glow,
             bars=bars,
@@ -342,7 +349,7 @@ def _visible_span(resolved: list[ResolvedShot], i: int, parsed: dict[str, int]) 
     if i + 1 < len(resolved):
         nxt = resolved[i + 1]
         ntr = nxt.spec.in_
-        if ntr is not None and ntr.type in ("fade", "swirl", "whip"):
+        if ntr is not None and ntr.type in (*AFTER_CUT, "whip"):
             nd = parsed.get(f"shots[{i + 1}].in.dur")
             if nd is not None:
                 v1 = float(nxt.start) + (nd / 2.0 if ntr.type == "whip" else nd)
@@ -453,13 +460,26 @@ def resolve(spec: Spec, spec_dir: Path) -> Timeline:
         else:
             prev = resolved[i - 1]
             a = _base_scene(prev, spans[prev.index])
-        if tr.type in ("fade", "swirl"):
+        if tr.type in AFTER_CUT:
             t0 = float(sh.start)
             center = tr.center
             if tr.type == "swirl" and center is None and i > 0:
                 center = resolved[i - 1].spec.focus
+            extra = {}
+            if tr.type in ("glitch", "zoom"):
+                extra["strength"] = 1.0 if tr.strength is None else float(tr.strength)
+            if tr.type == "glitch":
+                extra["seed"] = 0 if tr.seed is None else tr.seed
+            if tr.type == "dip":
+                extra["color"] = (tr.color or "#000000").lower()
+            if tr.type == "push":
+                extra["axis"] = tr.axis
             windows.append(
-                (t0, t0 + dur, Trans(kind=tr.type, a=a, b=b, t0=t0, dur=dur, center=center, blur=tr.blur))
+                (
+                    t0,
+                    t0 + dur,
+                    Trans(kind=tr.type, a=a, b=b, t0=t0, dur=dur, center=center, blur=tr.blur, **extra),
+                )
             )
         elif tr.type == "whip":
             t0 = float(sh.start) - dur / 2
@@ -474,6 +494,7 @@ def resolve(spec: Spec, spec_dir: Path) -> Timeline:
     leaks: list[tuple[int, float, int]] = []
     hits: list[tuple[float, float]] = []
     bursts: list[tuple[int, float, float, float, int]] = []
+    splits: list[tuple[int, float, int]] = []
     burst_i = 0
     for i, fx in enumerate(spec.fx):
         at_i = parsed.get(f"fx[{i}].at")
@@ -484,6 +505,8 @@ def resolve(spec: Spec, spec_dir: Path) -> Timeline:
             leaks.append((at_i, float(fx.leak), int(fx.dir)))
         if fx.hit is not None:
             hits.append((at_f, float(fx.hit)))
+        if fx.rgb_split is not None and at_i is not None:
+            splits.append((at_i, float(fx.rgb_split), parsed.get(f"fx[{i}].dur", 6)))
         if fx.burst is not None and fx.pos is not None:
             bursts.append((burst_i, at_f, float(fx.pos[0]), float(fx.pos[1]), int(fx.burst)))
             burst_i += 1
@@ -529,6 +552,7 @@ def resolve(spec: Spec, spec_dir: Path) -> Timeline:
         texts=texts,
         subs=subs,
         _hits=hits,
+        _splits=splits,
         _bursts=bursts,
         _tracks=_resolve_tracks(spec, times),
         _fade_out=fade_out,

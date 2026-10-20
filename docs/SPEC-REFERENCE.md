@@ -43,10 +43,13 @@ Photo fields (`crop`, `focus`, swirl `center`, wall `at`) are source-image pixel
 - `shots[].focus` — `[x, y]`, default the crop centre — the photo point placed at the screen centre.
 - `shots[].zoom` — number, default cover — design pixels per photo pixel. Cover fits the crop with a hair of overscan.
 - `shots[].in` — mapping, default none — how this shot arrives from the previous one. Omit `in` for a cut. See transitions.
-- `shots[].in.type` — `cut`, `fade`, `swirl` or `whip`, required inside `in` — which transition.
+- `shots[].in.type` — `cut`, `fade`, `swirl`, `whip`, `glitch`, `zoom`, `dip` or `push`, required inside `in` — which transition.
 - `shots[].in.dur` — duration, required except for a cut — length of the transition. It has to fit in the shots it overlaps.
 - `shots[].in.center` — `[x, y]`, default the outgoing shot's focus — where a swirl opens, in the outgoing photo.
-- `shots[].in.axis` — `x` or `y`, default `x` — which way a whip travels.
+- `shots[].in.axis` — `x` or `y`, default `x` — which way a whip or push travels.
+- `shots[].in.strength` — number in `(0, 4]`, default `1` — glitch tear and channel split, or zoom-blur reach. Glitch and zoom only.
+- `shots[].in.seed` — whole number `>= 0`, default `0` — glitch pattern seed; the tear is drawn from seed and frame, so a render repeats exactly. Glitch only.
+- `shots[].in.color` — `#rrggbb`, default `#000000` — colour the picture dips through. Dip only.
 - `shots[].in.blur` — number, default `0` — design-px blur on fading layers. Shot 0 may use `fade` (from `video.background`); other transitions on shot 0 stay an error.
 - `shots[].flash` — number, default none — white flash on this shot's first frame, fading out over the next 6 frames.
 - `shots[].wall` — mapping, photo or wall — a flat field of prints. The camera only pans and zooms. Mutually exclusive with `photo`.
@@ -74,10 +77,12 @@ Photo fields (`crop`, `focus`, swirl `center`, wall `at`) are source-image pixel
 - `wall.camera.zoom[].print` — string, optional — if set, `value` is divided by that print's scale, so the number is a zoom relative to the print.
 - `wall.camera.zoom[].ease` — easing name, default `smooth` — how the zoom changes into this key.
 - `fx` — list, default none — light leaks, flashes, hits and bursts at absolute times, not tied to a shot.
-- `fx[].leak` — number, leak or flash or hit or burst — strength of a warm light leak around `at`.
-- `fx[].flash` — number, leak or flash or hit or burst — strength of a white flash at `at`, fading over 6 frames.
-- `fx[].hit` — number, leak or flash or hit or burst — golden radial flash (and optional punch) at `at`.
-- `fx[].burst` — whole number, leak or flash or hit or burst — sparkle-particle count. An integral float such as `3.0` is accepted. Needs `pos`. Seed is `100` plus the burst's index among bursts.
+- `fx[].leak` — number, leak or flash or hit or burst or rgb_split — strength of a warm light leak around `at`.
+- `fx[].flash` — number, leak or flash or hit or burst or rgb_split — strength of a white flash at `at`, fading over 6 frames.
+- `fx[].hit` — number, leak or flash or hit or burst or rgb_split — golden radial flash (and optional punch) at `at`.
+- `fx[].rgb_split` — number in `(0, 4]`, leak or flash or hit or burst or rgb_split — one-off red/blue channel split along x on the composite at `at`, decaying to nothing over `dur`. About `32 × value` design px at its peak.
+- `fx[].dur` — duration, default `6f` — length of an rgb_split hit. rgb_split only.
+- `fx[].burst` — whole number, leak or flash or hit or burst or rgb_split — sparkle-particle count. An integral float such as `3.0` is accepted. Needs `pos`. Seed is `100` plus the burst's index among bursts.
 - `fx[].pos` — `[x, y]`, required with a burst — burst origin in design px.
 - `fx[].at` — time expression, required — when it happens, from the start of the film.
 - `fx[].dir` — `1` or `-1`, required with a leak — which side the leak comes in from. Not used on a flash, hit or burst.
@@ -133,6 +138,10 @@ Transitions (`shots[].in`):
 - `fade` — crossfade across the first `dur` frames of the incoming shot.
 - `swirl` — a swirling wipe that opens around `center`, across the first `dur` frames of the incoming shot.
 - `whip` — both shots slide along `axis`. The move is `dur` frames long and centred on the cut, half on each side.
+- `glitch` — across the first `dur` frames of the incoming shot, random blocks swap to the new shot while horizontal bands tear sideways and red/blue split apart. Peaks mid-way, clean at both ends.
+- `zoom` — a zoom-blur punch across the first `dur` frames: the old shot rushes in and smears, the new one arrives from the same rush and settles; they cross over in the middle.
+- `dip` — across the first `dur` frames the old shot goes to `color`, then the new shot comes up from it.
+- `push` — across the first `dur` frames the new shot slides in along `axis` and shoves the old one out. Starts on the cut, softer ease than whip.
 
 Looks (`video.look`):
 

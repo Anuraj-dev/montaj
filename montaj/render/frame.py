@@ -47,9 +47,9 @@ from montaj.render.text import (
     raster_lines,
     raster_subs,
 )
-from montaj.render.transitions import fade, swirl, whip
+from montaj.render.transitions import dip, fade, glitch, push, swirl, whip, zoom
 from montaj.render.wall import build_wall, wall_camera, wall_frame
-from montaj.spec import _dur_frames
+from montaj.spec import AFTER_CUT, _dur_frames
 from montaj.timeline import Blank, Clip, Scene, Still, Timeline, Trans, Wall
 
 # film.html 155: an omitted morph centre is (cx ?? .5, cy ?? .45). The spec leaves it unset.
@@ -360,7 +360,7 @@ class Renderer:
     def _outgoing_frames(self, index: int) -> float:
         """Frames of this shot still visible after its hold, while the next transition plays.
 
-        A fade or swirl runs `dur` past the cut. A whip runs `dur / 2`. ClipSource clamps
+        A fade, swirl, glitch, zoom, dip or push runs `dur` past the cut. A whip runs `dur / 2`. ClipSource clamps
         an index past the frames ffmpeg actually returned.
         """
         nxt = index + 1
@@ -372,7 +372,7 @@ class Renderer:
         dur = self._frames(tr.dur)
         if tr.type == "whip":
             return dur / 2.0
-        if tr.type in ("fade", "swirl"):
+        if tr.type in AFTER_CUT:
             return dur
         return 0.0
 
@@ -581,6 +581,15 @@ class Renderer:
             return whip(self.cv, a, b, x, scene.axis)
         if scene.kind == "swirl":
             return swirl(self.cv, a, b, x, self._swirl_center(scene))
+        if scene.kind == "push":
+            return push(self.cv, a, b, x, scene.axis)
+        if scene.kind == "dip":
+            return dip(self.cv, a, b, x, scene.color)
+        if scene.kind == "zoom":
+            return zoom(self.cv, a, b, x, scene.strength)
+        if scene.kind == "glitch":
+            # Sub-frame samples share their integer frame's tear pattern.
+            return glitch(self.cv, a, b, x, scene.strength, scene.seed, math.floor(t + 0.5))
         raise ValueError(f"transition: unknown {scene.kind!r}")
 
     def _look(self):
