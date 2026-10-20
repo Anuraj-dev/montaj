@@ -190,6 +190,32 @@ class Morph(Frozen):
     center: tuple[float, float] | None = None
 
 
+def _as_sequence_item(v: object) -> object:
+    """A list entry is a photo stem, `#rrggbb`, or `{photo}` / `{color}`."""
+    if isinstance(v, bool):
+        return v
+    if isinstance(v, int):
+        return {"photo": str(v)}
+    if isinstance(v, str):
+        text = v.strip()
+        if not text:
+            raise ValueError("need a photo stem or #rrggbb")
+        if text.startswith("#"):
+            return {"color": text}
+        return {"photo": text}
+    return v
+
+
+class SequenceItem(Frozen):
+    photo: PhotoId | None = None
+    color: str | None = None
+
+
+class SequenceSpec(Frozen):
+    every: Annotated[str | int, BeforeValidator(_reject_bare_duration)]  # int only after resolve
+    items: list[Annotated[SequenceItem, BeforeValidator(_as_sequence_item)]]
+
+
 class Shot(Frozen):
     photo: PhotoId | None = None
     wall: WallSpec | None = None
@@ -206,6 +232,7 @@ class Shot(Frozen):
     morph: Morph | None = None
     pulse: str | None = None
     blank: bool = False
+    sequence: SequenceSpec | None = None
     in_: Transition | None = Field(default=None, alias="in")
     flash: float | None = None
 
@@ -608,6 +635,35 @@ def _collect_photos(data: object, assets_dir: Path, spec_dir: Path, errors: list
                             _require_photo(
                                 assets_dir, pid, f"shots[{i}].wall.prints[{j}].photo", errors, find_photo
                             )
+        seq = shot.get("sequence")
+        if isinstance(seq, dict):
+            items = seq.get("items")
+            if isinstance(items, list):
+                for j, item in enumerate(items):
+                    found = _sequence_photo_id(item)
+                    if found is not None:
+                        pid, suffix = found
+                        _require_photo(
+                            assets_dir, pid, f"shots[{i}].sequence.items[{j}]{suffix}", errors, find_photo
+                        )
+
+
+def _sequence_photo_id(item: object) -> tuple[str, str] | None:
+    """`(photo id, path suffix)` for one raw sequence entry, or None for a colour."""
+    if isinstance(item, bool):
+        return None
+    if isinstance(item, int):
+        return str(item), ""
+    if isinstance(item, str):
+        text = item.strip()
+        if not text or text.startswith("#"):
+            return None
+        return text, ""
+    if isinstance(item, dict) and item.get("photo") is not None:
+        pid = _photo_id(item["photo"])
+        if isinstance(pid, str):
+            return pid, ".photo"
+    return None
 
 
 def _require_photo(assets_dir: Path, pid: str, path: str, errors: list[str], find_photo) -> None:
@@ -981,6 +1037,46 @@ def _check_ease(path: str, ease: str, errors: list[str]) -> None:
         errors.append(_line(path, f"unknown {ease!r}", EASE_HINT))
 
 
+def _validate_sequence(
+    seq: SequenceSpec,
+    i: int,
+    fps: int,
+    bpm: float | None,
+    parsed: dict[str, int],
+    errors: list[str],
+) -> None:
+    path = f"shots[{i}].sequence.every"
+    raw = seq.every
+    if isinstance(raw, str):
+        matched = _DUR.match(raw.strip())
+        if matched and matched.group(2) == "b":
+            errors.append(_line(path, "beats are not allowed", "use 12f or 0.4s"))
+        else:
+            n = parse_dur(raw, fps, bpm, path, errors)
+            if n is not None and n < 1:
+                errors.append(_line(path, f"must be at least 1 frame, got {n}f", "use 1f or longer"))
+            elif n is not None:
+                parsed[path] = n
+    elif isinstance(raw, int) and not isinstance(raw, bool):
+        if raw < 1:
+            errors.append(_line(path, f"must be at least 1 frame, got {raw}f", "use 1f or longer"))
+        else:
+            parsed[path] = raw
+    items_path = f"shots[{i}].sequence.items"
+    if len(seq.items) < 2:
+        errors.append(_line(items_path, "need at least two items", "add a photo or #rrggbb"))
+    for j, item in enumerate(seq.items):
+        ip = f"{items_path}[{j}]"
+        has_photo = item.photo is not None
+        has_color = item.color is not None
+        if has_photo and has_color:
+            errors.append(_line(ip, "photo and color are mutually exclusive", "set one"))
+        elif not has_photo and not has_color:
+            errors.append(_line(ip, "need a photo or #rrggbb", "set photo: or color:"))
+        if has_color and (not isinstance(item.color, str) or not _HEX.match(item.color)):
+            errors.append(_line(f"{ip}.color", f"unknown colour {item.color!r}", "use #rrggbb"))
+
+
 def validate_spec(
     spec: Spec, errors: list[str], spec_dir: Path | None = None
 ) -> tuple[dict[str, int], dict[str, float], dict[str, float], float | None, float]:
@@ -1082,19 +1178,29 @@ def validate_spec(
         has_w = sh.wall is not None
         has_c = sh.clip is not None
         has_b = sh.blank
-        n_src = has_p + has_w + has_c + has_b
+        has_s = sh.sequence is not None
+        n_src = has_p + has_w + has_c + has_b + has_s
         if n_src > 1:
             errors.append(
-                _line(f"shots[{i}]", "photo, wall, clip and blank are mutually exclusive", "remove extra")
+                _line(
+                    f"shots[{i}]",
+                    "photo, wall, clip, blank and sequence are mutually exclusive",
+                    "remove extra",
+                )
             )
         elif n_src == 0:
-            errors.append(_line(f"shots[{i}]", "need photo, wall, clip or blank", "add one"))
+            errors.append(_line(f"shots[{i}]", "need photo, wall, clip, blank or sequence", "add one"))
         if not has_p:
             for name in ("drift", "frame", "morph", "tone", "pulse"):
                 if getattr(sh, name) is not None:
                     errors.append(_line(f"shots[{i}].{name}", f"{name} needs photo", "add photo:"))
         if sh.clip_in is not None and not has_c:
             errors.append(_line(f"shots[{i}].clip_in", "clip_in needs clip", "add clip:"))
+        if sh.sequence is not None:
+            _validate_sequence(sh.sequence, i, fps, bpm, parsed, errors)
+            for name in ("crop", "focus", "zoom"):
+                if getattr(sh, name) is not None:
+                    errors.append(_line(f"shots[{i}].{name}", "not used on a sequence", "remove it"))
         if sh.zoom is not None and sh.drift is not None:
             errors.append(_line(f"shots[{i}]", "zoom and drift are mutually exclusive", "remove one"))
         if sh.pulse is not None:

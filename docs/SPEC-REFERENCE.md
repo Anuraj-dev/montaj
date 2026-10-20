@@ -17,8 +17,8 @@ Photo fields (`crop`, `focus`, swirl `center`, wall `at`) are source-image pixel
 - `video.motion_blur` — integer, default `1` — sub-frames averaged into each frame. `1` is off. Preview uses at most 2. Text and subtitles are composited once at the integer frame, after that average.
 - `assets` — string, default `assets` — photo folder relative to the spec file. A photo is the file stem (`jpg`, `jpeg`, `png` or `webp`).
 - `shots` — list, required — played in order. Each shot starts when the previous one ends.
-- `shots[].photo` — string, photo or wall or clip — stem of the still. An integer in the YAML is read as a string. Mutually exclusive with `wall` and `clip`.
-- `shots[].clip` — string, photo or wall or clip — stem of a video file in `assets/` (`mp4`, `mov`, `webm`, `mkv`). Mutually exclusive with `photo` and `wall`.
+- `shots[].photo` — string, photo or wall or clip or sequence — stem of the still. An integer in the YAML is read as a string. Mutually exclusive with `wall`, `clip` and `sequence`.
+- `shots[].clip` — string, photo or wall or clip or sequence — stem of a video file in `assets/` (`mp4`, `mov`, `webm`, `mkv`). Mutually exclusive with `photo`, `wall` and `sequence`.
 - `shots[].clip_in` — duration, default `0s` — source offset into the clip.
 - `shots[].hold` — duration, hold or until — how long this shot is on screen. Exactly one of `hold` or `until`. A whole-beat hold (`4b`) ends on a beat of the grid (moving forward if the shot started off-beat), and beat holds never drift from rounding.
 - `shots[].until` — time expression, hold or until — the shot ends at this time from film start. Must fall after the shot's start.
@@ -38,7 +38,10 @@ Photo fields (`crop`, `focus`, swirl `center`, wall `at`) are source-image pixel
 - `shots[].morph.dur` — duration, required with morph — how long the circle takes to open.
 - `shots[].morph.center` — `[x, y]`, default none — screen fraction where the circle is centred.
 - `shots[].pulse` — `heartbeat`, default none — beat-locked scale pulse on the grid tempo, phased from the shot start. Needs `photo` and a grid (`video.bpm` or `audio.markers`).
-- `shots[].blank` — boolean, default false — show only `video.background`. Mutually exclusive with `photo`, `wall` and `clip`. Holds and fades like any other shot.
+- `shots[].blank` — boolean, default false — show only `video.background`. Mutually exclusive with `photo`, `wall`, `clip` and `sequence`. Holds and fades like any other shot.
+- `shots[].sequence` — mapping, photo or wall or clip or blank or sequence — cycle photos or colours across this shot. Mutually exclusive with `photo`, `wall`, `clip` and `blank`.
+- `shots[].sequence.every` — duration (`f` or `s`), required — how long each item stays. Rounds to a whole frame of at least 1. Beats are an error.
+- `shots[].sequence.items` — list, required — at least two. A photo stem, a quoted `#rrggbb`, `{photo: stem}` or `{color: "#rrggbb"}`. The list repeats until the shot ends.
 - `shots[].crop` — `[x0, y0, x1, y1]`, default the full image — the part of the photo that is shown.
 - `shots[].focus` — `[x, y]`, default the crop centre — the photo point placed at the screen centre.
 - `shots[].zoom` — number, default cover — design pixels per photo pixel. Cover fits the crop with a hair of overscan.
@@ -49,7 +52,7 @@ Photo fields (`crop`, `focus`, swirl `center`, wall `at`) are source-image pixel
 - `shots[].in.axis` — `x` or `y`, default `x` — which way a whip travels.
 - `shots[].in.blur` — number, default `0` — design-px blur on fading layers. Shot 0 may use `fade` (from `video.background`); other transitions on shot 0 stay an error.
 - `shots[].flash` — number, default none — white flash on this shot's first frame, fading out over the next 6 frames.
-- `shots[].wall` — mapping, photo or wall — a flat field of prints. The camera only pans and zooms. Mutually exclusive with `photo`.
+- `shots[].wall` — mapping, photo or wall or sequence — a flat field of prints. The camera only pans and zooms. Mutually exclusive with `photo` and `sequence`.
 - `wall.grid` — `WxH` string, required — distance between print cells, in world design pixels.
 - `wall.seed` — integer, required — seed for the jitter. Random draws happen in `prints` list order.
 - `wall.jitter` — number, required — a non-straight print shifts by up to this many pixels in x, then in y.

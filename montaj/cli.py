@@ -27,7 +27,7 @@ from montaj.review.server import serve as serve_review
 from montaj.review.summary import summary as review_summary
 from montaj.sheet import MAX_TILES, pick_times, sheet
 from montaj.spec import SpecError, _dur_frames, load_spec
-from montaj.timeline import Blank, Still, Wall, resolve, wall_static_spans
+from montaj.timeline import Blank, Sequence, Still, Wall, resolve, sequence_index, wall_static_spans
 from montaj.watch import watch
 
 RECIPES = Path(__file__).resolve().parents[1] / "recipes"
@@ -335,8 +335,8 @@ def _morph_moving(sh, f: int, fps: float, bpm: float | None) -> bool:
 
 def _intended_freeze(root: Path) -> list[tuple[float, float]]:
     """Time spans whose picture is designed not to move: static stills, blank holds,
-    and wall frames where both camera tracks hold. A freeze of a drifting, pulsing or tilting
-    shot, of a morph mid-reveal, or inside a transition is a defect."""
+    sequence steps, and wall frames where both camera tracks hold. A freeze of a drifting,
+    pulsing or tilting shot, of a morph mid-reveal, or inside a transition is a defect."""
     spec_file = root / "montaj.yaml"
     if not spec_file.is_file():
         return []
@@ -358,6 +358,8 @@ def _intended_freeze(root: Path) -> list[tuple[float, float]]:
             sh = tl.shots[scene.shot]
             intended = _static_still(sh.spec) and not _morph_moving(sh, f, fps, tl.spec.video.bpm)
         elif isinstance(scene, Blank):
+            intended = True
+        elif isinstance(scene, Sequence):
             intended = True
         else:
             intended = isinstance(scene, Wall) and wall_hold(f)
@@ -394,11 +396,34 @@ def _is_dark(color: str) -> bool:
     return (0.299 * r + 0.587 * g + 0.114 * b) < BLACK_PIX_TH
 
 
+def _sequence_dark_spans(tl, fps: float) -> list[tuple[float, float]]:
+    """Each dark colour step of a sequence, on the shot clock. Photos are not included."""
+    spans: list[tuple[float, float]] = []
+    for sh in tl.shots:
+        seq = sh.spec.sequence
+        if seq is None or isinstance(seq.every, bool) or not isinstance(seq.every, int):
+            continue
+        if seq.every < 1 or not seq.items:
+            continue
+        step = 0
+        while True:
+            lo = sh.start + step * seq.every
+            if lo >= sh.end:
+                break
+            hi = min(sh.end, lo + seq.every)
+            item = seq.items[sequence_index(sh.start, seq.every, len(seq.items), lo)]
+            if item.color is not None and _is_dark(item.color):
+                spans.append((lo / fps, hi / fps))
+            step += 1
+    return spans
+
+
 def _intended_black(root: Path) -> list[tuple[float, float]]:
     """Dark windows blackdetect should not call a defect.
 
     Shot 0's fade from a dark `video.background`, a blank on that background
-    (hold plus its in/out transitions), and the outro fade to black.
+    (hold plus its in/out transitions), a sequence step on a dark colour,
+    and the outro fade to black.
     """
     spec_file = root / "montaj.yaml"
     if not spec_file.is_file():
@@ -432,6 +457,7 @@ def _intended_black(root: Path) -> list[tuple[float, float]]:
                     elif outgoing.type in ("fade", "swirl"):
                         after = nd
             spans.append((max(0.0, (sh.start - before) / fps), (sh.end + after) / fps))
+    spans.extend(_sequence_dark_spans(tl, fps))
     if tl.n_frames:
         fade = tl.plan(tl.n_frames - 1).fade_out
         if fade is not None:

@@ -50,7 +50,7 @@ from montaj.render.text import (
 from montaj.render.transitions import fade, swirl, whip
 from montaj.render.wall import build_wall, wall_camera, wall_frame
 from montaj.spec import _dur_frames
-from montaj.timeline import Blank, Clip, Scene, Still, Timeline, Trans, Wall
+from montaj.timeline import Blank, Clip, Scene, Sequence, Still, Timeline, Trans, Wall, sequence_index
 
 # film.html 155: an omitted morph centre is (cx ?? .5, cy ?? .45). The spec leaves it unset.
 _MORPH_CENTER = (0.5, 0.45)
@@ -350,6 +350,26 @@ class Renderer:
         # Each eval gets its own tensor so an in-place grade cannot tint the next blank.
         return self._bg.clone()
 
+    def _solid(self, color: str) -> torch.Tensor:
+        col = torch.tensor(_rgb(color), device=self.cv.device, dtype=torch.float32)
+        return col[:, None, None].expand(3, self.cv.H, self.cv.W).contiguous()
+
+    def _sequence_frame(self, scene: Sequence, t: float) -> torch.Tensor:
+        shot = self.tl.shots[scene.shot]
+        seq = shot.spec.sequence
+        if seq is None or not seq.items:
+            raise ValueError(f"shot {scene.shot} is not a sequence")
+        every = seq.every
+        if isinstance(every, bool) or not isinstance(every, int):
+            raise ValueError(f"shot {scene.shot} sequence.every is not resolved")
+        item = seq.items[sequence_index(shot.start, every, len(seq.items), t)]
+        self._shot = scene.shot
+        if item.color is not None:
+            return self._solid(item.color)
+        if item.photo is None:
+            raise ValueError(f"shot {scene.shot} sequence item has no photo or color")
+        return still(self.cv, self._photo(item.photo, None, False))
+
     def _clip_source(self, stem: str) -> ClipSource:
         hit = self._clips.get(stem)
         if hit is None:
@@ -562,6 +582,8 @@ class Renderer:
             if not _m2(sh):
                 return self._still_image(scene.shot)
             return self._m2_still(scene.shot, scene.span, t)
+        if isinstance(scene, Sequence):
+            return self._sequence_frame(scene, t)
         if isinstance(scene, Clip):
             return self._clip_frame(scene, t)
         if isinstance(scene, Wall):
