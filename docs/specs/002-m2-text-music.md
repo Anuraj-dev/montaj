@@ -96,6 +96,10 @@ Rules and fields:
   `0.9s`), `rise` (design px, default 26), `reveal` (`rise` | `pop`, default `rise`),
   `sweep` (`[from, to]` time expressions; gold gradient travels 100%→0% across it; default the block window),
   `shadow` (bool; default true — false = no text shadow, film.html's ink lines).
+- `text[].backdrop` — optional scrim behind the block, not a line (see SPEC-REFERENCE). `true`, `gradient`
+  or `solid` uses the defaults; a mapping sets `type` (`gradient`|`solid`), `strength` (0..1, default 0.8)
+  and `place` (`band`|`bottom`|`top`, default `band`). The compositor paints it (no image asset). It fades
+  and blurs with the block. Omitted, it stays out of `model_dump`, so the segment hash is unchanged.
 - Every new field gets one line in `docs/SPEC-REFERENCE.md`.
 
 ## Text styles (montaj/render/text.css; film.html lines 24–35)
@@ -161,6 +165,8 @@ Fade with `blur`: each side is blurred σ = (1 − its opacity)·blur while it f
 ## Clips (montaj/render/clip.py)
 `ClipSource(path, fps)` decodes with ffmpeg (`-ss clip_in -i path -vf fps=<fps>,scale=…:force_original_aspect_ratio=increase,crop=W:H -f rawvideo rgb24`) into
 CPU frames lazily per shot; frame for timeline `t` = `floor(t − shot.start)` clamped to the clip length.
+The decoded window is the hold plus the outgoing fade or swirl (half a whip). Past the file, that index
+clamps to the last decoded frame. `montaj check` warns, naming the shot and how far the window overruns.
 Framing: cover, centred (focus/crop/drift not supported on clips in M2).
 
 `shots[].range` is `[start, end]` durations into that file. It is the shot: length is `end − start`, source
