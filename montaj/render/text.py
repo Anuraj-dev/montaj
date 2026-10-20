@@ -54,8 +54,9 @@ _STOPS = (
     (1.00, (0xA8 / 255, 0x6D / 255, 0x2C / 255)),
 )
 _NAMED = {"cream": "#fbf1dc", "gold": "#f0c77e", "ink": "#4a2c1a"}
-_SIZE = {"serif": 84.0, "script": 84.0, "caps": 26.0, "deva": 62.0}
-_SHADOW_R = {"serif": 30.0, "script": 40.0, "caps": 16.0, "deva": 24.0}
+_SIZE = {"serif": 84.0, "script": 84.0, "caps": 26.0, "deva": 62.0, "sans": 48.0, "mono": 32.0}
+_SHADOW_R = {"serif": 30.0, "script": 40.0, "caps": 16.0, "deva": 24.0, "sans": 16.0, "mono": 16.0}
+_BLINK = 0.53  # typewriter cursor half-period, seconds
 
 # Faces the page actually uses. A failed load must reject: swallowing it lets a fallback
 # face paint real pixels, pass the nonblank check, and get cached as the requested font.
@@ -113,12 +114,25 @@ class TextLine:
     sweep: tuple[float, float] | None = None
     shadow: bool = True
     indent: float = 0.0
+    align: str = "center"
+    box: str = "none"
+    box_color: str | None = None
+    dot: str | None = None
+    cursor: bool = False
 
     def __post_init__(self) -> None:
         if self.by not in ("word", "char"):
             raise ValueError(f"by must be 'word' or 'char', got {self.by!r}")
-        if self.reveal not in ("rise", "pop"):
-            raise ValueError(f"reveal must be 'rise' or 'pop', got {self.reveal!r}")
+        if self.reveal not in ("rise", "pop", "type"):
+            raise ValueError(f"reveal must be 'rise', 'pop' or 'type', got {self.reveal!r}")
+        if self.box not in ("none", "chip"):
+            raise ValueError(f"box must be 'none' or 'chip', got {self.box!r}")
+        if self.align not in ("center", "left", "right"):
+            raise ValueError(f"align must be 'center', 'left' or 'right', got {self.align!r}")
+        if self.reveal == "type":
+            # Typewriter: one char per stagger, no rise, each char instant (see _timing).
+            object.__setattr__(self, "by", "char")
+            object.__setattr__(self, "rise", 0.0)
         if self.sweep is not None and not isinstance(self.sweep, tuple):
             object.__setattr__(self, "sweep", (float(self.sweep[0]), float(self.sweep[1])))
 
@@ -172,6 +186,8 @@ class RasterLine:
     line_shadow_box: tuple[float, float, float, float] | None
     scale: float
     gold: bool
+    chip: torch.Tensor | None = None
+    chip_box: tuple[float, float, float, float] | None = None
 
 
 @dataclass(frozen=True)
@@ -216,6 +232,8 @@ def _pad(line: TextLine) -> int:
 def line_markup(line: TextLine, *, bp: str | None = None, idx: int = 0) -> str:
     """One `.txt` line in film.html's class vocabulary. `bp` is reference-only (`--bp`)."""
     classes = ["txt", line.style]
+    if line.align != "center":
+        classes.append(f"al-{line.align}")
     if line.italic and line.style == "serif":
         classes.append("it")
     if line.gold:
@@ -242,6 +260,15 @@ def line_markup(line: TextLine, *, bp: str | None = None, idx: int = 0) -> str:
         f'<span class="w" id="u{i}">{html.escape(tok)}</span>'
         for i, tok in enumerate(_split(line.text, line.by))
     )
+    if line.box == "chip":
+        cs = []
+        if line.box_color:
+            cs.append(f"--chip:{_NAMED.get(line.box_color, line.box_color)}")
+        dot = ""
+        if line.dot:
+            dot = f'<i class="dot" style="--dot:{_NAMED.get(line.dot, line.dot)}"></i>'
+        attr = f' style="{";".join(cs)}"' if cs else ""
+        spans = f'<span class="chip"{attr}>{dot}{spans}</span>'
     return f'<div class="{" ".join(classes)}" id="L{idx}" style="{";".join(style)}">{spans}</div>'
 
 
@@ -560,11 +587,14 @@ def _measure(br: _Browser) -> list[dict]:
       const els = [...document.querySelectorAll('#stage .txt, #stage .sub, #stage .cap')];
       return els.map(el => {
         const r = el.getBoundingClientRect();
-        const units = [...el.querySelectorAll(':scope > .w')].map(u => {
+        const c = el.querySelector(':scope > .chip');
+        const cb = c ? c.getBoundingClientRect() : null;
+        const units = [...el.querySelectorAll('.w')].map(u => {
           const b = u.getBoundingClientRect();
           return {x: b.x, y: b.y, w: b.width, h: b.height, t: u.textContent};
         });
-        return {x: r.x, y: r.y, w: r.width, h: r.height, units};
+        return {x: r.x, y: r.y, w: r.width, h: r.height, units,
+                chip: cb ? {x: cb.x, y: cb.y, w: cb.width, h: cb.height} : null};
       });
     })()""") or []
 
@@ -616,17 +646,19 @@ def _shift_box(box: tuple[float, float, float, float], shift: int) -> tuple[floa
     return (box[0], box[1] - shift + 6, box[2], box[3])
 
 
-_FILL_CSS = """
+_CHIP_OFF = ".chip{background:none !important;border-color:transparent !important;box-shadow:none !important;}.dot{visibility:hidden !important;}"
+_CHIP_ONLY = ".txt,.gold{text-shadow:none !important;filter:none !important;}#L0 .w{visibility:hidden;}"
+_FILL_CSS = _CHIP_OFF + """
 .txt,.gold{text-shadow:none !important;filter:none !important;}
 #L0 .w{visibility:hidden;}
 #L0 #u%d{visibility:visible !important;text-shadow:none !important;filter:none !important;}
 """
-_SHADOW_CSS = """
+_SHADOW_CSS = _CHIP_OFF + """
 .txt,.gold{filter:none !important;}
 #L0 .w{visibility:hidden;}
 #L0 #u%d{visibility:visible !important;color:transparent !important;-webkit-text-fill-color:transparent !important;}
 """
-_COVER_CSS = """
+_COVER_CSS = _CHIP_OFF + """
 .txt,.gold{filter:none !important;text-shadow:none !important;}
 #L0 .w{visibility:hidden;}
 #L0 #u%d{visibility:visible !important;background-image:linear-gradient(#fff,#fff) !important;
@@ -639,7 +671,8 @@ def _drop_css(shift: int, only: int | None) -> str:
     hide = "" if only is None else "#L0 .w{visibility:hidden;} #L0 #u%d{visibility:visible !important;}" % only
     return (
         f"#L0.gold{{filter:drop-shadow(0 {shift}px 30px rgba(0,0,0,.55)) !important;}}"
-        "#L0 .w{background:none !important;-webkit-background-clip:border-box !important;"
+        + _CHIP_OFF
+        + "#L0 .w{background:none !important;-webkit-background-clip:border-box !important;"
         "background-clip:border-box !important;-webkit-text-fill-color:#000 !important;"
         "color:#000 !important;text-shadow:none !important;}"
         + hide
@@ -703,8 +736,18 @@ def _raster_one(br: _Browser, line: TextLine, scale: float, dest: Path) -> Raste
         line_shadow_box = _shift_box(sbox, shift)
         line_shadow_name = "line_shadow.png"
         files[line_shadow_name] = spng
+    chip_name = None
+    chip_box = None
+    if line.box == "chip" and host.get("chip"):
+        c = host["chip"]
+        br.set_mode(_CHIP_ONLY)
+        _csp, cbox, cpng = _grab(br, _clip(c["x"], c["y"], c["w"], c["h"], 40))
+        chip_box = cbox
+        chip_name = "chip.png"
+        files[chip_name] = cpng
     line_box = (host["x"] - OX, host["y"] - OY, host["w"], host["h"])
     meta = {
+        "chip": chip_name, "chip_box": _box_list(chip_box),
         "rev": _REV, "kind": "line", "scale": scale, "gold": line.gold,
         "line_box": _box_list(line_box), "line_shadow": line_shadow_name,
         "line_shadow_box": _box_list(line_shadow_box), "units": units_meta,
@@ -754,6 +797,7 @@ def _load_line(dest: Path) -> RasterLine | None:
             line_shadow=_load_png(dest, meta.get("line_shadow")),
             line_shadow_box=_as_box(meta.get("line_shadow_box")),
             scale=float(meta["scale"]), gold=bool(meta["gold"]),
+            chip=_load_png(dest, meta.get("chip")), chip_box=_as_box(meta.get("chip_box")),
         )
     except (OSError, KeyError, json.JSONDecodeError, TypeError):
         return None
@@ -909,8 +953,9 @@ def _vis(t: float, block: TextBlock, fps: float) -> float:
 
 
 def _timing(line: TextLine, fps: float) -> tuple[float, float]:
-    stagger = line.stagger if line.stagger is not None else (0.07 if line.by == "char" else 0.16) * fps
-    dur = line.dur if line.dur is not None else 0.9 * fps
+    typed = line.reveal == "type"
+    stagger = line.stagger if line.stagger is not None else (0.05 if typed else 0.07 if line.by == "char" else 0.16) * fps
+    dur = line.dur if line.dur is not None else 0.0 if typed else 0.9 * fps
     return stagger, dur
 
 
@@ -1128,6 +1173,9 @@ def _paint_gold(dst: torch.Tensor, cv, block: TextBlock, line: TextLine, raster:
 
 def _paint(dst: torch.Tensor, cv, block: TextBlock, line: TextLine, raster: RasterLine,
            t: float, fps: float, ks: list[float]) -> None:
+    if raster.chip is not None and ks and ks[0] > 1e-4:
+        k0 = ks[0]
+        _blit(dst, cv.k, raster.chip, raster.chip_box, (1 - k0) * 12 * cv.k, k0, (1 - k0) * line.rise * cv.k)
     if line.gold:
         _paint_gold(dst, cv, block, line, raster, t, ks)
         return
@@ -1162,7 +1210,41 @@ def _paint_line(dst: torch.Tensor, cv, block: TextBlock, line: TextLine, raster:
             layer = _scale_about(layer, cx, cy, scale)
         _stamp(dst, layer * pop, 0, 0)
         return
-    _paint(dst, cv, block, line, raster, t, fps, _unit_ks(line, n, t, fps))
+    ks = _unit_ks(line, n, t, fps)
+    _paint(dst, cv, block, line, raster, t, fps, ks)
+    if line.cursor and line.reveal == "type":
+        _paint_cursor(dst, cv, line, raster, t, fps, ks)
+
+
+def _rgb(color: str | None) -> tuple[float, float, float]:
+    hexs = _NAMED.get(color or "cream", color or "#fbf1dc").lstrip("#")
+    return tuple(int(hexs[i:i + 2], 16) / 255.0 for i in (0, 2, 4))
+
+
+def _cursor_on(line: TextLine, n: int, t: float, fps: float) -> bool:
+    """Solid while typing, then it blinks. Hidden before the line starts."""
+    if t < line.at:
+        return False
+    stagger, _dur = _timing(line, fps)
+    typing = line.at + n * stagger
+    if t < typing:
+        return True
+    return int((t - typing) / (_BLINK * fps)) % 2 == 0
+
+
+def _paint_cursor(dst: torch.Tensor, cv, line: TextLine, raster: RasterLine, t: float,
+                  fps: float, ks: list[float]) -> None:
+    units = raster.units
+    if not units or not _cursor_on(line, len(units), t, fps):
+        return
+    done = sum(1 for k in ks if k > 0.5)
+    lx, ly, lw, lh = units[done - 1].layout if done else units[0].layout
+    x = lx + lw + 0.08 * lh if done else lx
+    w, h = max(1.5, 0.07 * lh), 0.85 * lh
+    r, g, b = _rgb(line.color)
+    wp, hp = max(1, round(w * cv.k)), max(1, round(h * cv.k))
+    sprite = torch.tensor([r, g, b, 1.0], dtype=dst.dtype, device=dst.device).view(4, 1, 1).expand(4, hp, wp).contiguous()
+    _blit(dst, cv.k, sprite, (x, ly + 0.075 * lh, w, h), 0.0, 1.0, 0.0)
 
 
 def _rasters_of(rasters) -> tuple[tuple[RasterLine, ...], tuple[RasterImage, ...]]:

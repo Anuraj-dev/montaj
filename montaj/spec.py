@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Annotated
 
 import yaml
-from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, ValidationError, WrapSerializer
+from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, ValidationError, WrapSerializer, model_validator
 
 EASE = ("linear", "smooth", "cubic", "outc", "inc", "expo", "ramp", "sine")
 EASE_HINT = "use linear, smooth, cubic, outc, inc, expo, ramp or sine"
@@ -17,9 +17,14 @@ TRANS_TYPES = ("cut", "fade", "swirl", "whip")
 LOOK_NAMES = ("warm-film", "golden-film")
 INTRO_TYPES = ("white-lift",)
 OUTRO_TYPES = ("glow", "fade")
-TEXT_STYLES = ("serif", "script", "caps", "deva")
+TEXT_STYLES = ("serif", "script", "caps", "deva", "sans", "mono")
 TEXT_BY = ("word", "char")
-TEXT_REVEAL = ("rise", "pop")
+TEXT_REVEAL = ("rise", "pop", "type")
+TEXT_BOX = ("none", "chip")
+TEXT_ALIGN = ("center", "left", "right")
+TEXT_SIDES = ("left", "right")
+# Weights that ship as font files; a missing weight would silently fall back to the nearest.
+TEXT_WEIGHTS = {"sans": (400, 600, 700), "mono": (400, 700)}
 TEXT_COLORS = ("cream", "gold", "ink")
 _DUR = re.compile(r"^([+-]?(?:\d+(?:\.\d*)?|\.\d+))([fbs])$")
 _BARE = re.compile(r"^[+-]?(?:\d+(?:\.\d*)?|\.\d+)$")
@@ -230,6 +235,42 @@ class TextLine(Frozen):
     sweep: tuple[TimeExpr, TimeExpr] | None = None
     shadow: bool = True
     indent: float = 0.0
+    align: str = "center"
+    box: str = "none"
+    box_color: str | None = None
+    dot: str | None = None
+    cursor: bool = False
+
+
+class LowerThird(Frozen):
+    title: str
+    subtitle: str | None = None
+    at: TimeExpr | None = None
+    side: str = "left"
+    y: float = 1500.0
+
+
+def _expand_lower_third(data: object) -> object:
+    """`lower_third` is sugar: it becomes a title chip and a subtitle line before anything else sees it."""
+    if not isinstance(data, dict) or data.get("lower_third") is None:
+        return data
+    data = dict(data)
+    raw = data.pop("lower_third")
+    lt = LowerThird.model_validate(raw)
+    if lt.side not in TEXT_SIDES:
+        raise ValueError(f"lower_third.side unknown {lt.side!r}; use {_choices(TEXT_SIDES)}")
+    if data.get("lines"):
+        raise ValueError("lower_third replaces lines; use one or the other")
+    at = lt.at if lt.at is not None else data.get("from")
+    lines = [{"text": lt.title, "style": "sans", "weight": 700, "size": 54, "y": lt.y, "at": at,
+              "align": lt.side, "box": "chip", "dot": "gold"}]
+    if lt.subtitle:
+        lines.append({"text": lt.subtitle, "style": "sans", "size": 32, "y": lt.y + 110, "at": at,
+                      "align": lt.side, "color": "cream"})
+    data["lines"] = lines
+    data.setdefault("fade_in", "0.4s")
+    data.setdefault("fade_out", "0.4s")
+    return data
 
 
 class TextBlock(Frozen):
@@ -239,6 +280,11 @@ class TextBlock(Frozen):
     fade_out: DurationStr | None = None
     blur: float = 10.0
     lines: list[TextLine]
+
+    @model_validator(mode="before")
+    @classmethod
+    def _lt(cls, data: object) -> object:
+        return _expand_lower_third(data)
 
 
 class Sub(Frozen):
@@ -1265,13 +1311,27 @@ def _validate_text(
         for j, line in enumerate(block.lines):
             p = f"text[{i}].lines[{j}]"
             if line.style not in TEXT_STYLES:
-                errors.append(_line(f"{p}.style", f"unknown {line.style!r}", "use serif, script, caps or deva"))
+                errors.append(_line(f"{p}.style", f"unknown {line.style!r}", f"use {', '.join(TEXT_STYLES[:-1])} or {TEXT_STYLES[-1]}"))
             if line.italic and line.style != "serif":
                 errors.append(_line(f"{p}.italic", "italic is serif-only", "set style: serif"))
             if line.by not in TEXT_BY:
                 errors.append(_line(f"{p}.by", f"unknown {line.by!r}", "use word or char"))
             if line.reveal not in TEXT_REVEAL:
-                errors.append(_line(f"{p}.reveal", f"unknown {line.reveal!r}", "use rise or pop"))
+                errors.append(_line(f"{p}.reveal", f"unknown {line.reveal!r}", "use rise, pop or type"))
+            if line.box not in TEXT_BOX:
+                errors.append(_line(f"{p}.box", f"unknown {line.box!r}", "use none or chip"))
+            if line.align not in TEXT_ALIGN:
+                errors.append(_line(f"{p}.align", f"unknown {line.align!r}", "use center, left or right"))
+            if line.box != "chip" and (line.dot is not None or line.box_color is not None):
+                errors.append(_line(f"{p}.box", "dot and box_color need a box", "set box: chip"))
+            if line.cursor and line.reveal != "type":
+                errors.append(_line(f"{p}.cursor", "cursor needs the typewriter reveal", "set reveal: type"))
+            allowed = TEXT_WEIGHTS.get(line.style)
+            if allowed and line.weight is not None and line.weight not in allowed:
+                errors.append(_line(f"{p}.weight", f"{line.style} has no weight {_fmt_num(line.weight)}",
+                                    f"use {', '.join(str(w) for w in allowed)}"))
+            _check_color(f"{p}.dot", line.dot, errors)
+            _check_color(f"{p}.box_color", line.box_color, errors)
             _check_color(f"{p}.color", line.color, errors)
             val = _parse_time(line.at, markers, fps, bpm, f"{p}.at", errors, beat0=beat0)
             if val is not None:

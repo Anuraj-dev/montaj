@@ -508,6 +508,7 @@ class Renderer:
             color=ln.color, size=ln.size, weight=weight, tracking=ln.tracking,
             line_height=ln.line_height, by=ln.by, stagger=ln.stagger, dur=ln.dur, rise=ln.rise,
             reveal=ln.reveal, sweep=ln.sweep, shadow=ln.shadow, indent=ln.indent,
+            align=ln.align, box=ln.box, box_color=ln.box_color, dot=ln.dot, cursor=ln.cursor,
         )
 
     def _ensure_rasters(self) -> None:
