@@ -1179,12 +1179,26 @@ def _check_clip_range(
     except EncodeError:
         errors.append(_line(f"shots[{i}].clip", f"cannot read {sh.clip!r}", "file is not a video"))
         return
+    # probe() falls back to the container duration, so an audio-only file needs its own check.
+    if info.width <= 0 or info.height <= 0:
+        errors.append(_line(f"shots[{i}].clip", f"{sh.clip!r} has no video stream", "file is not a video"))
+        return
     if info.duration <= 0:
         errors.append(
             _line(f"shots[{i}].clip", f"cannot read duration of {sh.clip!r}", "file is not a video")
         )
         return
     bag: list[str] = []
+    start_f = _dur_frames(sh.range[0], spec.video.fps, bpm, f"shots[{i}].range[0]", bag)
+    if start_f is not None and start_f / spec.video.fps >= info.duration - 1e-6:
+        errors.append(
+            _line(
+                f"shots[{i}].range",
+                f"starts at {sh.range[0]}, clip is {info.duration:.3f}s",
+                "start inside the clip",
+            )
+        )
+        return
     end_f = _dur_frames(sh.range[1], spec.video.fps, bpm, f"shots[{i}].range[1]", bag)
     if end_f is None:
         return

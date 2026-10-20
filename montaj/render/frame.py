@@ -247,7 +247,8 @@ class Renderer:
         sh = shot.spec
         if not sh.clip:
             return None
-        extra = self._outgoing_frames(index)
+        # A range stops at its end: the outgoing fade holds the last frame instead of reading on.
+        extra = 0.0 if sh.range is not None else self._outgoing_frames(index)
         nframes = clip_read_frames(shot.end - shot.start, extra)
         return sh.clip, self._clip_in_seconds(sh), nframes
 

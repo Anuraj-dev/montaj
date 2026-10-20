@@ -98,3 +98,46 @@ def test_bad_range_is_rejected(tmp_path: Path, shot: dict, needle: str) -> None:
     with pytest.raises(SpecError) as exc:
         load_spec(p)
     assert needle in str(exc.value)
+
+
+def test_start_at_or_past_source_end_is_rejected(tmp_path: Path) -> None:
+    _video(tmp_path / "a.mp4", seconds=4)
+    p = _film(tmp_path, {"clip": "a.mp4", "range": ["4s", "4.033s"]}, with_assets=True)
+    with pytest.raises(SpecError) as exc:
+        load_spec(p)
+    assert "starts at 4s" in str(exc.value)
+
+
+def test_audio_only_file_is_not_a_clip(tmp_path: Path) -> None:
+    subprocess.run(
+        ["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", "sine=frequency=440:duration=3",
+         "-c:a", "aac", str(tmp_path / "a.mp4")],
+        check=True,
+    )
+    p = _film(tmp_path, {"clip": "a.mp4", "range": ["0s", "1s"]}, with_assets=True)
+    with pytest.raises(SpecError) as exc:
+        load_spec(p)
+    assert "no video stream" in str(exc.value)
+
+
+def test_range_never_reads_past_its_end_during_a_fade(tmp_path: Path) -> None:
+    from montaj.qa import clip_overruns
+    from montaj.render.canvas import Canvas
+    from montaj.render.frame import Renderer
+
+    _video(tmp_path / "a.mp4", seconds=4)
+    (tmp_path / "assets").mkdir()
+    spec = {
+        "video": {"size": "64x48", "fps": 30, "look": "warm-film"},
+        "shots": [
+            {"clip": "a.mp4", "range": ["1s", "3s"]},
+            {"clip": "a.mp4", "range": ["0s", "1s"], "in": {"type": "fade", "dur": "1s"}},
+        ],
+    }
+    p = tmp_path / "montaj.yaml"
+    p.write_text(yaml.safe_dump(spec))
+    tl = resolve(load_spec(p), tmp_path)
+    renderer = Renderer(tl, tmp_path, Canvas(64, 48, device="cpu"))
+    _, clip_in, nframes = renderer._clip_request(0)
+    assert (clip_in, nframes) == (1.0, 60)  # the 2s range, no extra fade frames
+    assert clip_overruns(tl, tmp_path / "assets", spec_dir=tmp_path) == []
