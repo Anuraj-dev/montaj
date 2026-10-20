@@ -305,6 +305,7 @@ def _compile_actions(
 ) -> tuple[Event, ...]:
     """Each scroll is its own straight line. A later action does not rewrite an earlier tween."""
     events: list[Event] = []
+    scrolls: list[tuple[int, int, int, tuple[float, float]]] = []
     for i, action in enumerate(actions):
         path = f"actions[{i}]"
         click = action.click
@@ -329,7 +330,7 @@ def _compile_actions(
             events.append(Event(start, i, 0, "click", selector))
             continue
         assert scroll is not None
-        span = _frames(scroll.dur, fps, f"{path}.scroll.dur", errors, positive=False) if scroll.dur else 1
+        span = _frames(scroll.dur, fps, f"{path}.scroll.dur", errors, positive=False) if scroll.dur is not None else 1
         if span is None:
             continue
         span = max(span, 1)
@@ -342,8 +343,10 @@ def _compile_actions(
         if n_frames is not None and start + span - 1 >= n_frames:
             errors.append(_line(f"{path}.scroll.dur", "runs past the capture", "shorten dur or move at"))
             continue
+        scrolls.append((start, i, span, (float(scroll.x), float(scroll.y))))
+    # Origins follow playback order (frame, action, sample), not list order.
+    for start, i, span, target in sorted(scrolls):
         origin = _position_before(events, start, i)
-        target = (float(scroll.x), float(scroll.y))
         for sample in range(span):
             u = (sample + 1) / span
             x = origin[0] + (target[0] - origin[0]) * u
@@ -354,13 +357,14 @@ def _compile_actions(
 
 
 def _position_before(events: list[Event], frame: int, action: int) -> tuple[float, float]:
-    pos = (0.0, 0.0)
+    """Position after the latest scroll event ordered before (frame, action, 0)."""
+    best: Event | None = None
     for ev in events:
-        if ev.kind != "scroll":
+        if ev.kind != "scroll" or (ev.frame, ev.action) >= (frame, action):
             continue
-        if ev.frame < frame or (ev.frame == frame and ev.action < action):
-            pos = (ev.x, ev.y)
-    return pos
+        if best is None or (ev.frame, ev.action, ev.sample) > (best.frame, best.action, best.sample):
+            best = ev
+    return (best.x, best.y) if best else (0.0, 0.0)
 
 
 def load_capture(path: Path | str, root: Path | str) -> CapturePlan:
@@ -594,7 +598,7 @@ class ChromiumPage:
     def scroll(self, x: float, y: float) -> None:
         expression = (
             "(() => {"
-            f"window.scrollTo({json.dumps(float(x))}, {json.dumps(float(y))});"
+            f"window.scrollTo({{left: {json.dumps(float(x))}, top: {json.dumps(float(y))}, behavior: 'instant'}});"
             "if (document.body) void document.body.offsetHeight;"
             "return true;"
             "})()"
@@ -705,7 +709,9 @@ class ChromiumPage:
         raise CaptureError(f"chromium has no page target: {self._tail()}")
 
     def _navigate(self, url: str) -> None:
-        self._call("Page.navigate", {"url": url})
+        nav = self._call("Page.navigate", {"url": url})
+        if nav.get("errorText"):
+            raise CaptureError(f"cannot load {url}: {nav['errorText']} (check the url or file path)")
         deadline = time.monotonic() + 30
         last = ""
         while time.monotonic() < deadline:

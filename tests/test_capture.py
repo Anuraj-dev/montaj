@@ -15,8 +15,9 @@ from montaj.spec import SpecError
 PAGE = """<!doctype html><meta charset=utf-8>
 <style>body{margin:0;background:#fff;height:3000px}
 #b{position:fixed;top:0;left:0;width:100%;height:100%;background:#e22}
+#s{position:absolute;top:30px;left:0;width:20px;height:10px;background:#000}
 #go{position:absolute;top:10px;left:10px;width:40px;height:40px;background:#00f;z-index:2}</style>
-<div id=b></div><div id=go onclick="document.getElementById('b').style.background='#2e2'"></div>
+<div id=b></div><div id=s></div><div id=go onclick="document.getElementById('b').style.background='#2e2'"></div>
 """
 
 
@@ -96,7 +97,7 @@ def test_playback_order_repeats(tmp_path: Path) -> None:
     assert runs[0] == runs[1]
     assert runs[0] == [("open", 64, 48), ("css", "a{b:c}"), ("shot",), ("shot",),
                        ("click", "#go"), ("scroll", 0.0, 50.0), ("shot",), ("shot",)]
-    assert (tmp_path / "b0.log").read_text() == (tmp_path / "b0.log").read_text()
+    assert (tmp_path / "b0.log").read_text() == (tmp_path / "b1.log").read_text()
 
 
 def test_missing_selector_is_error(tmp_path: Path) -> None:
@@ -107,21 +108,67 @@ def test_missing_selector_is_error(tmp_path: Path) -> None:
         record(plan, log=tmp_path / "l.log", page=Bad(), encoder=FakeEnc())
 
 
+def test_scroll_origins_follow_playback_order(tmp_path: Path) -> None:
+    s = _script(tmp_path, "size: 64x48\nfps: 10\ndur: 2s\nactions:\n"
+                          "  - {at: 10f, scroll: {y: 100, dur: 2f}}\n"
+                          "  - {at: 0f, scroll: {y: 50, dur: 2f}}\n"
+                          "  - {at: 11f, scroll: {y: 200, dur: 2f}}\n")
+    ys = {(e.frame, e.action): e.y for e in load_capture(s, tmp_path).events}
+    assert ys[(0, 1)] == 25.0 and ys[(1, 1)] == 50.0
+    assert ys[(10, 0)] == 75.0 and ys[(11, 0)] == 100.0
+    # The y200 tween starts from action 0's frame-11 position (100), not from list order (50).
+    assert ys[(11, 2)] == 150.0 and ys[(12, 2)] == 200.0
+
+
+def test_empty_scroll_dur_is_error(tmp_path: Path) -> None:
+    s = _script(tmp_path, "dur: 1s\nactions:\n  - {at: 0f, scroll: {y: 100, dur: ''}}\n")
+    with pytest.raises(SpecError):
+        load_capture(s, tmp_path)
+
+
+def _decode(clip: Path, n: int) -> np.ndarray:
+    import subprocess
+    raw = subprocess.run(["ffmpeg", "-v", "error", "-i", str(clip), "-f", "rawvideo",
+                          "-pix_fmt", "rgb24", "-"], capture_output=True, check=True).stdout
+    return np.frombuffer(raw, np.uint8).reshape(n, 48, 64, 3)
+
+
+def _dark(px: np.ndarray) -> bool:
+    return bool((px < 80).all())
+
+
 @pytest.mark.skipif(chromium() is None, reason="no chromium")
-def test_real_recording_cli_and_repeatable(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
-    s = _script(tmp_path, "size: 64x48\nfps: 10\ndur: 1s\ncss: '#b{opacity:1}'\nactions:\n"
-                          "  - {at: 0.5s, click: '#go'}\n  - {at: 0.7s, scroll: 200}\n")
-    for _ in range(2):
+def test_failed_navigation_is_error(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    s = tmp_path / "gone.yaml"
+    s.write_text(f"url: {(tmp_path / 'nope.html').as_uri()}\nsize: 64x48\nfps: 10\ndur: 1s\n")
+    assert main(["-C", str(tmp_path), "capture", str(s)]) != 0
+    out = capsys.readouterr().out.strip().splitlines()
+    assert len(out) == 1 and out[0].startswith("ERR ")
+    assert not (tmp_path / "assets" / "gone.mp4").exists()
+
+
+@pytest.mark.skipif(chromium() is None, reason="no chromium")
+@pytest.mark.parametrize("css", ["#b{opacity:1}", "html{scroll-behavior:smooth}"])
+def test_real_recording_cli_and_repeatable(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], css: str,
+) -> None:
+    s = _script(tmp_path, f"size: 64x48\nfps: 10\ndur: 1s\ncss: '{css}'\nactions:\n"
+                          "  - {at: 0.5s, click: '#go'}\n  - {at: 0.7s, scroll: 30}\n")
+    clips = []
+    for run in range(2):
         assert main(["-C", str(tmp_path), "capture", str(s)]) == 0
         out = capsys.readouterr().out.strip().splitlines()
         assert len(out) == 1 and out[0].startswith("OK assets/demo.mp4 1.00s 64x48")
         clip = tmp_path / "assets" / "demo.mp4"
         info = probe(clip)
         assert (info.width, info.height) == (64, 48) and abs(info.fps - 10) < 0.05
+        kept = tmp_path / f"run{run}.mp4"
+        kept.write_bytes(clip.read_bytes())
+        clips.append(_decode(kept, 10))
     assert (tmp_path / "build" / "capture.log").is_file()
-    import subprocess
-    raw = subprocess.run(["ffmpeg", "-v", "error", "-i", str(tmp_path / "assets" / "demo.mp4"),
-                          "-f", "rawvideo", "-pix_fmt", "rgb24", "-"], capture_output=True, check=True).stdout
-    frames = np.frombuffer(raw, np.uint8).reshape(10, 48, 64, 3)
-    assert frames[0, 40, 60, 0] > 150 and frames[0, 40, 60, 1] < 100   # red before click
-    assert frames[9, 40, 60, 1] > 150 and frames[9, 40, 60, 0] < 100   # green after click
+    for frames in clips:
+        assert frames[4, 40, 60, 0] > 150 and frames[4, 40, 60, 1] < 100   # red until frame 4
+        assert frames[5, 40, 60, 1] > 150 and frames[5, 40, 60, 0] < 100   # green from frame 5
+        assert _dark(frames[6, 35, 5]) and not _dark(frames[6, 5, 5])      # stripe before scroll
+        assert _dark(frames[7, 5, 5]) and not _dark(frames[7, 35, 5])      # jumped on frame 7
+    assert np.abs(clips[0].astype(int) - clips[1].astype(int)).max() <= 2  # repeatable
