@@ -6,7 +6,7 @@ import json
 import math
 import re
 from pathlib import Path
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal
 
 import yaml
 from pydantic import (
@@ -20,6 +20,17 @@ from pydantic import (
     ValidationError,
     WrapSerializer,
     model_validator,
+)
+
+from montaj.events import (
+    Hit,
+    Miss,
+    compile_at_event,
+    compile_event_marker,
+    format_seconds,
+    is_event_marker,
+    load_events_file,
+    match_event,
 )
 
 EASE = ("linear", "smooth", "cubic", "outc", "inc", "expo", "ramp", "sine")
@@ -298,6 +309,10 @@ class Shot(Frozen):
     hold: DurationStr | None = None
     until: TimeExpr | None = None
     clip_in: DurationStr | None = None
+    # Authoring-only: `resolve` folds the pick into clip_in. Absent stays out of model_dump
+    # so an existing film keeps its segment hash.
+    at_event: dict[str, Any] | None = Field(default=None, exclude_if=lambda v: v is None)
+    pre: DurationStr | None = Field(default=None, exclude_if=lambda v: v is None)
     range: tuple[DurationStr, DurationStr] | None = None
     crop: CropBox | None = None
     focus: tuple[float, float] | None = None
@@ -657,6 +672,8 @@ def _unrounded_durs(spec: Spec) -> list[tuple[str, str]]:
     for i, sh in enumerate(spec.shots):
         if sh.clip_in is not None:
             out.append((f"shots[{i}].clip_in", sh.clip_in))
+        if sh.pre is not None:
+            out.append((f"shots[{i}].pre", sh.pre))
         if sh.morph is not None:
             out.append((f"shots[{i}].morph.at", sh.morph.at))
             out.append((f"shots[{i}].morph.dur", sh.morph.dur))
@@ -1152,6 +1169,90 @@ def _load_word_starts(
     return out
 
 
+class _Events:
+    """One read of each `assets/<stem>.events.json` per validate. Not process-global."""
+
+    def __init__(self, assets: Path | None, errors: list[str]):
+        self.assets = assets
+        self.errors = errors
+        self._cache: dict[str, list[dict] | None] = {}
+
+    def get(self, stem: str, path: str) -> list[dict] | None:
+        if stem in self._cache:
+            return self._cache[stem]
+        rows = _read_events(self.assets, stem, path, self.errors)
+        self._cache[stem] = rows
+        return rows
+
+
+def _assets_dir(spec: Spec, spec_dir: Path | None) -> Path | None:
+    if spec_dir is None:
+        return None
+    rel = Path(spec.assets)
+    return rel if rel.is_absolute() else spec_dir / rel
+
+
+def _read_events(assets: Path | None, stem: str, path: str, errors: list[str]) -> list[dict] | None:
+    if assets is None:
+        errors.append(_line(path, f"no events for {stem!r}", "load the spec from disk"))
+        return None
+    file = assets / f"{stem}.events.json"
+    if not file.is_file():
+        errors.append(_line(path, f"no events for {stem!r}", f"add assets/{stem}.events.json"))
+        return None
+    return load_events_file(file, f"assets/{stem}.events.json", errors)
+
+
+def _clip_in_from_event(
+    sh: Shot, i: int, fps: int, times: dict[str, float], events: _Events, errors: list[str]
+) -> str | None:
+    """Matched event time minus `pre`, as a duration string. None if this shot already errored."""
+    path = f"shots[{i}]"
+    if sh.pre is not None and f"shots[{i}].pre" not in times:
+        return None
+    sel = compile_at_event(sh.at_event, f"shots[{i}].at_event", errors)
+    if sel is None or sh.clip is None or fps <= 0:
+        return None
+    rows = events.get(sh.clip, path)
+    if rows is None:
+        return None
+    if not rows:
+        errors.append(_line(path, f"no events in {sh.clip}", "have: none"))
+        return None
+    t = _event_seconds(match_event(rows, sel), sh.clip, path, errors)
+    if t is None:
+        return None
+    pre_s = times.get(f"shots[{i}].pre", 0.0) / fps
+    clip_s = t - pre_s
+    if clip_s < -1e-9:
+        errors.append(
+            _line(
+                f"shots[{i}].pre",
+                f"{sh.pre} starts before the clip",
+                f"event at {t:.6g}s",
+            )
+        )
+        return None
+    return format_seconds(0.0 if clip_s < 0 else clip_s)
+
+
+def _event_seconds(found: Hit | Miss, stem: str, path: str, errors: list[str]) -> float | None:
+    if isinstance(found, Miss):
+        errors.append(_line(path, f"no event {found.label} in {stem}", found.hint))
+        return None
+    t = float(found.event["t"])
+    if t < 0:
+        errors.append(
+            _line(
+                path,
+                f"event at {t:.6g}s is before the clip start",
+                "run montaj ingest-rec so t is video time",
+            )
+        )
+        return None
+    return t
+
+
 def resolve_markers(
     spec: Spec,
     spec_dir: Path | None,
@@ -1162,6 +1263,7 @@ def resolve_markers(
     beat0: float = 0.0,
     markers_json: object | None = None,
     markers_loaded: bool = False,
+    events: _Events | None = None,
 ) -> dict[str, float]:
     """Resolve `markers` to float frames. Acyclic name→name refs are allowed."""
     uses_word = [
@@ -1204,6 +1306,20 @@ def resolve_markers(
                     errors.append(_line(path, f"unknown word {i}", f"have: {have}"))
             else:
                 resolved[name] = word_s[i] * fps
+            continue
+        if is_event_marker(text):
+            compiled = compile_event_marker(text, path, errors)
+            if compiled is not None and fps > 0:
+                stem, sel = compiled
+                book = events if events is not None else _Events(_assets_dir(spec, spec_dir), errors)
+                rows = book.get(stem, path)
+                if rows is not None:
+                    if not rows:
+                        errors.append(_line(path, f"no events in {stem}", "have: none"))
+                    else:
+                        t = _event_seconds(match_event(rows, sel), stem, path, errors)
+                        if t is not None:
+                            resolved[name] = t * fps
             continue
         if _DUR.match(text):
             val = _parse_time(text, {}, fps, bpm, path, errors, beat0=beat0)
@@ -1416,8 +1532,13 @@ def _validate_sequence(
 
 def validate_spec(
     spec: Spec, errors: list[str], spec_dir: Path | None = None
-) -> tuple[dict[str, int], dict[str, float], dict[str, float], float | None, float]:
-    """Fill `errors`; return (rounded frames, float frames, markers, bpm, beat0 frames)."""
+) -> tuple[dict[str, int], dict[str, float], dict[str, float], float | None, float, dict[int, str]]:
+    """Fill `errors`; return (rounded frames, float frames, markers, bpm, beat0 frames, clip_in).
+
+    `clip_in` is the duration string `at_event` resolved for each shot index. The
+    authoring spec keeps `at_event`; `resolve` copies this onto the shot the
+    renderer seeks, so the segment hash sees the picked time.
+    """
     fps = spec.video.fps
     specified_bpm = spec.video.bpm is not None
     if fps <= 0:
@@ -1467,6 +1588,7 @@ def validate_spec(
             )
         )
 
+    events = _Events(_assets_dir(spec, spec_dir), errors)
     markers = resolve_markers(
         spec,
         spec_dir,
@@ -1476,6 +1598,7 @@ def validate_spec(
         beat0=beat0,
         markers_json=markers_json,
         markers_loaded=markers_loaded,
+        events=events,
     )
 
     parsed: dict[str, int] = {}
@@ -1509,6 +1632,7 @@ def validate_spec(
         parsed[f"shots[{i}].end"] = end
         holds.append(h)
 
+    clip_ins: dict[int, str] = {}
     for i, sh in enumerate(spec.shots):
         h = holds[i]
         has_p = sh.photo is not None
@@ -1557,6 +1681,23 @@ def validate_spec(
             for name in ("crop", "focus", "zoom"):
                 if getattr(sh, name) is not None:
                     errors.append(_line(f"shots[{i}].{name}", "not used on a sequence", "remove it"))
+        if sh.at_event is not None:
+            if not has_c:
+                errors.append(_line(f"shots[{i}].at_event", "at_event needs clip", "add clip:"))
+            elif sh.range is not None:
+                errors.append(
+                    _line(f"shots[{i}]", "range and at_event are mutually exclusive", "remove one")
+                )
+            elif sh.clip_in is not None:
+                errors.append(
+                    _line(f"shots[{i}]", "clip_in and at_event are mutually exclusive", "remove one")
+                )
+            else:
+                got = _clip_in_from_event(sh, i, fps, times, events, errors)
+                if got is not None:
+                    clip_ins[i] = got
+        if sh.pre is not None and sh.at_event is None:
+            errors.append(_line(f"shots[{i}].pre", "pre needs at_event", "remove pre or add at_event"))
         if sh.zoom is not None and sh.drift is not None:
             errors.append(_line(f"shots[{i}]", "zoom and drift are mutually exclusive", "remove one"))
         if sh.pulse is not None:
@@ -1720,7 +1861,7 @@ def validate_spec(
     _validate_text(spec, markers, fps, bpm, times, errors, beat0=beat0)
     _validate_tracks(spec, markers, fps, bpm, times, errors, beat0=beat0)
     _validate_check(spec, markers, fps, bpm, times, errors, beat0=beat0)
-    return parsed, times, markers, bpm, beat0
+    return parsed, times, markers, bpm, beat0, clip_ins
 
 
 def _card_duration(
