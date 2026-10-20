@@ -13,7 +13,7 @@ import re
 from pathlib import Path
 from typing import Sequence
 
-from montaj.encode import FFMPEG, probe, run
+from montaj.encode import FFMPEG, FFPROBE, capture, probe, run
 from montaj.project import find_clip
 from montaj.spec import _dur_frames
 from montaj.timeline import Timeline, clip_read_frames, transition_overlap
@@ -178,6 +178,30 @@ def _frames(raw: str | None, fps: int, bpm: float | None) -> float:
     return 0.0 if frames is None else float(frames)
 
 
+def video_end(path: Path, *, log: Path | str | None = None) -> float:
+    """End of the video stream alone: the last packet's pts plus its duration.
+
+    `probe().duration` falls back to the container duration (MKV has no stream
+    duration), and a longer audio track would hide a video overrun.
+    """
+    out = capture(
+        [FFPROBE, "-v", "error", "-select_streams", "v:0",
+         "-show_entries", "packet=pts_time,duration_time", "-of", "csv=p=0", str(path)],
+        log=log,
+        desc="ffprobe",
+    )
+    end = 0.0
+    for line in out.splitlines():
+        parts = line.strip().split(",")
+        try:
+            pts = float(parts[0])
+            dur = float(parts[1]) if len(parts) > 1 and parts[1] else 0.0
+        except ValueError:
+            continue
+        end = max(end, pts + dur)
+    return end or probe(path, log=log).duration
+
+
 def clip_overruns(tl: Timeline, assets: Path, *, log: Path | str | None = None) -> list[str]:
     """WARN when a clip shot's read window goes past the end of its source.
 
@@ -206,7 +230,7 @@ def clip_overruns(tl: Timeline, assets: Path, *, log: Path | str | None = None) 
         clip_in = _frames(sh.clip_in, fps, bpm) / float(fps)
         path = find_clip(assets, sh.clip)
         if path not in durations:
-            durations[path] = probe(path, log=log).duration
+            durations[path] = video_end(path, log=log)
         overrun = (clip_in + need) - durations[path]
         if overrun <= (1.0 / fps) + 1e-4:
             continue

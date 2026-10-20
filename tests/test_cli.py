@@ -718,3 +718,17 @@ def test_review_port_in_use_is_one_err_line(tmp_path: Path, capsys) -> None:
         port = busy.getsockname()[1]
         code, out, _ = _run(["-C", str(root), "review", "--port", str(port)], capsys)
     assert code == 1 and out.startswith("ERR review:") and len(out.strip().splitlines()) == 1
+
+
+def test_clip_overrun_ignores_a_longer_audio_track_in_mkv(tmp_path: Path) -> None:
+    """MKV has no video stream duration; a 8s audio track must not hide a 2s video overrun."""
+    proj = _clip_film(tmp_path / "mkv", "  - {clip: bars, hold: 4s}\n")
+    (proj / "assets" / "bars.mp4").unlink()
+    subprocess.run(
+        ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+         "-f", "lavfi", "-i", "color=c=red:size=320x240:rate=30:duration=2",
+         "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000:duration=8",
+         "-pix_fmt", "yuv420p", str(proj / "assets" / "bars.mkv")],
+        check=True,
+    )
+    assert _overruns(proj) == ["WARN shots[0] bars runs 2.00s past its clip"]
