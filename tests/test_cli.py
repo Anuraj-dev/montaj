@@ -12,6 +12,8 @@ import pytest
 from PIL import Image
 
 from montaj.cli import _intended_black, _intended_freeze, main
+from montaj.encode import probe
+from montaj.sheet import MAX_TILES, every_times
 
 
 def _jpeg(folder: Path, stem: str, color: tuple[int, int, int] = (10, 20, 30)) -> None:
@@ -36,8 +38,12 @@ def _run(argv: list[str], capsys: pytest.CaptureFixture[str]) -> tuple[int, str,
     return code, captured.out, captured.err
 
 
-def _clip(path: Path, *, black: bool) -> None:
-    src = "color=c=black:size=320x240:rate=25:duration=1" if black else "testsrc=size=320x240:rate=25:duration=1"
+def _clip(path: Path, *, black: bool, seconds: float = 1.0) -> None:
+    src = (
+        f"color=c=black:size=320x240:rate=25:duration={seconds}"
+        if black
+        else f"testsrc=size=320x240:rate=25:duration={seconds}"
+    )
     path.parent.mkdir(parents=True, exist_ok=True)
     subprocess.run(
         ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-f", "lavfi",
@@ -399,6 +405,60 @@ def test_sheet_at_caps_count_at_twelve(tmp_path: Path, capsys: pytest.CaptureFix
     code, out, err = _run(["-C", str(proj), "sheet", "--at", times], capsys)
     assert code == 0 and err == "", out
     assert out.strip() == "OK build/sheet.jpg 12 frames"
+
+
+def _distinct(times: list[float], duration: float, fps: float) -> int:
+    n_frames = int(round(duration * fps)) or 1
+    return len({min(max(0, int(round(t * fps))), n_frames - 1) for t in times})
+
+
+def test_sheet_every_interval_pages_and_default_stays_twelve(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`--every 0.5s` covers each interval; the bare command still draws 12 frames."""
+    monkeypatch.chdir(tmp_path)
+    proj = tmp_path / "proj"
+    video = proj / "out" / "preview.mp4"
+    _clip(video, black=False, seconds=2.0)
+    info = probe(video)
+
+    code, out, err = _run(["-C", str(proj), "sheet"], capsys)
+    assert code == 0 and err == "", out
+    assert out.strip() == "OK build/sheet.jpg 12 frames"
+
+    code, out, err = _run(["-C", str(proj), "sheet", "--every", "0.5s"], capsys)
+    assert code == 0 and err == "", out
+    times = every_times(info.duration, 0.5, fps=info.fps)
+    shown = _distinct(times, info.duration, info.fps)
+    assert shown == 4  # 0, 0.5, 1.0, 1.5 on a 2s film; a 60s film is the same stride × 120
+    assert out.strip() == f"OK build/sheet.jpg {shown} frames"
+    assert not (proj / "build" / "sheet-2.jpg").exists()
+
+    # Bare seconds, same as `--at`. Dense enough to need a second page.
+    code, out, err = _run(["-C", str(proj), "sheet", "--every", "0.08"], capsys)
+    assert code == 0 and err == "", out
+    times = every_times(info.duration, 0.08, fps=info.fps)
+    shown = _distinct(times, info.duration, info.fps)
+    pages = -(-shown // MAX_TILES)
+    names = ["build/sheet.jpg", *[f"build/sheet-{i}.jpg" for i in range(2, pages + 1)]]
+    assert pages >= 2 and shown > 12
+    assert out.strip() == f"OK {' '.join(names)} {shown} frames"
+    assert (proj / "build" / "sheet-2.jpg").is_file()
+
+    # A later 12-frame sheet must not leave the dense pages behind.
+    code, out, err = _run(["-C", str(proj), "sheet"], capsys)
+    assert code == 0 and err == "", out
+    assert out.strip() == "OK build/sheet.jpg 12 frames"
+    assert not (proj / "build" / "sheet-2.jpg").exists()
+
+    code, out, _ = _run(["-C", str(proj), "sheet", "--every", "4b"], capsys)
+    assert code == 1 and out.startswith("ERR sheet: --every '4b'"), out
+    code, out, _ = _run(["-C", str(proj), "sheet", "--every", "0s"], capsys)
+    assert code == 1 and "positive" in out, out
+    code, out, _ = _run(["-C", str(proj), "sheet", "--every", "-1"], capsys)
+    assert code == 1 and "positive" in out, out
+    code, out, _ = _run(["-C", str(proj), "sheet", "--at", "0.2", "--every", "0.5s"], capsys)
+    assert code == 1 and "--every" in out and "--at" in out, out
 
 
 def test_sheet_at_accepts_seconds_suffix_and_rejects_junk(tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch) -> None:
