@@ -47,6 +47,7 @@ from montaj.render.text import (
     raster_lines,
     raster_subs,
 )
+from montaj.render.overlay import draw_overlays
 from montaj.render.transitions import fade, swirl, whip
 from montaj.render.wall import build_wall, wall_camera, wall_frame
 from montaj.spec import _dur_frames
@@ -610,4 +611,10 @@ class Renderer:
                     sample = self._eval(plan.scene, t)
                     acc = sample if acc is None else acc + sample
                 acc = acc / n
-            return finish(self.cv, acc, f, self._look(), plan, self._overlay(f))
+            # Overlays under the finish are graded with the picture; `above_finish` ones land after it.
+            ovs = [self.tl.overlays[i] for i in plan.overlays]
+            under = [o for o in ovs if not o.above_finish]
+            above = [o for o in ovs if o.above_finish]
+            acc = draw_overlays(self.cv, acc, under, float(f))
+            out = finish(self.cv, acc, f, self._look(), plan, self._overlay(f))
+            return draw_overlays(self.cv, out, above, float(f))

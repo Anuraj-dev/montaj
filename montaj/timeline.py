@@ -92,6 +92,28 @@ class ResolvedSub:
 
 
 @dataclass(frozen=True)
+class ResolvedOverlay:
+    """One `overlays[]` entry with times in frames and animated fields as (from, to) pairs."""
+
+    shape: str
+    from_: float
+    to: float
+    center: tuple[float, float] | None
+    radius: tuple[float, float] | None
+    sweep: tuple[float, float]
+    box: tuple[float, float, float, float] | None
+    arm: float
+    points: tuple[tuple[float, float], ...] | None
+    draw: float | None
+    width: float
+    color: str
+    opacity: float
+    glow: float
+    ease: str
+    above_finish: bool
+
+
+@dataclass(frozen=True)
 class FramePlan:
     f: int
     scene: Scene
@@ -107,6 +129,7 @@ class FramePlan:
     glow: float = 0.0
     bars: float = 0.0
     fade_out: tuple[int, int] | None = None
+    overlays: tuple[int, ...] = ()
 
 
 @dataclass
@@ -227,6 +250,7 @@ class Timeline:
     markers: dict[str, float] = field(default_factory=dict)
     texts: list[ResolvedText] = field(default_factory=list)
     subs: list[ResolvedSub] = field(default_factory=list)
+    overlays: list[ResolvedOverlay] = field(default_factory=list)
     _hits: list[tuple[float, float]] = field(default_factory=list)
     _bursts: list[tuple[int, float, float, float, int]] = field(default_factory=list)
     _tracks: dict[str, list] = field(default_factory=dict)
@@ -259,6 +283,7 @@ class Timeline:
             for i, s in enumerate(self.subs)
             if s.from_ - 0.2 * self.fps - 1 <= f <= s.to + 0.3 * self.fps + 1
         )
+        overlays = tuple(i for i, o in enumerate(self.overlays) if o.from_ <= f < o.to)
         hit_hi = 1.2 * self.fps
         hits = tuple((at, k) for at, k in self._hits if -3 <= f - at < hit_hi)
         burst_hi = 3.4 * self.fps
@@ -285,6 +310,7 @@ class Timeline:
             glow=glow,
             bars=bars,
             fade_out=fade_out,
+            overlays=overlays,
         )
 
 
@@ -391,6 +417,44 @@ def _resolve_texts(spec: Spec, times: dict[str, float], fps: int) -> list[Resolv
                 )
             )
         out.append(ResolvedText(from_=frm, to=to, fade_in=fi, fade_out=fo, blur=block.blur, lines=tuple(lines)))
+    return out
+
+
+def _pair(v) -> tuple[float, float] | None:
+    if v is None:
+        return None
+    if isinstance(v, (int, float)):
+        return (float(v), float(v))
+    return (float(v[0]), float(v[1]))
+
+
+DEFAULT_ARM = 28.0  # design px
+
+
+def _resolve_overlays(spec: Spec, times: dict[str, float]) -> list[ResolvedOverlay]:
+    out: list[ResolvedOverlay] = []
+    for i, ov in enumerate(spec.overlays):
+        p = f"overlays[{i}]"
+        out.append(
+            ResolvedOverlay(
+                shape=ov.shape,
+                from_=times[f"{p}.from"],
+                to=times[f"{p}.to"],
+                center=None if ov.center is None else (float(ov.center[0]), float(ov.center[1])),
+                radius=_pair(ov.radius),
+                sweep=_pair(ov.sweep) or (360.0, 360.0),
+                box=None if ov.box is None else tuple(float(v) for v in ov.box),
+                arm=DEFAULT_ARM if ov.arm is None else float(ov.arm),
+                points=None if ov.points is None else tuple((float(x), float(y)) for x, y in ov.points),
+                draw=times.get(f"{p}.draw"),
+                width=float(ov.width),
+                color=ov.color.lower(),
+                opacity=float(ov.opacity),
+                glow=float(ov.glow),
+                ease=ov.ease,
+                above_finish=ov.above_finish,
+            )
+        )
     return out
 
 
@@ -528,6 +592,7 @@ def resolve(spec: Spec, spec_dir: Path) -> Timeline:
         markers=markers,
         texts=texts,
         subs=subs,
+        overlays=_resolve_overlays(spec, times),
         _hits=hits,
         _bursts=bursts,
         _tracks=_resolve_tracks(spec, times),
