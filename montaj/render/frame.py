@@ -10,7 +10,6 @@ on the first frame that needs them, one batch per kind, under ``<project>/build/
 """
 from __future__ import annotations
 
-import math
 from collections import OrderedDict
 from pathlib import Path
 
@@ -21,7 +20,7 @@ from montaj.project import find_clip, find_photo
 from montaj.render.canvas import Canvas
 from montaj.render.clip import ClipSource, window_key
 from montaj.render.core import Photo, fit_s, sine, still
-from montaj.render.finish import LOOKS, finish
+from montaj.render.finish import LOOKS, finish, lut_texture
 from montaj.render.shots import (
     card_frame,
     css_blur,
@@ -39,6 +38,7 @@ from montaj.render.text import (
     RasterLine,
     RasterSet,
     Sub,
+    TextBackdrop,
     TextBlock,
     TextLine,
     Unit,
@@ -47,10 +47,20 @@ from montaj.render.text import (
     raster_lines,
     raster_subs,
 )
-from montaj.render.transitions import fade, swirl, whip
+from montaj.render.transitions import burn_white, fade, swirl, wall_pullback, whip
 from montaj.render.wall import build_wall, wall_camera, wall_frame
 from montaj.spec import _dur_frames
-from montaj.timeline import Blank, Clip, Scene, Still, Timeline, Trans, Wall
+from montaj.timeline import (
+    Blank,
+    Clip,
+    Scene,
+    Still,
+    Timeline,
+    Trans,
+    Wall,
+    clip_read_frames,
+    transition_overlap,
+)
 
 # film.html 155: an omitted morph centre is (cx ?? .5, cy ?? .45). The spec leaves it unset.
 _MORPH_CENTER = (0.5, 0.45)
@@ -195,6 +205,7 @@ class Renderer:
         self._rasters: RasterSet | None = None
         self._captions: _LRU = _LRU(caps["captions"])
         self._shot: int | None = None
+        self._lut = None
         self._owners: dict[str, dict[tuple, set[int]]] = {"photos": {}, "bgs": {}, "cards": {}}
 
     def begin_segment(self, shots) -> None:
@@ -238,7 +249,7 @@ class Renderer:
         if not sh.clip:
             return None
         extra = self._outgoing_frames(index)
-        nframes = (shot.end - shot.start) + int(math.ceil(extra - 1e-6))
+        nframes = clip_read_frames(shot.end - shot.start, extra)
         clip_in = 0.0 if sh.clip_in is None else self._frames(sh.clip_in) / self.tl.fps
         return sh.clip, clip_in, nframes
 
@@ -360,8 +371,8 @@ class Renderer:
     def _outgoing_frames(self, index: int) -> float:
         """Frames of this shot still visible after its hold, while the next transition plays.
 
-        A fade or swirl runs `dur` past the cut. A whip runs `dur / 2`. ClipSource clamps
-        an index past the frames ffmpeg actually returned.
+        A fade, swirl, wall-pullback or burn-white runs `dur` past the cut. A whip runs
+        `dur / 2`. ClipSource clamps an index past the frames ffmpeg actually returned.
         """
         nxt = index + 1
         if nxt >= len(self.tl.shots):
@@ -369,12 +380,7 @@ class Renderer:
         tr = self.tl.shots[nxt].spec.in_
         if tr is None or tr.type == "cut" or tr.dur is None:
             return 0.0
-        dur = self._frames(tr.dur)
-        if tr.type == "whip":
-            return dur / 2.0
-        if tr.type in ("fade", "swirl"):
-            return dur
-        return 0.0
+        return transition_overlap(tr.type, self._frames(tr.dur))
 
     def _clip_frame(self, scene: Clip, t: float) -> torch.Tensor:
         req = self._clip_request(scene.shot)
@@ -510,6 +516,11 @@ class Renderer:
             reveal=ln.reveal, sweep=ln.sweep, shadow=ln.shadow, indent=ln.indent,
         )
 
+    def _backdrop(self, src) -> TextBackdrop | None:
+        if src is None:
+            return None
+        return TextBackdrop(src.type, float(src.strength), src.place)
+
     def _ensure_rasters(self) -> None:
         """One pass per Renderer. A disk hit starts no browser; a miss batches each kind."""
         if self._rasters_ready:
@@ -528,7 +539,12 @@ class Renderer:
         for block in self.tl.texts:
             lines = tuple(self._line(ln) for ln in block.lines)
             flat.extend(lines)
-            blocks.append(TextBlock(block.from_, block.to, block.fade_in, block.fade_out, block.blur, lines))
+            blocks.append(
+                TextBlock(
+                    block.from_, block.to, block.fade_in, block.fade_out, block.blur, lines,
+                    self._backdrop(block.backdrop),
+                )
+            )
         subs = tuple(Sub(s.from_, s.to, s.text, size=s.size, color=s.color) for s in self.tl.subs)
         device = self.cv.device
         scale = float(self.cv.k)
@@ -581,10 +597,24 @@ class Renderer:
             return whip(self.cv, a, b, x, scene.axis)
         if scene.kind == "swirl":
             return swirl(self.cv, a, b, x, self._swirl_center(scene))
+        if scene.kind == "wall-pullback":
+            if scene.zoom is None:
+                raise ValueError("wall-pullback: missing zoom")
+            return wall_pullback(self.cv, a, b, x, scene.zoom)
+        if scene.kind == "burn-white":
+            return burn_white(a, b, x)
         raise ValueError(f"transition: unknown {scene.kind!r}")
 
     def _look(self):
         name = self.tl.spec.video.look
+        if not isinstance(name, str):
+            # `look: {lut: …}`. The texture is parsed once per Renderer; strength/vignette/grain ride along.
+            if self._lut is None:
+                from montaj.cube import load_cube
+
+                self._lut = lut_texture(load_cube(self._dir / name.lut), self.cv.device)
+            return {"kind": "graded", "lut": self._lut, "strength": name.strength,
+                    "vignette": name.vignette, "grain": name.grain}
         look = LOOKS.get(name)
         if look is None:
             have = ", ".join(LOOKS)
