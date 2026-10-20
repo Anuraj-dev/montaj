@@ -1365,11 +1365,11 @@ def validate_spec(
                         "use a zoom above 1, for example 3.2",
                     )
                 )
+        _check_trans_params(i, tr, errors)
         if tr.type == "cut":
             continue
         if tr.type in ("whip", "push") and tr.axis not in ("x", "y"):
             errors.append(_line(f"shots[{i}].in.axis", f"must be x or y, got {tr.axis!r}", "use x or y"))
-        _check_trans_params(i, tr, errors)
         if tr.dur is None:
             errors.append(_line(f"shots[{i}].in.dur", f"required for {tr.type}", "use 22f, 4b or 1.5s"))
             continue

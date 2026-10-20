@@ -248,3 +248,61 @@ def test_cuda_matches_cpu(cv, ab, name):
     got = _call(name, gcv, a.cuda(), b.cuda(), 0.5).cpu()
     assert (got - want).abs().max() < 2 / 255
 
+
+# ---- review fixes -------------------------------------------------------------------
+
+# Segment hashes of unchanged films, computed from main before glitch/zoom/dip/push landed. Covers the
+# shot model_dump and the Trans / FramePlan asdict paths (incl. FramePlan.splits).
+_MAIN_HASHES = {
+    "fade": ["1b49af569b8bc7abfcaf0562c920ffb589ce80821ddffc84c16b93f46272eb79",
+             "7956808d022f32a9e13e4bc2b8ebd352140f4e017058f4145b17c2aa00520558"],
+    "swirl": ["1b49af569b8bc7abfcaf0562c920ffb589ce80821ddffc84c16b93f46272eb79",
+              "aab902bd6b54253213f33039cf70ba9a62a5b5a210305c2cef79a3bbc7185fa6"],
+    "whip": ["4dabe6596d6e8d9aa1d4cfe38bae02422615e5f09fa708583a265b515dc12dba",
+             "defcb4ff236045fcd76145806bd227166d5cfa63fea3a63d177729d8ba7e5544"],
+    "cut": ["1b49af569b8bc7abfcaf0562c920ffb589ce80821ddffc84c16b93f46272eb79",
+            "e7f127d03d0d5e105b001b74255be285aa0a04dd17a62b4bc231d64c2a22f343"],
+    "wall-pullback": ["1b49af569b8bc7abfcaf0562c920ffb589ce80821ddffc84c16b93f46272eb79",
+                      "243b77aec1fc4d5d2841e0ef3c88d80695594d3b9515511fd5e5652f0273d392"],
+}
+
+
+@pytest.mark.parametrize(
+    "key,inline",
+    [
+        ("fade", "{type: fade, dur: 6f}"),
+        ("swirl", "{type: swirl, dur: 8f}"),
+        ("whip", "{type: whip, dur: 8f, axis: y}"),
+        ("cut", "{type: cut}"),
+        ("wall-pullback", "{type: wall-pullback, dur: 8f}"),
+    ],
+)
+def test_unchanged_films_keep_pre_patch_segment_hashes(tmp_path, key, inline):
+    tl = resolve(load_spec(_write(tmp_path, f"  - {{photo: b, hold: 30f, in: {inline}}}\n")), tmp_path)
+    got = [segment_hash(tl, s, {"photo:a": "x", "photo:b": "y"}, "v") for s in tl.segments]
+    assert got == _MAIN_HASHES[key]
+
+
+def test_glitch_accepts_any_valid_seed(cv, ab):
+    a, b = ab
+    big = 18446744073710  # passes validation; seed * 1_000_003 + frame used to overflow torch's seed range
+    out = mt.glitch(cv, a, b, 0.5, 1.0, big, 31)
+    assert out.shape == a.shape
+    assert torch.equal(out, mt.glitch(cv, a, b, 0.5, 1.0, big, 31))
+
+
+@pytest.mark.parametrize(
+    "inline,needle",
+    [
+        ("{type: cut, strength: 0}", "in.strength"),
+        ("{type: cut, seed: -1}", "in.seed"),
+        ("{type: cut, color: red}", "in.color"),
+        ("{type: fade, dur: 6f, strength: 1}", "in.strength"),
+        ("{type: swirl, dur: 6f, seed: 1}", "in.seed"),
+        ("{type: whip, dur: 6f, color: '#ffffff'}", "in.color"),
+        ("{type: glitch, dur: 6f, zoom: 2}", "in.zoom"),
+    ],
+)
+def test_params_checked_on_wrong_transition(tmp_path, inline, needle):
+    errs = _errors(tmp_path, f"  - {{photo: b, hold: 30f, in: {inline}}}\n")
+    assert any(needle in e for e in errs), errs

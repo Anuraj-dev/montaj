@@ -102,12 +102,15 @@ def _text_asset_shas() -> dict[str, str]:
 
 # Plan fields added after the first release. A None value is left out of the hash input so
 # films that never use the field keep their cached segments. Append here when adding one.
-_HASH_OMIT_NONE = ("zoom",)
+# Names must be unique across plan dataclasses: another None-valued field with the same name would vanish too.
+_HASH_OMIT_NONE = ("zoom", "strength", "seed", "dip_color")
+# Same for list fields that are empty unless the film uses the feature.
+_HASH_OMIT_EMPTY = ("splits",)
 
 
 def _hash_form(v):
     if isinstance(v, dict):
-        return {k: _hash_form(x) for k, x in v.items() if not (k in _HASH_OMIT_NONE and x is None)}
+        return {k: _hash_form(x) for k, x in v.items() if not (k in _HASH_OMIT_NONE and x is None) and not (k in _HASH_OMIT_EMPTY and not x)}
     if isinstance(v, (list, tuple)):
         return [_hash_form(x) for x in v]
     return v

@@ -113,7 +113,8 @@ def zoom(cv, a, b, x: float, strength: float = 1.0, taps: int = 8):
 
 def _glitch_rng(seed: int, frame: int) -> torch.Generator:
     # A private CPU generator: draws are identical on every device and never touch global state.
-    return torch.Generator(device="cpu").manual_seed(seed * 1_000_003 + frame)
+    # Fold into 64 bits: any accepted seed is valid, but torch rejects values outside its seed range.
+    return torch.Generator(device="cpu").manual_seed((seed * 1_000_003 + frame) % (1 << 63))
 
 
 def glitch(cv, a, b, x: float, strength: float = 1.0, seed: int = 0, frame: int = 0):
