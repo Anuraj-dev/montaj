@@ -9,6 +9,7 @@ import torch
 import torch.nn.functional as F
 
 from .core import smooth
+from .transitions import rgb_split
 from .golden import bars, dust, fade_out as fade_layer, grain, hits, leaks, vignette
 
 LOOKS = {"warm-film": {
@@ -193,6 +194,9 @@ def finish(cv, img, f, look, plan=None, overlay=None, intro=None, outro=None):
         flashes = [] if plan is None else plan
         leaks = overlay if isinstance(overlay, (list, tuple)) else []
         return _warm(cv, img, f, look, flashes, leaks, intro, outro)
+    # A one-off R/B hit on the composite, before the grade, text and grain.
+    for at, amount, dur in getattr(plan, "splits", ()):
+        img = rgb_split(cv, img, amount, (f - at) / dur)
     if isinstance(look, dict) and look.get("kind") == "golden-film":
         return _golden(cv, img, f, look, plan, overlay)
     if isinstance(look, dict) and look.get("kind") == "graded":

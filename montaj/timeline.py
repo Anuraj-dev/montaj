@@ -102,6 +102,10 @@ class Trans:
     axis: str = "x"
     center: tuple[float, float] | None = None
     blur: float = 0.0
+    # None for transitions that do not read them, so their plans hash as before (see project._HASH_OMIT_NONE).
+    strength: float | None = None
+    seed: int | None = None
+    dip_color: str | None = None
     zoom: float | None = None
 
 
@@ -208,6 +212,7 @@ class FramePlan:
     subs: tuple[int, ...] = ()
     hits: tuple[tuple[float, float], ...] = ()
     bursts: tuple[tuple[int, float, float, float, int], ...] = ()
+    splits: tuple[tuple[int, float, int], ...] = ()
     dust: float = 0.0
     glow: float = 0.0
     bars: float = 0.0
@@ -344,6 +349,7 @@ class Timeline:
     subs: list[ResolvedSub] = field(default_factory=list)
     overlays: list[ResolvedOverlay] = field(default_factory=list)
     _hits: list[tuple[float, float]] = field(default_factory=list)
+    _splits: list[tuple[int, float, int]] = field(default_factory=list)
     _bursts: list[tuple[int, float, float, float, int]] = field(default_factory=list)
     _tracks: dict[str, list] = field(default_factory=dict)
     _fade_out: tuple[int, int] | None = None
@@ -382,6 +388,7 @@ class Timeline:
         hits = tuple((at, k) for at, k in self._hits if -3 <= f - at < hit_hi)
         burst_hi = 3.4 * self.fps
         bursts = tuple(b for b in self._bursts if 0 <= f - b[1] <= burst_hi)
+        splits = tuple(s for s in self._splits if 0 <= f - s[0] < s[2])
         dust = _r6(_track_at(self._tracks.get("dust") or [], f))
         # film.html 427: leaks fade out over the film's last 2 s. Folded into the plan so the
         # renderer never reads the film length and only the tail segments hash it.
@@ -400,6 +407,7 @@ class Timeline:
             subs=subs,
             hits=hits,
             bursts=bursts,
+            splits=splits,
             dust=dust,
             glow=glow,
             bars=bars,
@@ -687,14 +695,22 @@ def resolve(spec: Spec, spec_dir: Path) -> Timeline:
             center = tr.center
             if tr.type == "swirl" and center is None and i > 0:
                 center = resolved[i - 1].spec.focus
-            zoom = float(tr.zoom) if tr.type == "wall-pullback" else None
+            extra = {}
+            if tr.type in ("glitch", "zoom"):
+                extra["strength"] = 1.0 if tr.strength is None else float(tr.strength)
+            if tr.type == "glitch":
+                extra["seed"] = 0 if tr.seed is None else tr.seed
+            if tr.type == "dip":
+                extra["dip_color"] = (tr.color or "#000000").lower()
+            if tr.type == "push":
+                extra["axis"] = tr.axis
+            if tr.type == "wall-pullback":
+                extra["zoom"] = float(tr.zoom)
             windows.append(
                 (
                     t0,
                     t0 + dur,
-                    Trans(
-                        kind=tr.type, a=a, b=b, t0=t0, dur=dur, center=center, blur=tr.blur, zoom=zoom,
-                    ),
+                    Trans(kind=tr.type, a=a, b=b, t0=t0, dur=dur, center=center, blur=tr.blur, **extra),
                 )
             )
         elif tr.type == "whip":
@@ -710,6 +726,7 @@ def resolve(spec: Spec, spec_dir: Path) -> Timeline:
     leaks: list[tuple[int, float, int]] = []
     hits: list[tuple[float, float]] = []
     bursts: list[tuple[int, float, float, float, int]] = []
+    splits: list[tuple[int, float, int]] = []
     burst_i = 0
     for i, fx in enumerate(spec.fx):
         at_i = parsed.get(f"fx[{i}].at")
@@ -720,6 +737,8 @@ def resolve(spec: Spec, spec_dir: Path) -> Timeline:
             leaks.append((at_i, float(fx.leak), int(fx.dir)))
         if fx.hit is not None:
             hits.append((at_f, float(fx.hit)))
+        if fx.rgb_split is not None and at_i is not None:
+            splits.append((at_i, float(fx.rgb_split), parsed.get(f"fx[{i}].dur", 6)))
         if fx.burst is not None and fx.pos is not None:
             bursts.append((burst_i, at_f, float(fx.pos[0]), float(fx.pos[1]), int(fx.burst)))
             burst_i += 1
@@ -766,6 +785,7 @@ def resolve(spec: Spec, spec_dir: Path) -> Timeline:
         subs=subs,
         overlays=_resolve_overlays(spec, times),
         _hits=hits,
+        _splits=splits,
         _bursts=bursts,
         _tracks=_resolve_tracks(spec, times),
         _fade_out=fade_out,

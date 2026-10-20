@@ -35,10 +35,11 @@ from montaj.events import (
 
 EASE = ("linear", "smooth", "cubic", "outc", "inc", "expo", "ramp", "sine")
 EASE_HINT = "use linear, smooth, cubic, outc, inc, expo, ramp or sine"
-TRANS_TYPES = ("cut", "fade", "swirl", "whip", "wall-pullback", "burn-white")
+TRANS_TYPES = ("cut", "fade", "swirl", "whip", "glitch", "zoom", "dip", "push", "wall-pullback", "burn-white")
 # These occupy [start, start+dur) of the incoming shot. Whip is centred on the cut.
-INCOMING_TRANS = ("fade", "swirl", "wall-pullback", "burn-white")
-TRANS_HINT = "use cut, fade, swirl, whip, wall-pullback or burn-white"
+INCOMING_TRANS = ("fade", "swirl", "glitch", "zoom", "dip", "push", "wall-pullback", "burn-white")
+TRANS_HINT = "use cut, fade, swirl, whip, glitch, zoom, dip, push, wall-pullback or burn-white"
+TRANS_STRENGTH_MAX = 4.0
 # Starting magnification of a wall pull-back. Materialised onto the shot so the hash sees it.
 WALL_PULLBACK_ZOOM = 3.2
 LOOK_NAMES = ("warm-film", "golden-film", "clean", "cool-tech")
@@ -178,7 +179,10 @@ class Transition(Frozen):
     center: tuple[float, float] | None = None
     axis: str = "x"
     blur: float = 0.0
-    # Absent stays out of model_dump so films without a pull-back keep their segment hash.
+    # Absent stays out of model_dump so films without these keep their segment hash.
+    strength: RealNum | None = Field(default=None, exclude_if=lambda v: v is None)
+    seed: Annotated[int, Field(strict=True)] | None = Field(default=None, exclude_if=lambda v: v is None)
+    color: str | None = Field(default=None, exclude_if=lambda v: v is None)
     zoom: RealNum | None = Field(default=None, exclude_if=lambda v: v is None)
 
 
@@ -414,6 +418,8 @@ class Fx(Frozen):
     flash: float | None = None
     hit: float | None = None
     burst: RealNum | None = None
+    rgb_split: RealNum | None = None
+    dur: DurationStr | None = None
     at: TimeExpr
     dir: int | None = None
     pos: tuple[float, float] | None = None
@@ -692,6 +698,9 @@ def _duration_fields(spec: Spec) -> list[tuple[str, str]]:
         out.append(("video.intro.dur", spec.video.intro.dur))
     if spec.video.outro:
         out.append(("video.outro.dur", spec.video.outro.dur))
+    for i, fx in enumerate(spec.fx):
+        if fx.dur is not None:
+            out.append((f"fx[{i}].dur", fx.dur))
     for i, sh in enumerate(spec.shots):
         if sh.hold is not None:
             out.append((f"shots[{i}].hold", sh.hold))
@@ -1656,6 +1665,32 @@ def _check_clip_shot(
         )
 
 
+def _check_trans_params(i: int, tr: Transition, errors: list[str]) -> None:
+    """strength / seed / color belong to specific transitions; reject them elsewhere."""
+    p = f"shots[{i}].in"
+    if tr.strength is not None:
+        if tr.type not in ("glitch", "zoom"):
+            errors.append(_line(f"{p}.strength", f"not used by {tr.type}", "use it on glitch or zoom"))
+        elif not math.isfinite(tr.strength) or not 0 < tr.strength <= TRANS_STRENGTH_MAX:
+            errors.append(
+                _line(
+                    f"{p}.strength",
+                    f"must be > 0 and <= {TRANS_STRENGTH_MAX:g}, got {_fmt_num(tr.strength)}",
+                    "use a value like 1.0",
+                )
+            )
+    if tr.seed is not None:
+        if tr.type != "glitch":
+            errors.append(_line(f"{p}.seed", f"not used by {tr.type}", "use it on glitch"))
+        elif tr.seed < 0:
+            errors.append(_line(f"{p}.seed", f"must be >= 0, got {tr.seed}", "use a whole number like 3"))
+    if tr.color is not None:
+        if tr.type != "dip":
+            errors.append(_line(f"{p}.color", f"not used by {tr.type}", "use it on dip"))
+        elif not _HEX.match(tr.color):
+            errors.append(_line(f"{p}.color", f"unknown colour {tr.color!r}", "use #rrggbb"))
+
+
 def _check_ease(path: str, ease: str, errors: list[str]) -> None:
     if ease not in EASE:
         errors.append(_line(path, f"unknown {ease!r}", EASE_HINT))
@@ -1964,9 +1999,10 @@ def validate_spec(
                         "use a zoom above 1, for example 3.2",
                     )
                 )
+        _check_trans_params(i, tr, errors)
         if tr.type == "cut":
             continue
-        if tr.type == "whip" and tr.axis not in ("x", "y"):
+        if tr.type in ("whip", "push") and tr.axis not in ("x", "y"):
             errors.append(_line(f"shots[{i}].in.axis", f"must be x or y, got {tr.axis!r}", "use x or y"))
         if tr.dur is None:
             errors.append(_line(f"shots[{i}].in.dur", f"required for {tr.type}", "use 22f, 4b or 1.5s"))
@@ -2015,9 +2051,29 @@ def validate_spec(
         errors.append(_line("check.sample", f"must be 1 to 30, got {spec.check.sample}", "use sample: 3"))
 
     for i, fx in enumerate(spec.fx):
-        kinds = [fx.leak is not None, fx.flash is not None, fx.hit is not None, fx.burst is not None]
+        kinds = [
+            fx.leak is not None,
+            fx.flash is not None,
+            fx.hit is not None,
+            fx.burst is not None,
+            fx.rgb_split is not None,
+        ]
         if sum(kinds) != 1:
-            errors.append(_line(f"fx[{i}]", "need leak, flash, hit or burst", "set one"))
+            errors.append(_line(f"fx[{i}]", "need leak, flash, hit, burst or rgb_split", "set one"))
+        if fx.rgb_split is not None and (
+            not math.isfinite(fx.rgb_split) or not 0 < fx.rgb_split <= TRANS_STRENGTH_MAX
+        ):
+            errors.append(
+                _line(
+                    f"fx[{i}].rgb_split",
+                    f"must be > 0 and <= {TRANS_STRENGTH_MAX:g}, got {_fmt_num(fx.rgb_split)}",
+                    "use a value like 0.8",
+                )
+            )
+        if fx.dur is not None and fx.rgb_split is None:
+            errors.append(_line(f"fx[{i}].dur", "dur is for rgb_split", "remove dur"))
+        if fx.dur is not None and parsed.get(f"fx[{i}].dur", 1) <= 0:
+            errors.append(_line(f"fx[{i}].dur", "must be > 0", "lengthen dur"))
         if fx.leak is not None and fx.dir not in (1, -1):
             errors.append(_line(f"fx[{i}].dir", f"must be 1 or -1, got {fx.dir!r}", "use dir: 1 or dir: -1"))
         if fx.flash is not None and fx.dir is not None:

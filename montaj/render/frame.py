@@ -52,7 +52,7 @@ from montaj.render.text import (
     raster_subs,
 )
 from montaj.render.overlay import draw_overlays
-from montaj.render.transitions import burn_white, fade, swirl, wall_pullback, whip
+from montaj.render.transitions import burn_white, dip, fade, glitch, push, swirl, wall_pullback, whip, zoom
 from montaj.render.wall import build_wall, wall_camera, wall_frame
 from montaj.spec import _dur_frames
 from montaj.timeline import (
@@ -512,7 +512,7 @@ class Renderer:
     def _outgoing_frames(self, index: int) -> float:
         """Frames of this shot still visible after its hold, while the next transition plays.
 
-        A fade, swirl, wall-pullback or burn-white runs `dur` past the cut. A whip runs
+        A fade, swirl, glitch, zoom, dip, push, wall-pullback or burn-white runs `dur` past the cut. A whip runs
         `dur / 2`. ClipSource clamps an index past the frames ffmpeg actually returned.
         """
         nxt = index + 1
@@ -783,6 +783,15 @@ class Renderer:
             return whip(self.cv, a, b, x, scene.axis)
         if scene.kind == "swirl":
             return swirl(self.cv, a, b, x, self._swirl_center(scene))
+        if scene.kind == "push":
+            return push(self.cv, a, b, x, scene.axis)
+        if scene.kind == "dip":
+            return dip(self.cv, a, b, x, scene.dip_color)
+        if scene.kind == "zoom":
+            return zoom(self.cv, a, b, x, scene.strength)
+        if scene.kind == "glitch":
+            # Sub-frame samples share their integer frame's tear pattern.
+            return glitch(self.cv, a, b, x, scene.strength, scene.seed, math.floor(t + 0.5))
         if scene.kind == "wall-pullback":
             if scene.zoom is None:
                 raise ValueError("wall-pullback: missing zoom")
