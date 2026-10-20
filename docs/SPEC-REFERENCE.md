@@ -47,11 +47,12 @@ Photo fields (`crop`, `focus`, swirl `center`, wall `at`) are source-image pixel
 - `shots[].focus` — `[x, y]`, default the crop centre — the photo point placed at the screen centre.
 - `shots[].zoom` — number, default cover — design pixels per photo pixel. Cover fits the crop with a hair of overscan.
 - `shots[].in` — mapping, default none — how this shot arrives from the previous one. Omit `in` for a cut. See transitions.
-- `shots[].in.type` — `cut`, `fade`, `swirl` or `whip`, required inside `in` — which transition.
+- `shots[].in.type` — `cut`, `fade`, `swirl`, `whip`, `wall-pullback` or `burn-white`, required inside `in` — which transition.
 - `shots[].in.dur` — duration, required except for a cut — length of the transition. It has to fit in the shots it overlaps.
 - `shots[].in.center` — `[x, y]`, default the outgoing shot's focus — where a swirl opens, in the outgoing photo.
 - `shots[].in.axis` — `x` or `y`, default `x` — which way a whip travels.
 - `shots[].in.blur` — number, default `0` — design-px blur on fading layers. Shot 0 may use `fade` (from `video.background`); other transitions on shot 0 stay an error.
+- `shots[].in.zoom` — number, default `3.2` — wall-pullback only. Magnification of the incoming frame at the start; the camera eases to 1. Must be > 1.
 - `shots[].flash` — number, default none — white flash on this shot's first frame, fading out over the next 6 frames.
 - `shots[].wall` — mapping, photo or wall — a flat field of prints. The camera only pans and zooms. Mutually exclusive with `photo`.
 - `wall.grid` — `WxH` string, required — distance between print cells, in world design pixels.
@@ -149,6 +150,8 @@ Transitions (`shots[].in`):
 - `fade` — crossfade across the first `dur` frames of the incoming shot.
 - `swirl` — a swirling wipe that opens around `center`, across the first `dur` frames of the incoming shot.
 - `whip` — both shots slide along `axis`. The move is `dur` frames long and centred on the cut, half on each side.
+- `wall-pullback` — camera eases with `outc` from `zoom` (default 3.2) down to the incoming frame. The outgoing frame shrinks as an opaque centre card, then dissolves, so the incoming shot opens as a wall. First `dur` frames of the incoming shot.
+- `burn-white` — the outgoing shot burns to white over the first half (highlights clip first) and the incoming shot emerges from white over the second half. First `dur` frames of the incoming shot.
 
 Looks (`video.look`):
 

@@ -27,7 +27,7 @@ from montaj.qa import BLACK_PIX_TH, Expect, check, clip_overruns, union
 from montaj.review.server import serve as serve_review
 from montaj.review.summary import summary as review_summary
 from montaj.sheet import MAX_TILES, every_times, pick_times, sheet, sheets
-from montaj.spec import SpecError, _dur_frames, load_spec
+from montaj.spec import INCOMING_TRANS, SpecError, _dur_frames, load_spec
 from montaj.timeline import Blank, Still, Wall, resolve, wall_static_spans
 from montaj.watch import watch
 
@@ -449,7 +449,7 @@ def _intended_black(root: Path) -> list[tuple[float, float]]:
                     nd = _frames(spec, outgoing.dur)
                     if outgoing.type == "whip":
                         after = nd / 2.0
-                    elif outgoing.type in ("fade", "swirl"):
+                    elif outgoing.type in INCOMING_TRANS:
                         after = nd
             spans.append((max(0.0, (sh.start - before) / fps), (sh.end + after) / fps))
     if tl.n_frames:

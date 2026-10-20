@@ -23,7 +23,12 @@ from pydantic import (
 
 EASE = ("linear", "smooth", "cubic", "outc", "inc", "expo", "ramp", "sine")
 EASE_HINT = "use linear, smooth, cubic, outc, inc, expo, ramp or sine"
-TRANS_TYPES = ("cut", "fade", "swirl", "whip")
+TRANS_TYPES = ("cut", "fade", "swirl", "whip", "wall-pullback", "burn-white")
+# These occupy [start, start+dur) of the incoming shot. Whip is centred on the cut.
+INCOMING_TRANS = ("fade", "swirl", "wall-pullback", "burn-white")
+TRANS_HINT = "use cut, fade, swirl, whip, wall-pullback or burn-white"
+# Starting magnification of a wall pull-back. Materialised onto the shot so the hash sees it.
+WALL_PULLBACK_ZOOM = 3.2
 LOOK_NAMES = ("warm-film", "golden-film", "clean", "cool-tech")
 INTRO_TYPES = ("white-lift",)
 OUTRO_TYPES = ("glow", "fade")
@@ -153,6 +158,8 @@ class Transition(Frozen):
     center: tuple[float, float] | None = None
     axis: str = "x"
     blur: float = 0.0
+    # Absent stays out of model_dump so films without a pull-back keep their segment hash.
+    zoom: RealNum | None = Field(default=None, exclude_if=lambda v: v is None)
 
 
 class WallPrint(Frozen):
@@ -1307,9 +1314,22 @@ def validate_spec(
             continue
         if tr.type not in TRANS_TYPES:
             errors.append(
-                _line(f"shots[{i}].in.type", f"unknown {tr.type!r}", "use cut, fade, swirl or whip")
+                _line(f"shots[{i}].in.type", f"unknown {tr.type!r}", TRANS_HINT)
             )
             continue
+        if tr.zoom is not None and tr.type != "wall-pullback":
+            errors.append(
+                _line(f"shots[{i}].in.zoom", "zoom is for wall-pullback", "remove zoom")
+            )
+        if tr.type == "wall-pullback" and tr.zoom is not None:
+            if not math.isfinite(tr.zoom) or tr.zoom <= 1:
+                errors.append(
+                    _line(
+                        f"shots[{i}].in.zoom",
+                        f"must be finite and > 1, got {_fmt_num(tr.zoom)}",
+                        "use a zoom above 1, for example 3.2",
+                    )
+                )
         if tr.type == "cut":
             continue
         if tr.type == "whip" and tr.axis not in ("x", "y"):
@@ -1327,7 +1347,7 @@ def validate_spec(
             errors.append(
                 _line(f"shots[{i}].in", "no previous shot to transition from", "remove in or use type: fade")
             )
-        if tr.type in ("fade", "swirl"):
+        if tr.type in INCOMING_TRANS:
             if h is not None and d > h:
                 errors.append(
                     _line(
@@ -1531,7 +1551,7 @@ def _validate_tracks(
 
 
 def _trans_window(kind: str, start: int, dur: int) -> tuple[float, float]:
-    if kind in ("fade", "swirl"):
+    if kind in INCOMING_TRANS:
         return float(start), float(start + dur)
     half = dur / 2
     return float(start) - half, float(start) + half
@@ -1548,7 +1568,7 @@ def _reject_overlap_windows(
     wins: list[tuple[int, float, float]] = []
     for i, sh in enumerate(spec.shots):
         tr = sh.in_
-        if tr is None or tr.type not in ("fade", "swirl", "whip"):
+        if tr is None or tr.type not in (*INCOMING_TRANS, "whip"):
             continue
         d = parsed.get(f"shots[{i}].in.dur")
         st = starts[i]

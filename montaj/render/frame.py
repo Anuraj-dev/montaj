@@ -47,7 +47,7 @@ from montaj.render.text import (
     raster_lines,
     raster_subs,
 )
-from montaj.render.transitions import fade, swirl, whip
+from montaj.render.transitions import burn_white, fade, swirl, wall_pullback, whip
 from montaj.render.wall import build_wall, wall_camera, wall_frame
 from montaj.spec import _dur_frames
 from montaj.timeline import (
@@ -371,8 +371,8 @@ class Renderer:
     def _outgoing_frames(self, index: int) -> float:
         """Frames of this shot still visible after its hold, while the next transition plays.
 
-        A fade or swirl runs `dur` past the cut. A whip runs `dur / 2`. ClipSource clamps
-        an index past the frames ffmpeg actually returned.
+        A fade, swirl, wall-pullback or burn-white runs `dur` past the cut. A whip runs
+        `dur / 2`. ClipSource clamps an index past the frames ffmpeg actually returned.
         """
         nxt = index + 1
         if nxt >= len(self.tl.shots):
@@ -597,6 +597,12 @@ class Renderer:
             return whip(self.cv, a, b, x, scene.axis)
         if scene.kind == "swirl":
             return swirl(self.cv, a, b, x, self._swirl_center(scene))
+        if scene.kind == "wall-pullback":
+            if scene.zoom is None:
+                raise ValueError("wall-pullback: missing zoom")
+            return wall_pullback(self.cv, a, b, x, scene.zoom)
+        if scene.kind == "burn-white":
+            return burn_white(a, b, x)
         raise ValueError(f"transition: unknown {scene.kind!r}")
 
     def _look(self):
