@@ -138,3 +138,79 @@ def test_ingest_rec_cli(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> N
     rows = json.loads((tmp_path / "assets" / "take.events.json").read_text())
     assert (tmp_path / "assets" / "take.mkv").is_file() and len(rows) == 4
     assert rows[0]["t"] == pytest.approx(1.0 - 0.5, abs=0.05)
+
+PRE_PATCH_HASHES = [
+    "9bf7d00c1ca6e144370ab66d95ee4c5cd8e4c4e653a0071fa411294dcb1d747a",
+    "1e01deaadf1ca8a84dba0b911542a470024c6826bfc9477a687d3b417e2367d8",
+]
+
+
+def test_unchanged_film_segment_hash_is_pre_patch_value(tmp_path: Path) -> None:
+    """at_event/pre are authoring-only: they must not appear in the hashed shot dump."""
+    tl = _tl(tmp_path, "  - {photo: a, hold: 30f}\n  - {clip: take, hold: 30f, clip_in: 1s}\n")
+    for sh in tl.shots:
+        dump = sh.spec.model_dump(mode="json", by_alias=True)
+        assert "at_event" not in dump and "pre" not in dump
+    # Value computed on main (before at_event/pre existed) for this exact timeline.
+    shas = {"take": "s", "a": "s2"}
+    assert [segment_hash(tl, s, shas, "e") for s in tl.segments] == PRE_PATCH_HASHES
+
+
+def test_marker_literals_and_missing_field_vs_null() -> None:
+    errs: list[str] = []
+    rows = [{"t": 1, "enabled": True}, {"t": 2, "enabled": False, "s": "true"}, {"t": 3, "result": None}]
+    for text, t in (("event:take/enabled=true", 1), ("event:take/enabled=false", 2),
+                    ('event:take/s="true"', 2), ("event:take/result=null", 3)):
+        _, sel = compile_event_marker(text, "m", errs)
+        assert match_event(rows, sel).event["t"] == t, text
+    sel = compile_at_event({"result": None}, "x", errs)
+    assert match_event([{"t": 1}, {"t": 2, "result": None}], sel).event["t"] == 2
+    assert isinstance(match_event([{"t": 1}], sel), Miss)
+
+
+def _mk_av(out: Path, *, audio_first: bool) -> None:
+    """Video luma = 100 * video-relative seconds; audio starts at 0, video at 0.5 s."""
+    subprocess.run(
+        ["ffmpeg", "-v", "error", "-y",
+         "-f", "lavfi", "-i", "sine=frequency=440:duration=3",
+         "-itsoffset", "0.5", "-f", "lavfi", "-i", "color=c=black:size=64x64:rate=30:duration=2.5,format=gray,geq=lum='min(255\\,100*T)'",
+         "-map", "1:v", "-map", "0:a", "-c:v", "libx264", "-qp", "0", "-pix_fmt", "yuv444p", "-c:a", "aac", str(out)],
+        check=True)
+
+
+def test_ingest_rec_clock_matches_decoder_seek(tmp_path: Path) -> None:
+    if not shutil.which("ffmpeg"):
+        pytest.skip("ffmpeg missing")
+    (tmp_path / "montaj.yaml").write_text("video:\n  size: 1080x1920\n  fps: 30\nshots: []\n")
+    raw = tmp_path / "raw"
+    raw.mkdir()
+    _mk_av(raw / "take.mkv", audio_first=True)
+    (raw / "take.events.json").write_text(json.dumps([{"t": 1.5, "kind": "k"}]))
+    assert main(["-C", str(tmp_path), "ingest-rec", "raw/take.mkv", "--events", "raw/take.events.json"]) == 0
+    t = json.loads((tmp_path / "assets" / "take.events.json").read_text())[0]["t"]
+    # Same command shape as render/clip.py:_spawn; one frame.
+    pix = subprocess.run(
+        ["ffmpeg", "-v", "error", "-ss", f"{t:.6f}", "-i", str(tmp_path / "assets" / "take.mkv"),
+         "-an", "-frames:v", "1", "-f", "rawvideo", "-pix_fmt", "gray", "pipe:1"],
+        check=True, stdout=subprocess.PIPE).stdout
+    # Director time 1.5 s from record start (audio at 0) = video-relative 1.0 s = luma 100.
+    assert abs(pix[0] - 100) <= 4, pix[0]
+
+
+def test_reingest_other_video_drops_stale_events(tmp_path: Path) -> None:
+    if not shutil.which("ffmpeg"):
+        pytest.skip("ffmpeg missing")
+    (tmp_path / "montaj.yaml").write_text("video:\n  size: 1080x1920\n  fps: 30\nshots: []\n")
+    for name, rate in (("one", 30), ("two", 24)):
+        d = tmp_path / name
+        d.mkdir()
+        subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", f"testsrc=size=64x64:rate={rate}:duration=1",
+                        "-c:v", "libx264", str(d / "take.mp4")], check=True)
+    (tmp_path / "ev.json").write_text(json.dumps(LOG))
+    assert main(["-C", str(tmp_path), "ingest-rec", "one/take.mp4", "--events", "ev.json"]) == 0
+    sidecar = tmp_path / "assets" / "take.events.json"
+    assert sidecar.is_file()
+    assert main(["-C", str(tmp_path), "ingest-rec", "one/take.mp4"]) == 0  # same bytes: kept
+    assert sidecar.is_file()
+    assert main(["-C", str(tmp_path), "ingest-rec", "two/take.mp4"]) == 0  # different bytes
+    assert not sidecar.exists()

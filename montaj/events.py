@@ -1,7 +1,7 @@
 """Screen-recording event logs and selectors.
 
-A log is a JSON list of objects. `t` is seconds from the file's first video frame
-(after `ingest-rec` subtracts that frame's PTS). `at_event` and `event:` markers
+A log is a JSON list of objects. `t` is seconds from the container start
+(after `ingest-rec` subtracts the container start_time, the clock `-ss` seeks). `at_event` and `event:` markers
 both pick a row with `{kind, field: value, contains, nth}`.
 
 No module state: every load takes a path and returns the rows.
@@ -176,7 +176,8 @@ def is_event_marker(text: str) -> bool:
 def compile_event_marker(text: str, path: str, errors: list[str]) -> tuple[str, Selector] | None:
     """`event:<clip>/<field>=<value>[,…][#n]`. `contains:<field>=<text>` or `field~=text` is a substring.
 
-    Values are strings (numbers still match a numeric event field). `#n` defaults to 1.
+    Values are strings (numbers still match a numeric event field); `true`, `false`, `null` are JSON
+    literals and `"true"` in quotes is the string. `#n` defaults to 1.
     """
     raw = text.strip()
     hint = "use event:take/state=speaking#1"
@@ -231,10 +232,21 @@ def compile_event_marker(text: str, path: str, errors: list[str]) -> tuple[str, 
         if substring:
             contains.append((key, val))
         elif key == "kind":
-            kind = val
+            kind = _marker_str(val)
         else:
-            equals.append((key, val))
+            equals.append((key, _marker_value(val)))
     return stem, Selector(kind=kind, equals=tuple(equals), contains=tuple(contains), nth=nth)
+
+
+def _marker_str(val: str) -> str:
+    return val[1:-1] if len(val) >= 2 and val[0] == val[-1] == '"' else val
+
+
+def _marker_value(val: str) -> object:
+    """`true`, `false`, `null` are literals; `"true"` (quoted) is the string. Else a string."""
+    if len(val) >= 2 and val[0] == val[-1] == '"':
+        return val[1:-1]
+    return {"true": True, "false": False, "null": None}.get(val, val)
 
 
 def _filter_label(key: str, want: object, mode: str) -> str:
@@ -268,7 +280,9 @@ def _distinct(events: list[dict], key: str) -> tuple[str, ...]:
 
 
 def _field_ok(ev: dict, key: str, want: object, mode: str) -> bool:
-    have = ev.get(key)
+    if key not in ev:  # a missing field is not an explicit null
+        return False
+    have = ev[key]
     if mode == "contains":
         return isinstance(have, str) and isinstance(want, str) and want in have
     return _values_equal(have, want)
@@ -327,10 +341,11 @@ def load_events_file(path: Path, err_path: str, errors: list[str]) -> list[dict]
 
 
 def normalise_events(events: list[dict], video_start: float) -> list[dict]:
-    """Subtract the first video PTS so `t` is seconds from that frame.
+    """Subtract the container start so `t` is on the clock `-ss` seeks.
 
-    Director logs are seconds from record start. Audio and video start a few
-    milliseconds apart; `-ss` seeks from the first video frame.
+    Director logs are seconds from record start. Input `-ss` is relative to the container
+    start (the earliest stream), which can precede the first video frame, so `start` is the
+    container's `start_time`, not the video stream's.
     """
     start = float(video_start)
     out: list[dict] = []

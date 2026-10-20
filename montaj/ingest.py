@@ -121,7 +121,7 @@ def ingest(
 
 @dataclass(frozen=True)
 class RecInfo:
-    """One ingested screen recording. `t0` is the first video PTS the events were shifted by."""
+    """One ingested screen recording. `t0` is the container start_time the events were shifted by."""
 
     stem: str
     path: Path
@@ -134,24 +134,28 @@ class RecInfo:
 
 
 def _probe_rec(src: Path) -> tuple[float, int]:
-    """(first video PTS seconds, audio stream count) from ffprobe."""
+    """(container start_time seconds, audio stream count) from ffprobe.
+
+    Input `-ss` is relative to the container start, so that is the clock events use.
+    """
     from montaj.encode import FFPROBE, capture
 
     raw = capture(
         [FFPROBE, "-v", "error", "-print_format", "json", "-show_entries",
-         "stream=codec_type,start_time", str(src)],
+         "stream=codec_type:format=start_time", str(src)],
         desc="ffprobe",
     )
-    streams = json.loads(raw or "{}").get("streams", [])
-    t0 = 0.0
-    for s in streams:
-        if s.get("codec_type") == "video":
-            try:
-                t0 = float(s.get("start_time") or 0.0)
-            except ValueError:
-                t0 = 0.0
-            break
+    data = json.loads(raw or "{}")
+    streams = data.get("streams", [])
+    try:
+        t0 = float(data.get("format", {}).get("start_time") or 0.0)
+    except ValueError:
+        t0 = 0.0
     return t0, sum(1 for s in streams if s.get("codec_type") == "audio")
+
+
+def _same_bytes(a: Path, b: Path) -> bool:
+    return a.stat().st_size == b.stat().st_size and _sha(a) == _sha(b)
 
 
 def ingest_rec(
@@ -160,7 +164,7 @@ def ingest_rec(
     """Copy a recording into `assets_dir` and write `<stem>.events.json` normalised to video time.
 
     The input log is seconds from record start; the output `t` is seconds from the file's
-    first video frame (`events.normalise_events`), which is what `clip_in` seeks against.
+    container start (`events.normalise_events`), the clock `clip_in` seeks against.
     """
     from montaj.encode import EncodeError, probe
     from montaj.events import dump_events, load_events_file, normalise_events
@@ -185,9 +189,12 @@ def ingest_rec(
     assets_dir = Path(assets_dir)
     assets_dir.mkdir(parents=True, exist_ok=True)
     dest = assets_dir / f"{video.stem}{video.suffix.lower()}"
-    if dest.resolve() != video.resolve():
-        shutil.copyfile(video, dest)
     events_path = None
+    if dest.resolve() != video.resolve():
+        # A different recording under the same stem must not inherit the old one's events.
+        if dest.exists() and events is None and not _same_bytes(video, dest):
+            (assets_dir / f"{video.stem}.events.json").unlink(missing_ok=True)
+        shutil.copyfile(video, dest)
     if events is not None:
         events_path = assets_dir / f"{video.stem}.events.json"
         events_path.write_text(dump_events(rows))

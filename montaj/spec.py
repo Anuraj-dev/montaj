@@ -219,8 +219,10 @@ class Shot(Frozen):
     hold: DurationStr | None = None
     until: TimeExpr | None = None
     clip_in: DurationStr | None = None
-    at_event: dict[str, Any] | None = None
-    pre: DurationStr | None = None
+    # Authoring-only: `resolve` folds the pick into clip_in. Absent stays out of model_dump
+    # so an existing film keeps its segment hash.
+    at_event: dict[str, Any] | None = Field(default=None, exclude_if=lambda v: v is None)
+    pre: DurationStr | None = Field(default=None, exclude_if=lambda v: v is None)
     crop: CropBox | None = None
     focus: tuple[float, float] | None = None
     zoom: float | None = None
@@ -1028,7 +1030,7 @@ def _event_seconds(found: Hit | Miss, stem: str, path: str, errors: list[str]) -
         errors.append(
             _line(
                 path,
-                f"event at {t:.6g}s is before the first frame",
+                f"event at {t:.6g}s is before the clip start",
                 "run montaj ingest-rec so t is video time",
             )
         )
