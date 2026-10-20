@@ -29,6 +29,8 @@ def shot_label(sh: ResolvedShot) -> str:
         return str(spec.clip)
     if spec.photo is not None:
         return str(spec.photo)
+    if spec.sequence is not None:
+        return "sequence"
     return "blank"
 
 

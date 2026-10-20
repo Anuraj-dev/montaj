@@ -393,7 +393,7 @@ def test_shot0_non_fade_hint_and_missing_source(tmp_path: Path):
     errs = _errors(tmp_path, "  - {photo: a, hold: 30f, in: {type: swirl, dur: 10f}}\n")
     assert any("remove in or use type: fade" in e and "use type: cut" not in e for e in errs)
     missing = _errors(tmp_path, "  - {hold: 10f}\n")
-    assert any("need photo, wall, clip or blank" in e for e in missing)
+    assert any("need photo, wall, clip, blank or sequence" in e for e in missing)
     blank = _write(tmp_path, "  - {blank: true, hold: 10f}\n", ["a"])
     assert load_spec(blank).shots[0].blank is True
     fade = _write(tmp_path, "  - {photo: a, hold: 30f, in: {type: fade, dur: 10f}}\n", ["a"])

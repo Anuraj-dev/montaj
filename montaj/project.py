@@ -85,11 +85,11 @@ def file_sha(path: Path) -> str:
 
 
 def _scene_shots(scene: object) -> set[int]:
-    from montaj.timeline import Blank, Clip, Still, Trans, Wall
+    from montaj.timeline import Blank, Clip, Sequence, Still, Trans, Wall
 
     if isinstance(scene, Blank):
         return set()
-    if isinstance(scene, (Still, Wall, Clip)):
+    if isinstance(scene, (Still, Wall, Clip, Sequence)):
         return {scene.shot}
     if isinstance(scene, Trans):
         return _scene_shots(scene.a) | _scene_shots(scene.b)
@@ -104,6 +104,8 @@ def _shot_photos(shot) -> list[str]:
         ids.extend(p.photo for p in shot.wall.prints)
     if shot.morph is not None:
         ids.append(shot.morph.photo)
+    if shot.sequence is not None:
+        ids.extend(item.photo for item in shot.sequence.items if item.photo)
     return ids
 
 

@@ -71,10 +71,18 @@ class Blank:
 
 
 @dataclass(frozen=True)
+class Sequence:
+    """One shot cycling `spec.sequence.items`. The renderer picks the item from `t`."""
+
+    shot: int
+    t0: int  # shot start frame: the item clock, so it reaches the segment hash
+
+
+@dataclass(frozen=True)
 class Trans:
     kind: str
-    a: Still | Wall | Clip | Blank | Trans
-    b: Still | Wall | Clip | Blank | Trans
+    a: Still | Wall | Clip | Blank | Sequence | Trans
+    b: Still | Wall | Clip | Blank | Sequence | Trans
     t0: float
     dur: float
     axis: str = "x"
@@ -83,7 +91,20 @@ class Trans:
     zoom: float | None = None
 
 
-type Scene = Still | Wall | Clip | Blank | Trans
+type Scene = Still | Wall | Clip | Blank | Sequence | Trans
+
+
+def sequence_index(start: int, every: int, n: int, t: float) -> int:
+    """Item index at time `t`. The clock starts at the shot start.
+
+    A whip samples the incoming shot before that start. Those frames hold item 0
+    instead of wrapping onto the last item.
+    """
+    if n <= 0:
+        raise ValueError("empty sequence")
+    if every <= 0 or t < start:
+        return 0
+    return int(math.floor((t - start) / float(every))) % n
 
 
 @dataclass(frozen=True)
@@ -173,13 +194,17 @@ class Segment:
     end: int
 
 
-def _base_scene(shot: ResolvedShot, span: tuple[int, int] | None = None) -> Still | Wall | Clip | Blank:
+def _base_scene(
+    shot: ResolvedShot, span: tuple[int, int] | None = None
+) -> Still | Wall | Clip | Blank | Sequence:
     if shot.kind == "blank":
         return Blank()
     if shot.kind == "wall":
         return Wall(shot=shot.index, t0=shot.start)
     if shot.kind == "clip":
         return Clip(shot=shot.index, t0=shot.start)
+    if shot.kind == "sequence":
+        return Sequence(shot=shot.index, t0=shot.start)
     return Still(shot=shot.index, span=span)
 
 
@@ -356,18 +381,21 @@ def _materialize_transition(sh: Shot) -> Shot:
 
 
 def _shot_with_frame_keys(sh: Shot, i: int, parsed: dict[str, int]) -> Shot:
-    if sh.wall is None:
-        return sh
-    pos = [
-        key.model_copy(update={"t": parsed[f"shots[{i}].wall.camera.pos[{k}].t"]})
-        for k, key in enumerate(sh.wall.camera.pos)
-    ]
-    zoom = [
-        key.model_copy(update={"t": parsed[f"shots[{i}].wall.camera.zoom[{k}].t"]})
-        for k, key in enumerate(sh.wall.camera.zoom)
-    ]
-    cam = sh.wall.camera.model_copy(update={"pos": pos, "zoom": zoom})
-    return sh.model_copy(update={"wall": sh.wall.model_copy(update={"camera": cam})})
+    if sh.wall is not None:
+        pos = [
+            key.model_copy(update={"t": parsed[f"shots[{i}].wall.camera.pos[{k}].t"]})
+            for k, key in enumerate(sh.wall.camera.pos)
+        ]
+        zoom = [
+            key.model_copy(update={"t": parsed[f"shots[{i}].wall.camera.zoom[{k}].t"]})
+            for k, key in enumerate(sh.wall.camera.zoom)
+        ]
+        cam = sh.wall.camera.model_copy(update={"pos": pos, "zoom": zoom})
+        sh = sh.model_copy(update={"wall": sh.wall.model_copy(update={"camera": cam})})
+    every = parsed.get(f"shots[{i}].sequence.every")
+    if sh.sequence is not None and every is not None:
+        sh = sh.model_copy(update={"sequence": sh.sequence.model_copy(update={"every": every})})
+    return sh
 
 
 def _shot_kind(sh: Shot) -> str:
@@ -377,6 +405,8 @@ def _shot_kind(sh: Shot) -> str:
         return "wall"
     if sh.clip is not None:
         return "clip"
+    if sh.sequence is not None:
+        return "sequence"
     return "still"
 
 
