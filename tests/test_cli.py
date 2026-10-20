@@ -12,6 +12,11 @@ import pytest
 from PIL import Image
 
 from montaj.cli import _intended_black, _intended_freeze, main
+from montaj.encode import probe
+from montaj.qa import clip_overruns
+from montaj.sheet import MAX_TILES, every_times
+from montaj.spec import load_spec
+from montaj.timeline import resolve
 
 
 def _jpeg(folder: Path, stem: str, color: tuple[int, int, int] = (10, 20, 30)) -> None:
@@ -36,8 +41,12 @@ def _run(argv: list[str], capsys: pytest.CaptureFixture[str]) -> tuple[int, str,
     return code, captured.out, captured.err
 
 
-def _clip(path: Path, *, black: bool) -> None:
-    src = "color=c=black:size=320x240:rate=25:duration=1" if black else "testsrc=size=320x240:rate=25:duration=1"
+def _clip(path: Path, *, black: bool, seconds: float = 1.0) -> None:
+    src = (
+        f"color=c=black:size=320x240:rate=25:duration={seconds}"
+        if black
+        else f"testsrc=size=320x240:rate=25:duration={seconds}"
+    )
     path.parent.mkdir(parents=True, exist_ok=True)
     subprocess.run(
         ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-f", "lavfi",
@@ -317,6 +326,7 @@ def test_check_ignores_still_holds_but_warns_on_transition_freeze(
     assert any(overlaps(s, 2.0, 3.0) for s in spans), frozen
     assert any(overlaps(s, 4.0, 6.0) for s in spans), frozen
     assert out.splitlines()[-1].startswith("WARN check:")
+    assert not any("past its clip" in line for line in out.splitlines())
 
 
 def test_check_ignores_wall_camera_holds(
@@ -399,6 +409,60 @@ def test_sheet_at_caps_count_at_twelve(tmp_path: Path, capsys: pytest.CaptureFix
     code, out, err = _run(["-C", str(proj), "sheet", "--at", times], capsys)
     assert code == 0 and err == "", out
     assert out.strip() == "OK build/sheet.jpg 12 frames"
+
+
+def _distinct(times: list[float], duration: float, fps: float) -> int:
+    n_frames = int(round(duration * fps)) or 1
+    return len({min(max(0, int(round(t * fps))), n_frames - 1) for t in times})
+
+
+def test_sheet_every_interval_pages_and_default_stays_twelve(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`--every 0.5s` covers each interval; the bare command still draws 12 frames."""
+    monkeypatch.chdir(tmp_path)
+    proj = tmp_path / "proj"
+    video = proj / "out" / "preview.mp4"
+    _clip(video, black=False, seconds=2.0)
+    info = probe(video)
+
+    code, out, err = _run(["-C", str(proj), "sheet"], capsys)
+    assert code == 0 and err == "", out
+    assert out.strip() == "OK build/sheet.jpg 12 frames"
+
+    code, out, err = _run(["-C", str(proj), "sheet", "--every", "0.5s"], capsys)
+    assert code == 0 and err == "", out
+    times = every_times(info.duration, 0.5, fps=info.fps)
+    shown = _distinct(times, info.duration, info.fps)
+    assert shown == 4  # 0, 0.5, 1.0, 1.5 on a 2s film; a 60s film is the same stride × 120
+    assert out.strip() == f"OK build/sheet.jpg {shown} frames"
+    assert not (proj / "build" / "sheet-2.jpg").exists()
+
+    # Bare seconds, same as `--at`. Dense enough to need a second page.
+    code, out, err = _run(["-C", str(proj), "sheet", "--every", "0.08"], capsys)
+    assert code == 0 and err == "", out
+    times = every_times(info.duration, 0.08, fps=info.fps)
+    shown = _distinct(times, info.duration, info.fps)
+    pages = -(-shown // MAX_TILES)
+    names = ["build/sheet.jpg", *[f"build/sheet-{i}.jpg" for i in range(2, pages + 1)]]
+    assert pages >= 2 and shown > 12
+    assert out.strip() == f"OK {' '.join(names)} {shown} frames"
+    assert (proj / "build" / "sheet-2.jpg").is_file()
+
+    # A later 12-frame sheet must not leave the dense pages behind.
+    code, out, err = _run(["-C", str(proj), "sheet"], capsys)
+    assert code == 0 and err == "", out
+    assert out.strip() == "OK build/sheet.jpg 12 frames"
+    assert not (proj / "build" / "sheet-2.jpg").exists()
+
+    code, out, _ = _run(["-C", str(proj), "sheet", "--every", "4b"], capsys)
+    assert code == 1 and out.startswith("ERR sheet: --every '4b'"), out
+    code, out, _ = _run(["-C", str(proj), "sheet", "--every", "0s"], capsys)
+    assert code == 1 and "positive" in out, out
+    code, out, _ = _run(["-C", str(proj), "sheet", "--every", "-1"], capsys)
+    assert code == 1 and "positive" in out, out
+    code, out, _ = _run(["-C", str(proj), "sheet", "--at", "0.2", "--every", "0.5s"], capsys)
+    assert code == 1 and "--every" in out and "--at" in out, out
 
 
 def test_sheet_at_accepts_seconds_suffix_and_rejects_junk(tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch) -> None:
@@ -544,6 +608,88 @@ def test_render_line_suffixes_audio(tmp_path: Path, capsys: pytest.CaptureFixtur
     assert not text.strip().endswith(" audio")
 
 
+def _bars(path: Path, seconds: float, fps: int = 30) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    subprocess.run(
+        ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-f", "lavfi",
+         "-i", f"color=c=red:size=320x240:rate={fps}:duration={seconds}",
+         "-pix_fmt", "yuv420p", str(path)],
+        check=True,
+    )
+
+
+def _clip_film(proj: Path, shots: str, *, source: float = 2.0) -> Path:
+    _jpeg(proj / "assets", "a")
+    _bars(proj / "assets" / "bars.mp4", source)
+    (proj / "montaj.yaml").write_text(
+        "video:\n  size: 320x240\n  fps: 30\n  look: warm-film\n"
+        f"assets: assets\nshots:\n{shots}"
+    )
+    return proj
+
+
+def _overruns(proj: Path) -> list[str]:
+    tl = resolve(load_spec(proj / "montaj.yaml"), proj)
+    return clip_overruns(tl, proj / "assets", log=proj / "build" / "qa.log")
+
+
+def test_check_warns_when_a_shot_runs_two_seconds_past_its_clip(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A 4s shot on a 2s clip names the shot and the overrun. A shot that fits adds nothing."""
+    proj = _clip_film(tmp_path / "over", "  - {clip: bars, hold: 4s}\n")
+    _solid(proj / "out" / "preview.mp4", 1.0)
+    code, out, err = _run(["-C", str(proj), "check"], capsys)
+    assert code == 0 and err == "", out
+    body = out.splitlines()
+    assert "WARN shots[0] bars runs 2.00s past its clip" in body, out
+    assert body[-1].startswith("WARN check:")
+
+    fit = _clip_film(tmp_path / "fit", "  - {clip: bars, hold: 2s}\n  - {photo: a, hold: 1s}\n")
+    _solid(fit / "out" / "preview.mp4", 1.0)
+    code, out, err = _run(["-C", str(fit), "check"], capsys)
+    assert code == 0 and err == "", out
+    assert not any("past its clip" in line for line in out.splitlines()), out
+
+
+def test_clip_overrun_counts_clip_in_and_the_outgoing_transition(tmp_path: Path) -> None:
+    proj = _clip_film(
+        tmp_path / "seek",
+        "  - {clip: bars, hold: 4s, clip_in: 2s}\n",
+        source=4.0,
+    )
+    assert _overruns(proj) == ["WARN shots[0] bars runs 2.00s past its clip"]
+
+    fade = _clip_film(
+        tmp_path / "fade",
+        "  - {clip: bars, hold: 2s}\n"
+        "  - {photo: a, hold: 2s, in: {type: fade, dur: 2s}}\n",
+    )
+    assert _overruns(fade) == ["WARN shots[0] bars runs 2.00s past its clip"]
+
+    whip = _clip_film(
+        tmp_path / "whip",
+        "  - {clip: bars, hold: 2s}\n"
+        "  - {photo: a, hold: 2s, in: {type: whip, dur: 2s}}\n",
+    )
+    assert _overruns(whip) == ["WARN shots[0] bars runs 1.00s past its clip"]
+
+    swirl = _clip_film(
+        tmp_path / "swirl",
+        "  - {clip: bars, hold: 2s}\n"
+        "  - {photo: a, hold: 2s, in: {type: swirl, dur: 1s}}\n",
+    )
+    assert _overruns(swirl) == ["WARN shots[0] bars runs 1.00s past its clip"]
+
+    quiet = _clip_film(
+        tmp_path / "quiet",
+        "  - {photo: a, hold: 2s}\n"
+        "  - {clip: bars, hold: 2s}\n"
+        "  - {clip: bars, hold: 1s, clip_in: 1s}\n",
+    )
+    assert _overruns(quiet) == []
+
+
 def test_check_av_tolerance_is_one_frame_when_audio_is_set(
     tmp_path: Path, capsys: pytest.CaptureFixture[str],
 ) -> None:
@@ -632,3 +778,32 @@ def test_review_port_in_use_is_one_err_line(tmp_path: Path, capsys) -> None:
         port = busy.getsockname()[1]
         code, out, _ = _run(["-C", str(root), "review", "--port", str(port)], capsys)
     assert code == 1 and out.startswith("ERR review:") and len(out.strip().splitlines()) == 1
+
+
+def test_clip_overrun_ignores_a_longer_audio_track_in_mkv(tmp_path: Path) -> None:
+    """MKV has no video stream duration; a 8s audio track must not hide a 2s video overrun."""
+    proj = _clip_film(tmp_path / "mkv", "  - {clip: bars, hold: 4s}\n")
+    (proj / "assets" / "bars.mp4").unlink()
+    subprocess.run(
+        ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+         "-f", "lavfi", "-i", "color=c=red:size=320x240:rate=30:duration=2",
+         "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000:duration=8",
+         "-pix_fmt", "yuv420p", str(proj / "assets" / "bars.mkv")],
+        check=True,
+    )
+    assert _overruns(proj) == ["WARN shots[0] bars runs 2.00s past its clip"]
+
+
+def test_check_overrides_reads_expect_and_loudness(tmp_path: Path) -> None:
+    from montaj.cli import _check_overrides
+
+    proj = tmp_path
+    (proj / "assets").mkdir()
+    Image.new("RGB", (8, 8), (9, 9, 9)).save(proj / "assets" / "a.jpg")
+    (proj / "montaj.yaml").write_text(
+        "video:\n  size: 1080x1920\n  fps: 30\n  look: warm-film\nassets: assets\nshots:\n  - {photo: a, hold: 4s}\n"
+        "check:\n  expect:\n    - {black: [0s, 2s], why: intro}\n  loudness: {i: -16, tol: 2}\n"
+    )
+    expects, i, tol = _check_overrides(proj)
+    assert [(e.kind, e.span, e.why) for e in expects] == [("black", (0.0, 2.0), "intro")]
+    assert (i, tol) == (-16.0, 2.0)
