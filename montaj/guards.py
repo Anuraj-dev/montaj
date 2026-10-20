@@ -3,7 +3,7 @@
 Declared under `check:` in the spec; absent means nothing here runs. Backends load lazily so the
 core install never needs them: digits shell out to the `tesseract` binary, faces use OpenCV's
 bundled Haar cascade (`uv sync --extra guards`). A missing backend is one `ERR <guard>: <hint>`
-line, never a crash. Sampled frames are decoded from the rendered video into `build/guards/`.
+line, never a crash. Sampled frames are decoded from the rendered video into `build/guards/` (cleared each run).
 """
 from __future__ import annotations
 
@@ -76,15 +76,17 @@ def opencv_faces() -> Faces:
     def count(image: Path) -> int:
         gray = cv2.imread(str(image), cv2.IMREAD_GRAYSCALE)
         if gray is None:
-            return 0
+            raise RuntimeError(f"cannot decode {image.name}")
         return len(cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=6, minSize=(48, 48)))
 
     return count
 
 
-def _extract(video: Path, frame: int, fps: int, out: Path, log: Path | str | None) -> None:
+def _extract(video: Path, frame: int, fps: int, out: Path, log: Path | str | None) -> bool:
+    """Decode one frame to `out`; False when the video ends first (ffmpeg still exits 0 then)."""
     run([FFMPEG, "-hide_banner", "-nostats", "-y", "-ss", f"{frame / fps:.4f}", "-i", str(video),
          "-frames:v", "1", str(out)], log=log, desc="qa")
+    return out.is_file() and out.stat().st_size > 0
 
 
 def content_guards(tl: Timeline, video: Path | str, work: Path, *, log: Path | str | None = None,
@@ -112,19 +114,25 @@ def content_guards(tl: Timeline, video: Path | str, work: Path, *, log: Path | s
     if read_digits is None and count_faces is None:
         return lines
     allowed = spec_digits(tl) if guards.digits == "spec" else set()
+    # Fresh dir each run: a leftover image must never stand in for a frame ffmpeg failed to write.
+    shutil.rmtree(work, ignore_errors=True)
     work.mkdir(parents=True, exist_ok=True)
-    for shot in tl.shots:
-        if shot.spec.blank:
-            continue
+    for shot in tl.shots:  # blank cards too: their text and subs are rendered overlays
         for f in sample_frames(shot.start, shot.end, guards.sample):
             image = work / f"shot{shot.index}-f{f}.png"
-            _extract(Path(video), f, tl.fps, image, log)
-            if read_digits is not None:
-                bad = [d for d in read_digits(image) if d not in allowed]
-                if bad:
-                    lines.append(f'WARN digits shot={shot.index} frame={f} "{" ".join(bad)}"')
-            if count_faces is not None and (n := count_faces(image)):
-                lines.append(f"WARN faces shot={shot.index} frame={f} ({n})")
+            if not _extract(Path(video), f, tl.fps, image, log):
+                lines.append(f"ERR frames: shot={shot.index} frame={f} is past the end of the video; rerender")
+                return lines
+            try:
+                if read_digits is not None:
+                    bad = [d for d in read_digits(image) if d not in allowed]
+                    if bad:
+                        lines.append(f'WARN digits shot={shot.index} frame={f} "{" ".join(bad)}"')
+                if count_faces is not None and (n := count_faces(image)):
+                    lines.append(f"WARN faces shot={shot.index} frame={f} ({n})")
+            except RuntimeError as exc:
+                lines.append(f"ERR guards: shot={shot.index} frame={f}: {exc}")
+                return lines
     return lines
 
 

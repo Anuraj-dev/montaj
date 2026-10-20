@@ -71,6 +71,7 @@ def test_guards_off_by_default(tmp_path: Path, capsys) -> None:
 @pytest.mark.parametrize("bad", [
     "check: {digits: all}", "check: {faces: yes_please}", "check: {sample: 0}", "check: {sample: 99}",
     "check: {nope: 1}",
+    "check: {sample: true}",
 ])
 def test_validate_rejects_bad_guard_values(tmp_path: Path, bad: str) -> None:
     proj = _project(tmp_path, bad + "\n")
@@ -135,3 +136,33 @@ def test_real_tesseract_finds_digits_on_screen(tmp_path: Path, capsys) -> None:
     _, lines = _check(proj, capsys)
     assert any(line.startswith("WARN digits shot=0 frame=15") and "4217" in line for line in lines), lines
     assert not any(line.startswith("WARN digits shot=1") for line in lines)
+
+
+def test_blank_shots_are_sampled(tmp_path: Path) -> None:
+    proj = _project(tmp_path, "check: {digits: none}\n")
+    (proj / "montaj.yaml").write_text(
+        (proj / "montaj.yaml").read_text().replace("{photo: a, hold: 30f}", "{blank: true, hold: 30f}"))
+    from montaj.timeline import resolve
+    tl = resolve(load_spec(proj / "montaj.yaml"), proj)
+    _video(proj / "out" / "preview.mp4", None)
+    out = guards.content_guards(tl, proj / "out" / "preview.mp4", proj / "build" / "g",
+                                ocr=lambda img: ["9"] if "shot0-" in img.name else [])
+    assert any(line.startswith("WARN digits shot=0") for line in out)
+
+
+def test_frame_past_video_end_is_err_not_stale(tmp_path: Path) -> None:
+    proj = _project(tmp_path, "check: {digits: none}\n")
+    (proj / "montaj.yaml").write_text(
+        (proj / "montaj.yaml").read_text().replace("{photo: b, hold: 30f}", "{photo: b, hold: 90f}"))
+    from montaj.timeline import resolve
+    tl = resolve(load_spec(proj / "montaj.yaml"), proj)
+    _video(proj / "out" / "preview.mp4", None)  # 60 frames; spec now has 120
+    work = proj / "build" / "g"
+    work.mkdir(parents=True)
+    for p in range(120):  # stale leftovers from an earlier check
+        (work / f"shot1-f{p}.png").write_bytes(b"stale")
+    seen: list[str] = []
+    out = guards.content_guards(tl, proj / "out" / "preview.mp4", work,
+                                ocr=lambda img: seen.append(img.name) or [])
+    assert any(line.startswith("ERR frames:") for line in out)
+    assert not any(b"stale" == (work / n).read_bytes() for n in seen)
