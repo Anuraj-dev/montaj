@@ -159,6 +159,8 @@ Fade with `blur`: each side is blurred σ = (1 − its opacity)·blur while it f
 ## Clips (montaj/render/clip.py)
 `ClipSource(path, fps)` decodes with ffmpeg (`-ss clip_in -i path -vf fps=<fps>,scale=…:force_original_aspect_ratio=increase,crop=W:H -f rawvideo rgb24`) into
 CPU frames lazily per shot; frame for timeline `t` = `floor(t − shot.start)` clamped to the clip length.
+The decoded window is the hold plus the outgoing fade or swirl (half a whip). Past the file, that index
+clamps to the last decoded frame. `montaj check` warns, naming the shot and how far the window overruns.
 Framing: cover, centred (focus/crop/drift not supported on clips in M2).
 
 ## Timeline (montaj/timeline.py) — additions

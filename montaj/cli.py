@@ -22,7 +22,7 @@ from montaj.doctor import doctor
 from montaj.encode import export, probe
 from montaj.ingest import ingest
 from montaj import taste
-from montaj.qa import BLACK_PIX_TH, check
+from montaj.qa import BLACK_PIX_TH, check, clip_overruns
 from montaj.review.server import serve as serve_review
 from montaj.review.summary import summary as review_summary
 from montaj.sheet import MAX_TILES, pick_times, sheet
@@ -451,12 +451,22 @@ def _av_tol(root: Path) -> float | None:
     return 1.0 / float(spec.video.fps)
 
 
+def _clip_overruns(root: Path) -> list[str]:
+    """Clip shots whose timeline read runs past the source. No spec means no new lines."""
+    spec_file = root / "montaj.yaml"
+    if not spec_file.is_file():
+        return []
+    tl = resolve(load_spec(spec_file), root)
+    return clip_overruns(tl, _assets_dir(root, tl.spec.assets), log=root / "build" / "qa.log")
+
+
 def _cmd_check(ns: argparse.Namespace, root: Path) -> list[str]:
     lines = check(
         _video(root, ns.video), _intended_freeze(root),
         log=root / "build" / "qa.log", av_tol=_av_tol(root),
         intended_black=_intended_black(root),
     )
+    lines.extend(_clip_overruns(root))
     warns = sum(line.startswith("WARN") for line in lines)
     lines.append(f"WARN check: {warns} warnings" if warns else "OK check")
     return lines

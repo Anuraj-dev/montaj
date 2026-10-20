@@ -3,6 +3,9 @@
 `check` returns short `OK|WARN|INFO ...` lines for the CLI to print; the ffmpeg stderr it
 parses goes to `build/qa.log`. Spans the caller marks as intended (`intended_freeze`) are
 reported as `OK frozen` so a deliberate still hold is not a defect.
+
+`clip_overruns` is the spec-side half of `montaj check`: a clip shot whose read window
+runs past the source file. The CLI appends those lines to `check`.
 """
 from __future__ import annotations
 
@@ -11,6 +14,9 @@ from pathlib import Path
 from typing import Sequence
 
 from montaj.encode import FFMPEG, probe, run
+from montaj.project import find_clip
+from montaj.spec import _dur_frames
+from montaj.timeline import Timeline, clip_read_frames, transition_overlap
 
 Span = tuple[float, float]
 BLACK_MIN_S = 0.10  # shorter than this is a fade, not a defect
@@ -165,4 +171,49 @@ def check(video: Path | str, intended_freeze: Sequence[Span] = (), *, log: Path 
     return lines
 
 
-__all__ = ["Span", "black_spans", "check", "frozen_spans", "loudness", "subtract", "union"]
+def _frames(raw: str | None, fps: int, bpm: float | None) -> float:
+    if not raw:
+        return 0.0
+    frames = _dur_frames(raw, fps, bpm, "duration", [])
+    return 0.0 if frames is None else float(frames)
+
+
+def clip_overruns(tl: Timeline, assets: Path, *, log: Path | str | None = None) -> list[str]:
+    """WARN when a clip shot's read window goes past the end of its source.
+
+    The window is the hold plus the outgoing fade or swirl, or half a whip: the
+    same frames the renderer asks ffmpeg for. `clip_in` moves the start. One
+    frame of slack, so a container duration a frame under the hold stays quiet.
+    Each line names the shot (`shots[i]` and the clip stem) and the overrun.
+    """
+    fps = int(tl.fps)
+    if fps <= 0:
+        return []
+    bpm = tl.spec.video.bpm
+    durations: dict[Path, float] = {}
+    lines: list[str] = []
+    for shot in tl.shots:
+        sh = shot.spec
+        if not sh.clip:
+            continue
+        nxt = shot.index + 1
+        overlap = 0.0
+        if nxt < len(tl.shots):
+            tr = tl.shots[nxt].spec.in_
+            if tr is not None and tr.type != "cut" and tr.dur is not None:
+                overlap = transition_overlap(tr.type, _frames(tr.dur, fps, bpm))
+        need = clip_read_frames(shot.end - shot.start, overlap) / float(fps)
+        clip_in = _frames(sh.clip_in, fps, bpm) / float(fps)
+        path = find_clip(assets, sh.clip)
+        if path not in durations:
+            durations[path] = probe(path, log=log).duration
+        overrun = (clip_in + need) - durations[path]
+        if overrun <= (1.0 / fps) + 1e-4:
+            continue
+        lines.append(f"WARN shots[{shot.index}] {sh.clip} runs {overrun:.2f}s past its clip")
+    return lines
+
+
+__all__ = [
+    "Span", "black_spans", "check", "clip_overruns", "frozen_spans", "loudness", "subtract", "union",
+]

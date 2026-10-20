@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -9,6 +10,30 @@ from montaj.render.core import EASE as EASE_FN, key as eval_key
 from montaj.spec import Shot, Spec, SpecError, _format_beat0, parse_wh, round_frame, validate_spec
 
 _TRACK_DEFAULT = {"dust": "linear", "glow": "linear", "bars": "sine"}
+
+
+def transition_overlap(kind: str | None, dur_frames: float) -> float:
+    """Frames of the previous shot still on screen while this transition plays.
+
+    A fade or swirl runs for the whole `dur`. A whip is centred on the cut, so
+    only half of it still shows the outgoing shot. A cut shows nothing past the hold.
+    """
+    if kind is None or kind == "cut" or dur_frames <= 0:
+        return 0.0
+    if kind == "whip":
+        return float(dur_frames) / 2.0
+    if kind in ("fade", "swirl"):
+        return float(dur_frames)
+    return 0.0
+
+
+def clip_read_frames(hold_frames: int, overlap_frames: float) -> int:
+    """Output frames read from a clip: the hold, plus the outgoing overlap.
+
+    `ceil(overlap - 1e-6)` keeps a fractional whip from dropping a frame and
+    treats a zero overlap as zero (ceil of a tiny negative is 0).
+    """
+    return int(hold_frames) + int(math.ceil(float(overlap_frames) - 1e-6))
 
 
 @dataclass(frozen=True)
