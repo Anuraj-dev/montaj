@@ -1,8 +1,9 @@
 """QA on a rendered file: duration, size, fps, black/frozen spans, loudness, A/V offset.
 
 `check` returns short `OK|WARN|INFO ...` lines for the CLI to print; the ffmpeg stderr it
-parses goes to `build/qa.log`. Spans the caller marks as intended (`intended_freeze`) are
-reported as `OK frozen` so a deliberate still hold is not a defect.
+parses goes to `build/qa.log`. Spans the caller marks as intended are `INFO … ignored as
+intended`, not defects. An `Expect` that matches a detected span adds its `why`; one that
+matches nothing is `INFO expect … not found`.
 
 `clip_overruns` is the spec-side half of `montaj check`: a clip shot whose read window
 runs past the source file. The CLI appends those lines to `check`.
@@ -11,7 +12,7 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
-from typing import Sequence
+from typing import NamedTuple, Sequence
 
 from montaj.encode import FFMPEG, FFPROBE, capture, probe, run
 from montaj.project import find_clip
@@ -19,6 +20,14 @@ from montaj.spec import _dur_frames
 from montaj.timeline import Timeline, clip_read_frames, transition_overlap
 
 Span = tuple[float, float]
+
+
+class Expect(NamedTuple):
+    """A designed span in seconds. `kind` is `black` or `frozen`."""
+
+    kind: str
+    span: Span
+    why: str | None = None
 BLACK_MIN_S = 0.10  # shorter than this is a fade, not a defect
 BLACK_PIX_TH = 0.10
 FREEZE_NOISE_DB = -60.0
@@ -121,30 +130,78 @@ def subtract(span: Span, ranges: Sequence[Span]) -> list[Span]:
     return [piece for piece in pieces if piece[1] - piece[0] > SPAN_EPS_S]
 
 
+def _span_label(span: Span) -> str:
+    """`0–2s`, `1.5–2.25s`. Whole seconds drop the fraction."""
+
+    def one(t: float) -> str:
+        rounded = round(t)
+        if abs(t - rounded) < 5e-3:
+            return str(int(rounded))
+        return f"{t:.2f}".rstrip("0").rstrip(".")
+
+    return f"{one(span[0])}\u2013{one(span[1])}s"
+
+
+def _matches(span: Span, detected: Sequence[Span]) -> bool:
+    """True when `span` overlaps a detected span, with `SPAN_EPS_S` of slack for detector rounding."""
+    lo, hi = span
+    for start, end in detected:
+        if max(lo, start) < min(hi, end) + SPAN_EPS_S:
+            return True
+    return False
+
+
+def _note_expects(lines: list[str], kind: str, detected: Sequence[Span], expect: Sequence[Expect]) -> None:
+    for item in expect:
+        if item.kind != kind:
+            continue
+        label = _span_label(item.span)
+        if _matches(item.span, detected):
+            if item.why:
+                lines.append(f"INFO {kind} {label} ignored as intended: {item.why}")
+        else:
+            lines.append(f"INFO expect {kind} {label} not found")
+
+
+def _loudness_want(target: float) -> str:
+    if abs(target - round(target)) < 1e-6:
+        return f"{target:.0f}"
+    return f"{target:.1f}"
+
+
 def check(video: Path | str, intended_freeze: Sequence[Span] = (), *, log: Path | str | None = None,
-          av_tol: float | None = None, intended_black: Sequence[Span] = ()) -> list[str]:
+          av_tol: float | None = None, intended_black: Sequence[Span] = (),
+          expect: Sequence[Expect] = (), loudness_target: float | None = None,
+          loudness_tol: float | None = None) -> list[str]:
     """One short line per check; the only stdout surface of the QA stage.
 
     `av_tol` overrides the 0.5 s default. The CLI passes one frame when the spec has audio.
     `intended_black` drops black spans that sit inside a designed dark window (opening fade
-    from a dark ground, a dark blank and its transitions, the outro fade).
+    from a dark ground, a dark blank and its transitions, the outro fade, `check.expect`).
+    `expect` is that same declaration plus its `why`: a match names the reason, a miss is
+    `INFO expect … not found`. `loudness_target` / `loudness_tol` override -14 LUFS ± 1.
     """
     info = probe(video, log=log)
     tol = AV_TOL_S if av_tol is None else av_tol
+    target = LOUDNESS_TARGET if loudness_target is None else loudness_target
+    ltol = LOUDNESS_TOL if loudness_tol is None else loudness_tol
     lines = [
         f"OK duration {info.duration:.2f}s",
         f"OK size {info.width}x{info.height}",
         f"OK fps {info.fps:.1f}",
     ]
     ignored_black = 0
-    for span in black_spans(video, log=log):
+    detected_black = black_spans(video, log=log)
+    for span in detected_black:
         left = subtract(span, intended_black)
         ignored_black += 1 if not left else 0
         lines += [f"WARN black {start:.2f}-{end:.2f}s" for start, end in left]
     if ignored_black:
         lines.append(f"INFO black {ignored_black} span(s) ignored as intended")
+    _note_expects(lines, "black", detected_black, expect)
     ignored = 0
-    for span in frozen_spans(video, log=log):
+    detected_frozen = frozen_spans(video, log=log)
+    for span in detected_frozen:
         # A leftover shorter than the detector's own minimum is the eased tail of a transition
         # running into an intended hold, not a freeze in its own right.
         left = [p for p in subtract(span, intended_freeze) if p[1] - p[0] >= FREEZE_MIN_S]
@@ -152,16 +209,17 @@ def check(video: Path | str, intended_freeze: Sequence[Span] = (), *, log: Path 
         lines += [f"WARN frozen {start:.1f}-{end:.1f}s" for start, end in left]
     if ignored:
         lines.append(f"INFO frozen {ignored} span(s) ignored as intended")
+    _note_expects(lines, "frozen", detected_frozen, expect)
     if not info.has_audio:
         lines.append("INFO no audio")
         return lines
     i = loudness(video, log=log)
     if i is None:
         lines.append("WARN loudness unreadable")
-    elif abs(i - LOUDNESS_TARGET) <= LOUDNESS_TOL:
+    elif abs(i - target) <= ltol:
         lines.append(f"OK loudness {i:.1f} LUFS")
     else:
-        lines.append(f"WARN loudness {i:.1f} LUFS (want {LOUDNESS_TARGET:.0f})")
+        lines.append(f"WARN loudness {i:.1f} LUFS (want {_loudness_want(target)})")
     if info.av_offset is None:
         lines.append("INFO av-offset unknown")
     elif abs(info.av_offset) > tol:
@@ -239,5 +297,5 @@ def clip_overruns(tl: Timeline, assets: Path, *, log: Path | str | None = None) 
 
 
 __all__ = [
-    "Span", "black_spans", "check", "clip_overruns", "frozen_spans", "loudness", "subtract", "union",
+    "Expect", "Span", "black_spans", "check", "clip_overruns", "frozen_spans", "loudness", "subtract", "union",
 ]

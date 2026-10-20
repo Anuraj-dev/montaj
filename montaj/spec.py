@@ -9,7 +9,15 @@ from pathlib import Path
 from typing import Annotated
 
 import yaml
-from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, ValidationError, WrapSerializer
+from pydantic import (
+    BaseModel,
+    BeforeValidator,
+    ConfigDict,
+    Field,
+    ValidationError,
+    WrapSerializer,
+    model_validator,
+)
 
 EASE = ("linear", "smooth", "cubic", "outc", "inc", "expo", "ramp", "sine")
 EASE_HINT = "use linear, smooth, cubic, outc, inc, expo, ramp or sine"
@@ -306,6 +314,41 @@ class Fx(Frozen):
     pos: tuple[float, float] | None = None
 
 
+class ExpectSpan(Frozen):
+    """One designed black or frozen window. Times are film-start expressions, so markers work."""
+
+    black: tuple[TimeExpr, TimeExpr] | None = None
+    frozen: tuple[TimeExpr, TimeExpr] | None = None
+    why: str | None = None
+
+    @model_validator(mode="after")
+    def _one_kind(self) -> ExpectSpan:
+        if self.black is None and self.frozen is None:
+            raise ValueError("need black or frozen")
+        if self.black is not None and self.frozen is not None:
+            raise ValueError("set black or frozen, not both")
+        if self.why is None:
+            return self
+        why = self.why.strip()
+        if not why or "\n" in self.why or "\r" in self.why:
+            raise ValueError("why must be one non-empty line")
+        if why != self.why:
+            return self.model_copy(update={"why": why})
+        return self
+
+
+class LoudnessTarget(Frozen):
+    """Override `check`'s integrated-loudness target. `tol` is LU around `i`."""
+
+    i: RealNum
+    tol: RealNum = 1.0
+
+
+class CheckSpec(Frozen):
+    expect: list[ExpectSpan] = Field(default_factory=list)
+    loudness: LoudnessTarget | None = None
+
+
 class Spec(Frozen):
     video: Video
     assets: str = "assets"
@@ -316,6 +359,7 @@ class Spec(Frozen):
     text: list[TextBlock] = Field(default_factory=list)
     subs: list[Sub] = Field(default_factory=list)
     tracks: Tracks | None = None
+    check: CheckSpec | None = None
 
 
 def _yaml_path(loc: tuple) -> str:
@@ -365,6 +409,10 @@ def _from_pydantic(exc: ValidationError) -> list[str]:
             hint = "use integer source-px"
         elif "not a boolean" in msg:
             hint = "use a number"
+        elif msg in ("need black or frozen", "set black or frozen, not both"):
+            hint = "use black: [0s, 2s] or frozen: [logo, logo+0.5s]"
+        elif msg == "why must be one non-empty line":
+            hint = "a short reason, one line"
         lines.append(_line(path, msg, hint))
     return lines
 
@@ -587,6 +635,11 @@ def _time_strings(spec: Spec) -> list[str]:
     if spec.tracks is not None:
         for keys in (spec.tracks.dust, spec.tracks.glow, spec.tracks.bars):
             out.extend(k.t for k in keys)
+    if spec.check is not None:
+        for item in spec.check.expect:
+            pair = item.black if item.black is not None else item.frozen
+            if pair:
+                out.extend(pair)
     return out
 
 
@@ -1285,7 +1338,72 @@ def validate_spec(
 
     _validate_text(spec, markers, fps, bpm, times, errors, beat0=beat0)
     _validate_tracks(spec, markers, fps, bpm, times, errors, beat0=beat0)
+    _validate_check(spec, markers, fps, bpm, times, errors, beat0=beat0)
     return parsed, times, markers, bpm, beat0
+
+
+def _sec_label(frames: float, fps: int) -> str:
+    seconds = frames / float(fps) if fps > 0 else frames
+    text = f"{seconds:.4f}".rstrip("0").rstrip(".")
+    return f"{text}s"
+
+
+def _validate_check(
+    spec: Spec,
+    markers: dict[str, float],
+    fps: int,
+    bpm: float | None,
+    times: dict[str, float],
+    errors: list[str],
+    *,
+    beat0: float = 0.0,
+) -> None:
+    """Resolve `check.expect` spans and the optional loudness target.
+
+    A span that never shows up in the render is not an error here: `check` reports it
+    as INFO, so a stale annotation survives an edit instead of failing validate.
+    """
+    if spec.check is None:
+        return
+    loud = spec.check.loudness
+    if loud is not None:
+        if not math.isfinite(loud.i):
+            errors.append(
+                _line("check.loudness.i", f"must be finite, got {_fmt_num(loud.i)}", "use i: -14")
+            )
+        if not math.isfinite(loud.tol) or loud.tol < 0:
+            errors.append(
+                _line(
+                    "check.loudness.tol",
+                    f"must be >= 0, got {_fmt_num(loud.tol)}",
+                    "use tol: 1",
+                )
+            )
+    for i, item in enumerate(spec.check.expect):
+        kind = "black" if item.black is not None else "frozen"
+        pair = item.black if item.black is not None else item.frozen
+        if pair is None:
+            continue
+        ends: list[float | None] = []
+        for j, raw in enumerate(pair):
+            val = _parse_time(
+                raw, markers, fps, bpm, f"check.expect[{i}].{kind}[{j}]", errors, beat0=beat0
+            )
+            ends.append(val)
+        if ends[0] is None or ends[1] is None:
+            continue
+        start, end = ends[0], ends[1]
+        if end <= start:
+            errors.append(
+                _line(
+                    f"check.expect[{i}].{kind}",
+                    f"ends at or before the start ({_sec_label(start, fps)} to {_sec_label(end, fps)})",
+                    "end must be later than start",
+                )
+            )
+            continue
+        times[f"check.expect[{i}].start"] = start
+        times[f"check.expect[{i}].end"] = end
 
 
 def _validate_text(

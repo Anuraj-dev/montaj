@@ -792,3 +792,18 @@ def test_clip_overrun_ignores_a_longer_audio_track_in_mkv(tmp_path: Path) -> Non
         check=True,
     )
     assert _overruns(proj) == ["WARN shots[0] bars runs 2.00s past its clip"]
+
+
+def test_check_overrides_reads_expect_and_loudness(tmp_path: Path) -> None:
+    from montaj.cli import _check_overrides
+
+    proj = tmp_path
+    (proj / "assets").mkdir()
+    Image.new("RGB", (8, 8), (9, 9, 9)).save(proj / "assets" / "a.jpg")
+    (proj / "montaj.yaml").write_text(
+        "video:\n  size: 1080x1920\n  fps: 30\n  look: warm-film\nassets: assets\nshots:\n  - {photo: a, hold: 4s}\n"
+        "check:\n  expect:\n    - {black: [0s, 2s], why: intro}\n  loudness: {i: -16, tol: 2}\n"
+    )
+    expects, i, tol = _check_overrides(proj)
+    assert [(e.kind, e.span, e.why) for e in expects] == [("black", (0.0, 2.0), "intro")]
+    assert (i, tol) == (-16.0, 2.0)
