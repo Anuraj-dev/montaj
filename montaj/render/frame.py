@@ -374,7 +374,7 @@ class Renderer:
         every = seq.every
         if isinstance(every, bool) or not isinstance(every, int):
             raise ValueError(f"shot {scene.shot} sequence.every is not resolved")
-        item = seq.items[sequence_index(shot.start, every, len(seq.items), t)]
+        item = seq.items[sequence_index(scene.t0, every, len(seq.items), t)]
         self._shot = scene.shot
         if item.color is not None:
             return self._solid(item.color)

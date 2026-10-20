@@ -92,6 +92,13 @@ def _reject_bare_duration(v: object) -> object:
     return v
 
 
+def _reject_bare_duration_or_bool(v: object) -> object:
+    """Pydantic would read YAML `true` as the integer 1, a one-frame interval."""
+    if isinstance(v, bool):
+        raise ValueError("bare number")
+    return _reject_bare_duration(v)
+
+
 DurationStr = Annotated[str, BeforeValidator(_reject_bare_duration)]
 TimeExpr = DurationStr
 
@@ -223,7 +230,7 @@ class SequenceItem(Frozen):
 
 
 class SequenceSpec(Frozen):
-    every: Annotated[str | int, BeforeValidator(_reject_bare_duration)]  # int only after resolve
+    every: Annotated[str | int, BeforeValidator(_reject_bare_duration_or_bool)]  # int only after resolve
     items: list[Annotated[SequenceItem, BeforeValidator(_as_sequence_item)]]
 
 
@@ -243,7 +250,8 @@ class Shot(Frozen):
     morph: Morph | None = None
     pulse: str | None = None
     blank: bool = False
-    sequence: SequenceSpec | None = None
+    # Absent stays out of model_dump so films without a sequence keep their segment hash.
+    sequence: SequenceSpec | None = Field(default=None, exclude_if=lambda v: v is None)
     in_: Transition | None = Field(default=None, alias="in")
     flash: float | None = None
 

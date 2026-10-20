@@ -73,6 +73,7 @@ class Sequence:
     """One shot cycling `spec.sequence.items`. The renderer picks the item from `t`."""
 
     shot: int
+    t0: int  # shot start frame: the item clock, so it reaches the segment hash
 
 
 @dataclass(frozen=True)
@@ -200,7 +201,7 @@ def _base_scene(
     if shot.kind == "clip":
         return Clip(shot=shot.index, t0=shot.start)
     if shot.kind == "sequence":
-        return Sequence(shot=shot.index)
+        return Sequence(shot=shot.index, t0=shot.start)
     return Still(shot=shot.index, span=span)
 
 

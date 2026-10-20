@@ -267,7 +267,7 @@ def test_check_treats_a_colour_step_as_intended(tmp_path: Path) -> None:
         return any(a - 1e-6 <= lo and b + 1e-6 >= hi for a, b in spans)
 
     assert covers(freeze, 0.0, 1.0)  # still
-    assert covers(freeze, 1.0, 1.8)  # both colour steps
+    assert covers(freeze, 1.0, 1.02)  # a colour step is a designed hold
     assert covers(black, 1.4, 1.8)  # the dark step
     assert not any(max(a, 1.05) < min(b, 1.35) for a, b in black)
 
@@ -283,7 +283,7 @@ def test_check_treats_a_colour_step_as_intended(tmp_path: Path) -> None:
     )
     spans = _intended_freeze(faded.parent)
     assert not any(max(a, 1.2) < min(b, 1.8) for a, b in spans)
-    assert covers(spans, 2.0, 3.0)
+    assert covers(spans, 2.4, 3.0)
 
 
 def test_sequence_rejects_bad_values(tmp_path: Path) -> None:
@@ -336,3 +336,66 @@ def test_sequence_rejects_bad_values(tmp_path: Path) -> None:
         '  - hold: 8f\n    sequence: {every: 4f, items: ["#ffffff", gone]}\n',
     )
     assert any("shots[0].sequence.items[1]" in e and "gone" in e and "have:" in e for e in missing)
+
+
+def test_every_rejects_a_yaml_boolean(tmp_path: Path) -> None:
+    for word in ("true", "false"):
+        errs = _errors(
+            tmp_path / word,
+            f'  - hold: 24f\n    sequence: {{every: {word}, items: ["#ffffff", "#000000"]}}\n',
+        )
+        assert any("shots[0].sequence.every" in e and "use 22f, 4b or 1.5s" in e for e in errs), errs
+
+
+def test_check_flags_a_sequence_stuck_on_one_item(tmp_path: Path) -> None:
+    from montaj.qa import FREEZE_MIN_S as MIN, subtract
+
+    _write(
+        tmp_path,
+        "  - hold: 120f\n"
+        "    sequence:\n"
+        "      every: 30f\n"
+        '      items: ["#ffffff", "#808080"]\n',
+    )
+    intended = _intended_freeze(tmp_path)
+    one_step = (1.0, 2.0)  # the picture really holds for one step
+    stuck = (0.0, 4.0)  # output never changed across the item boundaries
+    assert not [p for p in subtract(one_step, intended) if p[1] - p[0] >= MIN]
+    assert [p for p in subtract(stuck, intended) if p[1] - p[0] >= MIN]
+
+
+def test_sequence_clock_reaches_later_segment_hashes(tmp_path: Path) -> None:
+    def hashes(first_hold: str) -> list[str]:
+        path = _write(
+            tmp_path / first_hold,
+            f"  - hold: {first_hold}\n    blank: true\n"
+            "  - until: 100f\n    sequence:\n      every: 4f\n"
+            '      items: ["#ffffff", "#000000"]\n'
+            "  - hold: 30f\n    blank: true\n    in: {type: fade, dur: 10f}\n",
+        )
+        tl = resolve(load_spec(path), path.parent)
+        return [segment_hash(tl, seg, {}, "e1") for seg in tl.segments]
+
+    # 10f vs 12f shifts the sequence clock by 2f (a different item at the fade frames).
+    a, b = hashes("10f"), hashes("12f")
+    assert len(a) == len(b)
+    assert a[-1] != b[-1]
+
+
+def test_films_without_a_sequence_keep_their_prepatch_segment_hashes(tmp_path: Path) -> None:
+    (tmp_path / "assets").mkdir()
+    Image.new("RGB", (32, 40), (1, 2, 3)).save(tmp_path / "assets" / "a.jpg")
+    Image.new("RGB", (32, 40), (9, 8, 7)).save(tmp_path / "assets" / "b.jpg")
+    (tmp_path / "montaj.yaml").write_text(
+        'video:\n  size: 180x320\n  fps: 30\n  look: warm-film\n  background: "#102030"\n  motion_blur: 1\n'
+        "assets: assets\nshots:\n  - {photo: a, hold: 20f}\n"
+        "  - {photo: b, hold: 12f, in: {type: fade, dur: 6f}}\n  - {blank: true, hold: 10f}\n"
+    )
+    tl = resolve(load_spec(tmp_path / "montaj.yaml"), tmp_path)
+    shas = {"photo:a": "x" * 64, "photo:b": "y" * 64}
+    # Recorded on main before the sequence field existed.
+    assert [segment_hash(tl, seg, shas, "e1") for seg in tl.segments] == [
+        "0eac77e5b6d2e8da18a272a16bd97f2c6e2a318a82d4b84629e711b2adb9a25a",
+        "46236cb3a646fbfabc154b34c778424863559ab9cb6e5b1d920b5ff504b7523c",
+        "b7056f0a014d2421f6b30082509c1c0d54c2f1468b9b745eac173fbe59b25587",
+    ]

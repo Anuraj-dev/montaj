@@ -23,7 +23,7 @@ from montaj.doctor import doctor
 from montaj.encode import MediaInfo, export, probe
 from montaj.ingest import ingest
 from montaj import taste
-from montaj.qa import BLACK_PIX_TH, Expect, check, clip_overruns, union
+from montaj.qa import BLACK_PIX_TH, FREEZE_MIN_S, Expect, check, clip_overruns, subtract, union
 from montaj.review.server import serve as serve_review
 from montaj.review.summary import summary as review_summary
 from montaj.sheet import MAX_TILES, every_times, pick_times, sheet, sheets
@@ -391,6 +391,28 @@ def _intended_freeze(root: Path) -> list[tuple[float, float]]:
             start = None
     if start is not None:
         spans.append((start / fps, tl.n_frames / fps))
+    return _split_sequence_steps(tl, spans, fps)
+
+
+def _split_sequence_steps(tl, spans: list[tuple[float, float]], fps: float) -> list[tuple[float, float]]:
+    """Cut a gap around each sequence boundary where the item changes. A step is a designed
+    hold, but a freeze running across such a boundary means the output is stuck on one item;
+    the gap is longer than the freeze detector's minimum, so only that case leaves a report."""
+    gap = FREEZE_MIN_S * 1.5
+    cuts: list[tuple[float, float]] = []
+    for sh in tl.shots:
+        seq = sh.spec.sequence
+        if seq is None or isinstance(seq.every, bool) or not isinstance(seq.every, int):
+            continue
+        if seq.every < 1 or len(seq.items) < 2:
+            continue
+        for lo in range(sh.start + seq.every, sh.end, seq.every):
+            before = sequence_index(sh.start, seq.every, len(seq.items), lo - 1)
+            after = sequence_index(sh.start, seq.every, len(seq.items), lo)
+            if seq.items[before] != seq.items[after]:
+                cuts.append((lo / fps - gap / 2, lo / fps + gap / 2))
+    for cut in cuts:
+        spans = [piece for span in spans for piece in subtract(span, [cut])]
     return spans
 
 

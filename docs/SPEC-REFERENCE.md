@@ -40,7 +40,7 @@ Photo fields (`crop`, `focus`, swirl `center`, wall `at`) are source-image pixel
 - `shots[].pulse` — `heartbeat`, default none — beat-locked scale pulse on the grid tempo, phased from the shot start. Needs `photo` and a grid (`video.bpm` or `audio.markers`).
 - `shots[].blank` — boolean, default false — show only `video.background`. Mutually exclusive with `photo`, `wall`, `clip` and `sequence`. Holds and fades like any other shot.
 - `shots[].sequence` — mapping, photo or wall or clip or blank or sequence — cycle photos or colours across this shot. Mutually exclusive with `photo`, `wall`, `clip` and `blank`.
-- `shots[].sequence.every` — duration (`f` or `s`), required — how long each item stays. Rounds to a whole frame of at least 1. Beats are an error.
+- `shots[].sequence.every` — duration (`f` or `s`), required — how long each item stays. Rounds to a whole frame of at least 1. Beats and booleans are an error. `check` treats each step as a designed hold but still flags a freeze that runs across an item change.
 - `shots[].sequence.items` — list, required — at least two. A photo stem, a quoted `#rrggbb`, `{photo: stem}` or `{color: "#rrggbb"}`. The list repeats until the shot ends.
 - `shots[].crop` — `[x0, y0, x1, y1]`, default the full image — the part of the photo that is shown.
 - `shots[].focus` — `[x, y]`, default the crop centre — the photo point placed at the screen centre.
