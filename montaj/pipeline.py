@@ -11,7 +11,7 @@ import torch
 from montaj import __version__
 from montaj.encode import Encoder, concat, mux
 from montaj.gpulock import hold as gpu_hold
-from montaj.project import file_sha, find_clip, find_photo, segment_hash
+from montaj.project import file_sha, find_photo, resolve_clip, segment_hash
 from montaj.render.canvas import Canvas
 from montaj.render.frame import Renderer
 from montaj.spec import Spec, _dur_frames, load_spec
@@ -78,7 +78,7 @@ def _asset_shas(spec: Spec, spec_dir: Path) -> dict[str, str]:
     for cid in clips:
         key = f"clip:{cid}"
         if key not in out:
-            out[key] = file_sha(find_clip(assets, cid))
+            out[key] = file_sha(resolve_clip(spec_dir, assets, cid))
     return out
 
 

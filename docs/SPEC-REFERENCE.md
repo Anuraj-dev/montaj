@@ -18,9 +18,10 @@ Photo fields (`crop`, `focus`, swirl `center`, wall `at`) are source-image pixel
 - `assets` — string, default `assets` — photo folder relative to the spec file. A photo is the file stem (`jpg`, `jpeg`, `png` or `webp`).
 - `shots` — list, required — played in order. Each shot starts when the previous one ends.
 - `shots[].photo` — string, photo or wall or clip — stem of the still. An integer in the YAML is read as a string. Mutually exclusive with `wall` and `clip`.
-- `shots[].clip` — string, photo or wall or clip — stem of a video file in `assets/` (`mp4`, `mov`, `webm`, `mkv`). Mutually exclusive with `photo` and `wall`.
-- `shots[].clip_in` — duration, default `0s` — source offset into the clip.
-- `shots[].hold` — duration, hold or until — how long this shot is on screen. Exactly one of `hold` or `until`. A whole-beat hold (`4b`) ends on a beat of the grid (moving forward if the shot started off-beat), and beat holds never drift from rounding.
+- `shots[].clip` — string, photo or wall or clip — video source. A stem (`intro`) is a file in `assets/` (`mp4`, `mov`, `webm`, `mkv`). A directory or a video suffix (`../old/out/final.mp4`) is a path relative to the spec file, or absolute. Mutually exclusive with `photo` and `wall`.
+- `shots[].clip_in` — duration, default `0s` — source offset into the clip. Mutually exclusive with `range`.
+- `shots[].range` — `[start, end]` durations, default none — source span of `clip` played as this shot. Needs `clip`. Shot length is `end − start` and does not snap to the beat grid. Mutually exclusive with `hold`, `until` and `clip_in`.
+- `shots[].hold` — duration, hold, until or range — how long this shot is on screen. Exactly one of `hold`, `until` or `range`. A whole-beat hold (`4b`) ends on a beat of the grid (moving forward if the shot started off-beat), and beat holds never drift from rounding.
 - `shots[].until` — time expression, hold or until — the shot ends at this time from film start. Must fall after the shot's start.
 - `shots[].drift` — mapping, default none — Ken Burns zoom/pan on a photo. Needs `photo`. Mutually exclusive with `zoom`.
 - `shots[].drift.zoom` — `[from, to]`, default `[1, 1]` — scale over the shot's visible span.

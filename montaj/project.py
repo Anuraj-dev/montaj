@@ -15,6 +15,25 @@ _EXTS = (".jpg", ".jpeg", ".png", ".webp")
 _CLIP_EXTS = (".mp4", ".mov", ".webm", ".mkv")
 
 
+class AssetMissing(FileNotFoundError):
+    """A clip path failed lookup. `hint` completes the spec error line."""
+
+    def __init__(self, problem: str, hint: str) -> None:
+        super().__init__(problem)
+        self.hint = hint
+
+
+def clip_is_file(clip_id: str) -> bool:
+    """True when `clip` is a video path, not an assets stem.
+
+    `intro` is a stem. `final.mp4`, `films/launch.mp4` and `/abs/final.mp4` are files.
+    """
+    path = Path(clip_id)
+    if path.is_absolute() or len(path.parts) != 1:
+        return True
+    return path.suffix.lower() in _CLIP_EXTS
+
+
 def _find_stem(assets_dir: Path, stem: str, exts: tuple[str, ...]) -> Path:
     assets_dir = Path(assets_dir)
     if not assets_dir.is_dir():
@@ -45,6 +64,20 @@ def find_photo(assets_dir: Path, photo_id: str) -> Path:
 
 def find_clip(assets_dir: Path, clip_id: str) -> Path:
     return _find_stem(assets_dir, clip_id, _CLIP_EXTS)
+
+
+def resolve_clip(spec_dir: Path, assets_dir: Path, clip_id: str) -> Path:
+    """Assets stem, or a video path relative to the spec file (absolute paths allowed)."""
+    if not clip_is_file(clip_id):
+        return find_clip(assets_dir, clip_id)
+    path = Path(clip_id)
+    if not path.is_absolute():
+        path = Path(spec_dir) / path
+    if path.suffix.lower() not in _CLIP_EXTS:
+        raise AssetMissing(f"{clip_id!r} is not a video", "use mp4, mov, webm or mkv")
+    if not path.is_file():
+        raise AssetMissing(f"{clip_id!r} not found", "path relative to the spec file, or absolute")
+    return path.resolve()
 
 
 def file_sha(path: Path) -> str:
@@ -100,6 +133,18 @@ def _text_asset_shas() -> dict[str, str]:
     return out
 
 
+def _shot_payload(shot) -> dict:
+    """Shot JSON for the segment hash.
+
+    An unset `range` is omitted so a film that does not reuse a clip keeps the
+    hash it had before the field existed. A set range is part of the payload.
+    """
+    raw = shot.model_dump(mode="json", by_alias=True)
+    if raw.get("range") is None:
+        raw.pop("range", None)
+    return raw
+
+
 def segment_hash(
     tl: Timeline,
     seg: Segment,
@@ -116,10 +161,7 @@ def segment_hash(
         referenced |= _scene_shots(plan.scene)
         text_ids.update(plan.texts)
         sub_ids.update(plan.subs)
-    shots = {
-        str(i): tl.shots[i].spec.model_dump(mode="json", by_alias=True)
-        for i in sorted(referenced)
-    }
+    shots = {str(i): _shot_payload(tl.shots[i].spec) for i in sorted(referenced)}
     photos: dict[str, str] = {}
     clips: dict[str, str] = {}
     for i in sorted(referenced):

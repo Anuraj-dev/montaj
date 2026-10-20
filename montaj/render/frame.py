@@ -17,7 +17,7 @@ from pathlib import Path
 import torch
 import torch.nn.functional as F
 
-from montaj.project import find_clip, find_photo
+from montaj.project import find_photo, resolve_clip
 from montaj.render.canvas import Canvas
 from montaj.render.clip import ClipSource, window_key
 from montaj.render.core import Photo, fit_s, sine, still
@@ -239,8 +239,14 @@ class Renderer:
             return None
         extra = self._outgoing_frames(index)
         nframes = (shot.end - shot.start) + int(math.ceil(extra - 1e-6))
-        clip_in = 0.0 if sh.clip_in is None else self._frames(sh.clip_in) / self.tl.fps
-        return sh.clip, clip_in, nframes
+        return sh.clip, self._clip_in_seconds(sh), nframes
+
+    def _clip_in_seconds(self, sh) -> float:
+        """Source offset. `range` starts at its first time; `clip_in` is the other way in."""
+        raw = sh.range[0] if sh.range is not None else sh.clip_in
+        if raw is None:
+            return 0.0
+        return self._frames(raw) / self.tl.fps
 
     def _drop_clips(self, needed: frozenset[int]) -> None:
         """Close windows this segment will not read. Same stem, different clip_in, is another window."""
@@ -353,7 +359,7 @@ class Renderer:
     def _clip_source(self, stem: str) -> ClipSource:
         hit = self._clips.get(stem)
         if hit is None:
-            hit = ClipSource(find_clip(self._assets, stem), self.tl.fps)
+            hit = ClipSource(resolve_clip(self._dir, self._assets, stem), self.tl.fps)
             self._clips[stem] = hit
         return hit
 

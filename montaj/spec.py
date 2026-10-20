@@ -197,6 +197,7 @@ class Shot(Frozen):
     hold: DurationStr | None = None
     until: TimeExpr | None = None
     clip_in: DurationStr | None = None
+    range: tuple[DurationStr, DurationStr] | None = None
     crop: CropBox | None = None
     focus: tuple[float, float] | None = None
     zoom: float | None = None
@@ -333,6 +334,11 @@ def _from_pydantic(exc: ValidationError) -> list[str]:
         if "bare number" in msg:
             msg = "bare number"
             hint = "use 22f, 4b or 1.5s"
+        elif re.search(r"shots\[\d+\]\.range(\[\d+\])?$", path) and err["type"] in (
+            "too_short", "too_long", "tuple_type", "missing"
+        ):
+            msg = "need [start, end]"
+            hint = "use [start, end] like [1.5s, 4s]"
         elif "whole pixel" in msg:
             hint = "use integer source-px"
         elif "not a boolean" in msg:
@@ -537,6 +543,8 @@ def _time_strings(spec: Spec) -> list[str]:
     for sh in spec.shots:
         if sh.until is not None:
             out.append(sh.until)
+        if sh.range is not None:
+            out.extend(sh.range)
     for fx in spec.fx:
         if isinstance(fx.at, str):
             out.append(fx.at)
@@ -562,8 +570,54 @@ def _time_strings(spec: Spec) -> list[str]:
     return out
 
 
+def _needs_assets_dir(shots: object) -> bool:
+    """False when the film's only media is path clips. Blanks may sit beside them.
+
+    A stem, a photo, or a blank-only film still needs the assets folder.
+    """
+    from montaj.project import clip_is_file
+
+    if not isinstance(shots, list) or not shots:
+        return True
+    saw_path = False
+    for shot in shots:
+        if not isinstance(shot, dict):
+            return True
+        if shot.get("photo") is not None or shot.get("wall") is not None:
+            return True
+        morph = shot.get("morph")
+        if isinstance(morph, dict) and morph.get("photo") is not None:
+            return True
+        clip = shot.get("clip")
+        if clip is not None:
+            pid = _photo_id(clip)
+            if isinstance(pid, str) and clip_is_file(pid):
+                saw_path = True
+                continue
+            return True
+        if shot.get("blank") is True:
+            continue
+        return True
+    return not saw_path
+
+
+def _note_path_clip(shot: dict, i: int, spec_dir: Path, assets_dir: Path, errors: list[str]) -> None:
+    from montaj.project import AssetMissing, clip_is_file, resolve_clip
+
+    clip = shot.get("clip")
+    if clip is None:
+        return
+    pid = _photo_id(clip)
+    if not isinstance(pid, str) or not clip_is_file(pid):
+        return
+    try:
+        resolve_clip(spec_dir, assets_dir, pid)
+    except AssetMissing as e:
+        errors.append(_line(f"shots[{i}].clip", str(e), e.hint))
+
+
 def _collect_photos(data: object, assets_dir: Path, spec_dir: Path, errors: list[str]) -> None:
-    from montaj.project import find_clip, find_photo
+    from montaj.project import clip_is_file, find_clip, find_photo
 
     if not isinstance(data, dict):
         return
@@ -574,12 +628,16 @@ def _collect_photos(data: object, assets_dir: Path, spec_dir: Path, errors: list
             errors.append(
                 _line("audio.track", f"{audio['track']!r} not found", "path relative to the spec file")
             )
-    if not assets_dir.is_dir():
-        rel = data.get("assets", "assets")
-        errors.append(_line("assets", f"{rel!r} not a directory", "create it or fix the path"))
-        return
     shots = data.get("shots")
     if not isinstance(shots, list):
+        shots = []
+    if not assets_dir.is_dir():
+        if _needs_assets_dir(shots):
+            rel = data.get("assets", "assets")
+            errors.append(_line("assets", f"{rel!r} not a directory", "create it or fix the path"))
+        for i, shot in enumerate(shots):
+            if isinstance(shot, dict):
+                _note_path_clip(shot, i, spec_dir, assets_dir, errors)
         return
     for i, shot in enumerate(shots):
         if not isinstance(shot, dict):
@@ -591,7 +649,10 @@ def _collect_photos(data: object, assets_dir: Path, spec_dir: Path, errors: list
         if "clip" in shot and shot["clip"] is not None:
             pid = _photo_id(shot["clip"])
             if isinstance(pid, str):
-                _require_photo(assets_dir, pid, f"shots[{i}].clip", errors, find_clip)
+                if clip_is_file(pid):
+                    _note_path_clip(shot, i, spec_dir, assets_dir, errors)
+                else:
+                    _require_photo(assets_dir, pid, f"shots[{i}].clip", errors, find_clip)
         morph = shot.get("morph")
         if isinstance(morph, dict) and morph.get("photo") is not None:
             pid = _photo_id(morph["photo"])
@@ -730,6 +791,16 @@ def _snap_forward_to_grid(u: float, beat0: float, period: float) -> float:
     return beat0 + math.ceil((u - beat0) / period) * period
 
 
+def _length_conflict(has_hold: bool, has_until: bool, has_range: bool) -> str:
+    if has_hold and has_until and not has_range:
+        return "hold and until are mutually exclusive"
+    if has_range and has_hold and not has_until:
+        return "range and hold are mutually exclusive"
+    if has_range and has_until and not has_hold:
+        return "range and until are mutually exclusive"
+    return "hold, until and range are mutually exclusive"
+
+
 def layout_shots(
     spec: Spec,
     markers: dict[str, float],
@@ -752,11 +823,13 @@ def layout_shots(
     for i, sh in enumerate(spec.shots):
         has_hold = sh.hold is not None
         has_until = sh.until is not None
-        if has_hold and has_until:
-            errors.append(_line(f"shots[{i}]", "hold and until are mutually exclusive", "remove one"))
+        has_range = sh.range is not None
+        chosen = has_hold + has_until + has_range
+        if chosen > 1:
+            errors.append(_line(f"shots[{i}]", _length_conflict(has_hold, has_until, has_range), "remove one"))
             bounds.append(None)
             continue
-        if not has_hold and not has_until:
+        if chosen == 0:
             errors.append(_line(f"shots[{i}]", "need hold or until", "set one"))
             bounds.append(None)
             continue
@@ -769,6 +842,24 @@ def layout_shots(
                 continue
             until_times[f"shots[{i}].until"] = until_f
             end_u = until_f
+        elif sh.range is not None:
+            # Source span, not a film-start time: `1b` is one beat long, and beat0 is not added.
+            start_f = _dur_frames(sh.range[0], fps, bpm, f"shots[{i}].range[0]", errors)
+            end_f = _dur_frames(sh.range[1], fps, bpm, f"shots[{i}].range[1]", errors)
+            if start_f is None or end_f is None:
+                bounds.append(None)
+                continue
+            if end_f <= start_f:
+                errors.append(
+                    _line(
+                        f"shots[{i}].range",
+                        f"end must be after start ({sh.range[0]} .. {sh.range[1]})",
+                        "use a later end",
+                    )
+                )
+                bounds.append(None)
+                continue
+            end_u = u + (end_f - start_f)
         else:
             span = _dur_frames(sh.hold, fps, bpm, f"shots[{i}].hold", errors)
             if span is None:
@@ -779,7 +870,15 @@ def layout_shots(
                 end_u = _snap_forward_to_grid(end_u, beat0, period)
         end = round_frame(end_u)
         if end <= start:
-            if has_until:
+            if has_range:
+                errors.append(
+                    _line(
+                        f"shots[{i}].range",
+                        f"shorter than one frame ({sh.range[0]} .. {sh.range[1]})",
+                        "lengthen the range",
+                    )
+                )
+            elif has_until:
                 errors.append(
                     _line(
                         f"shots[{i}].until",
@@ -961,6 +1060,49 @@ def _whole_number(v: float) -> bool:
     return isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v) and v == int(v)
 
 
+def _check_clip_range(
+    spec: Spec,
+    spec_dir: Path,
+    i: int,
+    sh: Shot,
+    bpm: float | None,
+    errors: list[str],
+) -> None:
+    """Reject a range that runs past the source, or a file that is not a video."""
+    from montaj.encode import EncodeError, probe
+    from montaj.project import resolve_clip
+
+    if spec.video.fps <= 0 or sh.clip is None or sh.range is None:
+        return
+    try:
+        path = resolve_clip(spec_dir, spec_dir / spec.assets, sh.clip)
+    except FileNotFoundError:
+        return
+    try:
+        info = probe(path, log=spec_dir / "build" / "spec.log")
+    except EncodeError:
+        errors.append(_line(f"shots[{i}].clip", f"cannot read {sh.clip!r}", "file is not a video"))
+        return
+    if info.duration <= 0:
+        errors.append(
+            _line(f"shots[{i}].clip", f"cannot read duration of {sh.clip!r}", "file is not a video")
+        )
+        return
+    bag: list[str] = []
+    end_f = _dur_frames(sh.range[1], spec.video.fps, bpm, f"shots[{i}].range[1]", bag)
+    if end_f is None:
+        return
+    # Container duration is often a frame short of n/fps. One frame of slack.
+    if end_f / spec.video.fps > info.duration + 1.0 / spec.video.fps:
+        errors.append(
+            _line(
+                f"shots[{i}].range",
+                f"ends at {sh.range[1]}, clip is {info.duration:.3f}s",
+                "shorten the range",
+            )
+        )
+
+
 def _check_finish(spec: Spec, errors: list[str]) -> None:
     if spec.video.look not in LOOK_NAMES:
         errors.append(_line("video.look", f"unknown {spec.video.look!r}", f"use {_choices(LOOK_NAMES)}"))
@@ -1095,6 +1237,22 @@ def validate_spec(
                     errors.append(_line(f"shots[{i}].{name}", f"{name} needs photo", "add photo:"))
         if sh.clip_in is not None and not has_c:
             errors.append(_line(f"shots[{i}].clip_in", "clip_in needs clip", "add clip:"))
+        if sh.range is not None and not has_c:
+            errors.append(_line(f"shots[{i}].range", "range needs clip", "add clip:"))
+        if sh.range is not None and sh.clip_in is not None:
+            errors.append(
+                _line(f"shots[{i}]", "range and clip_in are mutually exclusive", "range is [start, end]")
+            )
+        if (
+            sh.range is not None
+            and has_c
+            and sh.clip_in is None
+            and sh.hold is None
+            and sh.until is None
+            and h is not None
+            and spec_dir is not None
+        ):
+            _check_clip_range(spec, spec_dir, i, sh, bpm, errors)
         if sh.zoom is not None and sh.drift is not None:
             errors.append(_line(f"shots[{i}]", "zoom and drift are mutually exclusive", "remove one"))
         if sh.pulse is not None:
