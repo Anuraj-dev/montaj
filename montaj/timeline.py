@@ -92,6 +92,16 @@ class ResolvedSub:
 
 
 @dataclass(frozen=True)
+class ResolvedExpect:
+    """One `check.expect` span in seconds. The renderer never reads it."""
+
+    kind: str
+    start: float
+    end: float
+    why: str | None = None
+
+
+@dataclass(frozen=True)
 class FramePlan:
     f: int
     scene: Scene
@@ -232,6 +242,7 @@ class Timeline:
     _tracks: dict[str, list] = field(default_factory=dict)
     _fade_out: tuple[int, int] | None = None
     _spans: dict[int, tuple[int, int] | None] = field(default_factory=dict)
+    check_expects: list[ResolvedExpect] = field(default_factory=list)
 
     def plan(self, f: int) -> FramePlan:
         if not 0 <= f < self.n_frames:
@@ -533,4 +544,20 @@ def resolve(spec: Spec, spec_dir: Path) -> Timeline:
         _tracks=_resolve_tracks(spec, times),
         _fade_out=fade_out,
         _spans=spans,
+        check_expects=_resolved_expects(spec, times),
     )
+
+
+def _resolved_expects(spec: Spec, times: dict[str, float]) -> list[ResolvedExpect]:
+    if spec.check is None or spec.video.fps <= 0:
+        return []
+    fps = float(spec.video.fps)
+    out: list[ResolvedExpect] = []
+    for i, item in enumerate(spec.check.expect):
+        start = times.get(f"check.expect[{i}].start")
+        end = times.get(f"check.expect[{i}].end")
+        if start is None or end is None:
+            continue
+        kind = "black" if item.black is not None else "frozen"
+        out.append(ResolvedExpect(kind, start / fps, end / fps, item.why))
+    return out

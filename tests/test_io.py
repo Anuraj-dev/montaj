@@ -634,3 +634,13 @@ def test_doctor_reports_a_config_that_cannot_load_and_a_failing_import(
     silent.chmod(0o755)
     line = doctor.faster_whisper_line(silent.as_posix(), timeout=1)
     assert line.startswith("FAIL faster_whisper:") and "did not finish" in line
+
+
+def test_check_expect_suppresses_warn_and_names_why(tmp_path: Path) -> None:
+    log = tmp_path / "qa.log"
+    video = _spans("color=c=black", "color=c=white")
+    exp = [qa.Expect("black", (0.0, 1.0), "HUD intro"), qa.Expect("frozen", (5.0, 6.0))]
+    lines = qa.check(video, log=log, intended_black=[(0.0, 1.0)], expect=exp)
+    assert not any(line.startswith("WARN black") for line in lines)
+    assert "INFO black 0–1s ignored as intended: HUD intro" in lines
+    assert "INFO expect frozen 5–6s not found" in lines

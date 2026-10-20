@@ -22,7 +22,7 @@ from montaj.doctor import doctor
 from montaj.encode import export, probe
 from montaj.ingest import ingest
 from montaj import taste
-from montaj.qa import BLACK_PIX_TH, check
+from montaj.qa import BLACK_PIX_TH, Expect, check, union
 from montaj.review.server import serve as serve_review
 from montaj.review.summary import summary as review_summary
 from montaj.sheet import MAX_TILES, pick_times, sheet
@@ -440,6 +440,19 @@ def _intended_black(root: Path) -> list[tuple[float, float]]:
     return spans
 
 
+def _check_overrides(root: Path) -> tuple[list[Expect], float | None, float | None]:
+    """Resolved `check.expect` spans, plus an optional loudness target and tolerance."""
+    spec_file = root / "montaj.yaml"
+    if not spec_file.is_file():
+        return [], None, None
+    tl = resolve(load_spec(spec_file), root)
+    expects = [Expect(item.kind, (item.start, item.end), item.why) for item in tl.check_expects]
+    loud = None if tl.spec.check is None else tl.spec.check.loudness
+    if loud is None:
+        return expects, None, None
+    return expects, float(loud.i), float(loud.tol)
+
+
 def _av_tol(root: Path) -> float | None:
     """One frame at the film's fps when a soundtrack is set. Silent films keep qa's default."""
     spec_file = root / "montaj.yaml"
@@ -452,10 +465,14 @@ def _av_tol(root: Path) -> float | None:
 
 
 def _cmd_check(ns: argparse.Namespace, root: Path) -> list[str]:
+    expects, loud_i, loud_tol = _check_overrides(root)
+    black = union([*_intended_black(root), *(item.span for item in expects if item.kind == "black")])
+    freeze = union([*_intended_freeze(root), *(item.span for item in expects if item.kind == "frozen")])
     lines = check(
-        _video(root, ns.video), _intended_freeze(root),
+        _video(root, ns.video), freeze,
         log=root / "build" / "qa.log", av_tol=_av_tol(root),
-        intended_black=_intended_black(root),
+        intended_black=black, expect=expects,
+        loudness_target=loud_i, loudness_tol=loud_tol,
     )
     warns = sum(line.startswith("WARN") for line in lines)
     lines.append(f"WARN check: {warns} warnings" if warns else "OK check")

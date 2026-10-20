@@ -682,3 +682,34 @@ def test_beats_without_bpm_or_markers_hint_names_both_fixes(tmp_path: Path):
         "video.bpm" in e and "add bpm: 120, or audio.markers from montaj music analyze" in e
         for e in ei.value.errors
     )
+
+
+def test_check_expect_resolves_markers_and_loudness(tmp_path: Path):
+    p = _write(
+        tmp_path,
+        "  - {photo: a, hold: 4s}\n",
+        ["a"],
+        extra=(
+            "markers:\n  logo: 1s\n"
+            "check:\n  expect:\n"
+            "    - {black: [0s, 2s], why: HUD intro}\n"
+            "    - {frozen: [logo, logo+0.5s]}\n"
+            "  loudness: {i: -16}\n"
+        ),
+    )
+    tl = resolve(load_spec(p), p.parent)
+    a, b = tl.check_expects
+    assert (a.kind, a.start, a.end, a.why) == ("black", 0.0, 2.0, "HUD intro")
+    assert (b.kind, b.start, b.end) == ("frozen", 1.0, 1.5)
+    assert tl.spec.check.loudness.i == -16 and tl.spec.check.loudness.tol == 1
+
+
+@pytest.mark.parametrize(
+    "item",
+    ["{why: x}", "{black: [0s, 1s], frozen: [0s, 1s]}", "{black: [2s, 1s]}", "{black: [0s, nope]}"],
+)
+def test_check_expect_rejects_bad_spans(tmp_path: Path, item: str):
+    p = _write(tmp_path, "  - {photo: a, hold: 4s}\n", ["a"], extra=f"check:\n  expect:\n    - {item}\n")
+    with pytest.raises(SpecError) as ei:
+        load_spec(p)
+    assert all(_LINE.match(e) for e in ei.value.errors)

@@ -126,6 +126,14 @@ Photo fields (`crop`, `focus`, swirl `center`, wall `at`) are source-image pixel
 - `tracks.*[].t` — time expression, required — when this key is reached.
 - `tracks.*[].v` — number, required — value at this key.
 - `tracks.*[].ease` — easing name, default `linear` for dust and glow, `sine` for bars — the curve into this key.
+- `check` — mapping, default none — designed QA exceptions. The renderer does not read this, so it does not change the segment hash.
+- `check.expect` — list, default none — black or frozen spans `check` treats as designed. A span that matches no detected span prints `INFO expect <kind> <start>–<end>s not found`.
+- `check.expect[].black` — `[start, end]` time expressions, black or frozen — a designed black window. Set this or `frozen`, not both. `end` must be later than `start`.
+- `check.expect[].frozen` — `[start, end]` time expressions, black or frozen — a designed hold. Set this or `black`, not both. `end` must be later than `start`.
+- `check.expect[].why` — string, default none — one line, added when this span matches a detected one.
+- `check.loudness` — mapping, default none — replaces the `-14` LUFS target used by `check`.
+- `check.loudness.i` — number, required with loudness — integrated-loudness target, in LUFS.
+- `check.loudness.tol` — number, default `1` — how far the measurement may sit from `i`, in LU.
 
 Transitions (`shots[].in`):
 

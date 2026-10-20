@@ -632,3 +632,18 @@ def test_review_port_in_use_is_one_err_line(tmp_path: Path, capsys) -> None:
         port = busy.getsockname()[1]
         code, out, _ = _run(["-C", str(root), "review", "--port", str(port)], capsys)
     assert code == 1 and out.startswith("ERR review:") and len(out.strip().splitlines()) == 1
+
+
+def test_check_overrides_reads_expect_and_loudness(tmp_path: Path) -> None:
+    from montaj.cli import _check_overrides
+
+    proj = tmp_path
+    (proj / "assets").mkdir()
+    Image.new("RGB", (8, 8), (9, 9, 9)).save(proj / "assets" / "a.jpg")
+    (proj / "montaj.yaml").write_text(
+        "video:\n  size: 1080x1920\n  fps: 30\n  look: warm-film\nassets: assets\nshots:\n  - {photo: a, hold: 4s}\n"
+        "check:\n  expect:\n    - {black: [0s, 2s], why: intro}\n  loudness: {i: -16, tol: 2}\n"
+    )
+    expects, i, tol = _check_overrides(proj)
+    assert [(e.kind, e.span, e.why) for e in expects] == [("black", (0.0, 2.0), "intro")]
+    assert (i, tol) == (-16.0, 2.0)
