@@ -429,8 +429,25 @@ def test_every_times_rejects_bad_intervals() -> None:
         sheet.every_times(0.0, 0.5)
     with pytest.raises(ValueError, match="finer than one frame"):
         sheet.every_times(1.0, 0.001, fps=25)
-    with pytest.raises(ValueError, match="coarser"):
-        sheet.every_times(100.0, 0.01)
+    assert len(sheet.every_times(100.0, 0.01)) == 10000  # no total cap; extraction is batched
+
+
+def test_pair_frames_sorts_numerically_across_the_999_1000_boundary() -> None:
+    files = [Path(f"frame_{i}.jpg") for i in (1000, 100, 999, 1, 1001, 10)]
+    picks = [1, 10, 100, 999, 1000, 1001]
+    assert [(i, p.name) for i, p in sheet.pair_frames(picks, files)] == [
+        (i, f"frame_{i}.jpg") for i in picks
+    ]
+
+
+def test_extract_120_frames_in_order(tmp_path: Path) -> None:
+    """120 frames overflow one ffmpeg select expression; batching keeps them all, in order."""
+    log = tmp_path / "io.log"
+    video = clip(tmp_path / "v.mp4", seconds=5.0, src="testsrc")  # 125 frames at 25 fps
+    times = [i / FPS for i in range(120)]
+    frames_ = sheet.extract(video, times, tmp_path / "f", info=encode.probe(video, log=log), log=log)
+    assert [i for i, _ in frames_] == list(range(120))
+    assert all(p.exists() for _, p in frames_)
 
 
 def test_sheets_pages_past_twelve_and_drops_stale(tmp_path: Path) -> None:
