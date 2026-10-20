@@ -190,26 +190,6 @@ class Morph(Frozen):
     center: tuple[float, float] | None = None
 
 
-class Shot(Frozen):
-    photo: PhotoId | None = None
-    wall: WallSpec | None = None
-    clip: PhotoId | None = None
-    hold: DurationStr | None = None
-    until: TimeExpr | None = None
-    clip_in: DurationStr | None = None
-    crop: CropBox | None = None
-    focus: tuple[float, float] | None = None
-    zoom: float | None = None
-    drift: Drift | None = None
-    tone: Tone | None = None
-    frame: FrameCard | None = None
-    morph: Morph | None = None
-    pulse: str | None = None
-    blank: bool = False
-    in_: Transition | None = Field(default=None, alias="in")
-    flash: float | None = None
-
-
 class TextLine(Frozen):
     text: str
     y: float
@@ -230,6 +210,34 @@ class TextLine(Frozen):
     sweep: tuple[TimeExpr, TimeExpr] | None = None
     shadow: bool = True
     indent: float = 0.0
+
+
+class CardSpec(Frozen):
+    """One shot's picture: a solid colour with text lines on it."""
+
+    color: str
+    text: list[TextLine]
+
+
+class Shot(Frozen):
+    photo: PhotoId | None = None
+    wall: WallSpec | None = None
+    clip: PhotoId | None = None
+    hold: DurationStr | None = None
+    until: TimeExpr | None = None
+    clip_in: DurationStr | None = None
+    crop: CropBox | None = None
+    focus: tuple[float, float] | None = None
+    zoom: float | None = None
+    drift: Drift | None = None
+    tone: Tone | None = None
+    frame: FrameCard | None = None
+    morph: Morph | None = None
+    pulse: str | None = None
+    blank: bool = False
+    card: CardSpec | None = None
+    in_: Transition | None = Field(default=None, alias="in")
+    flash: float | None = None
 
 
 class TextBlock(Frozen):
@@ -547,6 +555,17 @@ def _time_strings(spec: Spec) -> list[str]:
         if block.fade_out:
             out.append(block.fade_out)
         for line in block.lines:
+            out.append(line.at)
+            if line.stagger:
+                out.append(line.stagger)
+            if line.dur:
+                out.append(line.dur)
+            if line.sweep:
+                out.extend(line.sweep)
+    for sh in spec.shots:
+        if sh.card is None:
+            continue
+        for line in sh.card.text:
             out.append(line.at)
             if line.stagger:
                 out.append(line.stagger)
@@ -1082,13 +1101,20 @@ def validate_spec(
         has_w = sh.wall is not None
         has_c = sh.clip is not None
         has_b = sh.blank
-        n_src = has_p + has_w + has_c + has_b
+        has_card = sh.card is not None
+        n_src = has_p + has_w + has_c + has_b + has_card
         if n_src > 1:
             errors.append(
-                _line(f"shots[{i}]", "photo, wall, clip and blank are mutually exclusive", "remove extra")
+                _line(
+                    f"shots[{i}]",
+                    "photo, wall, clip, blank and card are mutually exclusive",
+                    "remove extra",
+                )
             )
         elif n_src == 0:
-            errors.append(_line(f"shots[{i}]", "need photo, wall, clip or blank", "add one"))
+            errors.append(_line(f"shots[{i}]", "need photo, wall, clip, blank or card", "add one"))
+        if sh.card is not None:
+            _validate_card(sh.card, i, fps, bpm, errors)
         if not has_p:
             for name in ("drift", "frame", "morph", "tone", "pulse"):
                 if getattr(sh, name) is not None:
@@ -1245,6 +1271,56 @@ def validate_spec(
     return parsed, times, markers, bpm, beat0
 
 
+def _card_duration(
+    raw: object, fps: int, bpm: float | None, path: str, errors: list[str]
+) -> float | None:
+    """A card line clock is a duration from the shot start, not a film marker."""
+    if isinstance(raw, str) and _DUR.match(raw.strip()):
+        return _dur_frames(raw, fps, bpm, path, errors)
+    shown = raw if isinstance(raw, str) else repr(raw)
+    bare = isinstance(raw, (int, float)) or (isinstance(raw, str) and _BARE.match(raw.strip()))
+    if bare:
+        errors.append(_line(path, "bare number", "time from this shot's start: 0s, 12f or 1b"))
+    else:
+        errors.append(
+            _line(path, f"invalid duration {shown!r}", "time from this shot's start: 0s, 12f or 1b")
+        )
+    return None
+
+
+def _check_text_line(path: str, line: TextLine, errors: list[str]) -> None:
+    if line.style not in TEXT_STYLES:
+        errors.append(_line(f"{path}.style", f"unknown {line.style!r}", "use serif, script, caps or deva"))
+    if line.italic and line.style != "serif":
+        errors.append(_line(f"{path}.italic", "italic is serif-only", "set style: serif"))
+    if line.by not in TEXT_BY:
+        errors.append(_line(f"{path}.by", f"unknown {line.by!r}", "use word or char"))
+    if line.reveal not in TEXT_REVEAL:
+        errors.append(_line(f"{path}.reveal", f"unknown {line.reveal!r}", "use rise or pop"))
+    _check_color(f"{path}.color", line.color, errors)
+
+
+def _validate_card(
+    card: CardSpec, index: int, fps: int, bpm: float | None, errors: list[str]
+) -> None:
+    path = f"shots[{index}].card"
+    if not isinstance(card.color, str) or not _HEX.match(card.color):
+        errors.append(_line(f"{path}.color", f"expected #rrggbb, got {card.color!r}", "use #112233"))
+    if not card.text:
+        errors.append(_line(f"{path}.text", "need at least one line", "add a line"))
+    for j, line in enumerate(card.text):
+        p = f"{path}.text[{j}]"
+        _check_text_line(p, line, errors)
+        _card_duration(line.at, fps, bpm, f"{p}.at", errors)
+        if line.stagger is not None:
+            _card_duration(line.stagger, fps, bpm, f"{p}.stagger", errors)
+        if line.dur is not None:
+            _card_duration(line.dur, fps, bpm, f"{p}.dur", errors)
+        if line.sweep:
+            for k, raw in enumerate(line.sweep):
+                _card_duration(raw, fps, bpm, f"{p}.sweep[{k}]", errors)
+
+
 def _validate_text(
     spec: Spec,
     markers: dict[str, float],
@@ -1264,15 +1340,7 @@ def _validate_text(
             errors.append(_line(f"text[{i}].lines", "need at least one line", "add a line"))
         for j, line in enumerate(block.lines):
             p = f"text[{i}].lines[{j}]"
-            if line.style not in TEXT_STYLES:
-                errors.append(_line(f"{p}.style", f"unknown {line.style!r}", "use serif, script, caps or deva"))
-            if line.italic and line.style != "serif":
-                errors.append(_line(f"{p}.italic", "italic is serif-only", "set style: serif"))
-            if line.by not in TEXT_BY:
-                errors.append(_line(f"{p}.by", f"unknown {line.by!r}", "use word or char"))
-            if line.reveal not in TEXT_REVEAL:
-                errors.append(_line(f"{p}.reveal", f"unknown {line.reveal!r}", "use rise or pop"))
-            _check_color(f"{p}.color", line.color, errors)
+            _check_text_line(p, line, errors)
             val = _parse_time(line.at, markers, fps, bpm, f"{p}.at", errors, beat0=beat0)
             if val is not None:
                 times[f"{p}.at"] = val

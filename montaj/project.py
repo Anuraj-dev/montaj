@@ -52,11 +52,11 @@ def file_sha(path: Path) -> str:
 
 
 def _scene_shots(scene: object) -> set[int]:
-    from montaj.timeline import Blank, Clip, Still, Trans, Wall
+    from montaj.timeline import Blank, Card, Clip, Still, Trans, Wall
 
     if isinstance(scene, Blank):
         return set()
-    if isinstance(scene, (Still, Wall, Clip)):
+    if isinstance(scene, (Still, Wall, Clip, Card)):
         return {scene.shot}
     if isinstance(scene, Trans):
         return _scene_shots(scene.a) | _scene_shots(scene.b)
@@ -149,7 +149,8 @@ def segment_hash(
         tl.shots[i].spec.frame is not None and tl.shots[i].spec.frame.caption
         for i in referenced
     )
-    if text_ids or sub_ids or captions:
+    cards = any(tl.shots[i].spec.card is not None for i in referenced)
+    if text_ids or sub_ids or captions or cards:
         payload["text_assets"] = _text_asset_shas()
     if tl.markers:
         payload["markers"] = {k: tl.markers[k] for k in sorted(tl.markers)}

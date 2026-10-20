@@ -35,10 +35,24 @@ class Blank:
 
 
 @dataclass(frozen=True)
+class Card:
+    """Solid colour and text as one picture. `t0`/`end` are the shot's frames.
+
+    `span` covers the transition overlap, plus one frame, so motion-blur samples
+    at the edge still show the glyphs. Line clocks are durations from `t0`.
+    """
+
+    shot: int
+    t0: int
+    end: int
+    span: tuple[float, float]
+
+
+@dataclass(frozen=True)
 class Trans:
     kind: str
-    a: Still | Wall | Clip | Blank | Trans
-    b: Still | Wall | Clip | Blank | Trans
+    a: Still | Wall | Clip | Blank | Card | Trans
+    b: Still | Wall | Clip | Blank | Card | Trans
     t0: float
     dur: float
     axis: str = "x"
@@ -46,7 +60,7 @@ class Trans:
     blur: float = 0.0
 
 
-type Scene = Still | Wall | Clip | Blank | Trans
+type Scene = Still | Wall | Clip | Blank | Card | Trans
 
 
 @dataclass(frozen=True)
@@ -125,9 +139,16 @@ class Segment:
     end: int
 
 
-def _base_scene(shot: ResolvedShot, span: tuple[int, int] | None = None) -> Still | Wall | Clip | Blank:
+def _base_scene(
+    shot: ResolvedShot,
+    span: tuple[int, int] | None = None,
+    card_span: tuple[float, float] | None = None,
+) -> Still | Wall | Clip | Blank | Card:
     if shot.kind == "blank":
         return Blank()
+    if shot.kind == "card":
+        window = card_span or (float(shot.start) - 1.0, float(shot.end) + 1.0)
+        return Card(shot=shot.index, t0=shot.start, end=shot.end, span=window)
     if shot.kind == "wall":
         return Wall(shot=shot.index, t0=shot.start)
     if shot.kind == "clip":
@@ -232,6 +253,7 @@ class Timeline:
     _tracks: dict[str, list] = field(default_factory=dict)
     _fade_out: tuple[int, int] | None = None
     _spans: dict[int, tuple[int, int] | None] = field(default_factory=dict)
+    _card_spans: dict[int, tuple[float, float]] = field(default_factory=dict)
 
     def plan(self, f: int) -> FramePlan:
         if not 0 <= f < self.n_frames:
@@ -239,7 +261,7 @@ class Timeline:
         scene: Scene | None = None
         for sh in self.shots:
             if sh.start <= f < sh.end:
-                scene = _base_scene(sh, self._spans.get(sh.index))
+                scene = _base_scene(sh, self._spans.get(sh.index), self._card_spans.get(sh.index))
                 break
         for w0, w1, tr in self._windows:
             if w0 <= f < w1:
@@ -316,11 +338,33 @@ def _shot_with_frame_keys(sh: Shot, i: int, parsed: dict[str, int]) -> Shot:
 def _shot_kind(sh: Shot) -> str:
     if sh.blank:
         return "blank"
+    if sh.card is not None:
+        return "card"
     if sh.wall is not None:
         return "wall"
     if sh.clip is not None:
         return "clip"
     return "still"
+
+
+def _card_window(resolved: list[ResolvedShot], i: int, parsed: dict[str, int]) -> tuple[float, float]:
+    """Visible overlap of a card, padded by one frame for motion-blur samples."""
+    sh = resolved[i]
+    v0 = float(sh.start)
+    tr = sh.spec.in_
+    if tr is not None and tr.type == "whip":
+        dur = parsed.get(f"shots[{i}].in.dur")
+        if dur is not None:
+            v0 -= dur / 2.0
+    v1 = float(sh.end)
+    if i + 1 < len(resolved):
+        nxt = resolved[i + 1]
+        ntr = nxt.spec.in_
+        if ntr is not None and ntr.type in ("fade", "swirl", "whip"):
+            nd = parsed.get(f"shots[{i + 1}].in.dur")
+            if nd is not None:
+                v1 = float(nxt.start) + (nd / 2.0 if ntr.type == "whip" else float(nd))
+    return (v0 - 1.0, v1 + 1.0)
 
 
 def _visible_span(resolved: list[ResolvedShot], i: int, parsed: dict[str, int]) -> tuple[int, int] | None:
@@ -441,18 +485,21 @@ def resolve(spec: Spec, spec_dir: Path) -> Timeline:
     segments = [Segment(index=i, start=s.start, end=s.end) for i, s in enumerate(resolved)]
     spans = {i: _visible_span(resolved, i, parsed) for i in range(len(resolved))}
 
+    card_spans = {
+        i: _card_window(resolved, i, parsed) for i, sh in enumerate(resolved) if sh.kind == "card"
+    }
     windows: list[tuple[float, float, Trans]] = []
     for i, sh in enumerate(resolved):
         tr = sh.spec.in_
         if tr is None or tr.type == "cut":
             continue
         dur = float(parsed[f"shots[{i}].in.dur"])
-        b = _base_scene(sh, spans[i])
+        b = _base_scene(sh, spans[i], card_spans.get(i))
         if i == 0:
             a = Blank()
         else:
             prev = resolved[i - 1]
-            a = _base_scene(prev, spans[prev.index])
+            a = _base_scene(prev, spans[prev.index], card_spans.get(prev.index))
         if tr.type in ("fade", "swirl"):
             t0 = float(sh.start)
             center = tr.center
@@ -533,4 +580,5 @@ def resolve(spec: Spec, spec_dir: Path) -> Timeline:
         _tracks=_resolve_tracks(spec, times),
         _fade_out=fade_out,
         _spans=spans,
+        _card_spans=card_spans,
     )

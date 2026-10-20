@@ -27,7 +27,7 @@ from montaj.review.server import serve as serve_review
 from montaj.review.summary import summary as review_summary
 from montaj.sheet import MAX_TILES, pick_times, sheet
 from montaj.spec import SpecError, _dur_frames, load_spec
-from montaj.timeline import Blank, Still, Wall, resolve, wall_static_spans
+from montaj.timeline import Blank, Card, Still, Wall, resolve, wall_static_spans
 from montaj.watch import watch
 
 RECIPES = Path(__file__).resolve().parents[1] / "recipes"
@@ -359,6 +359,8 @@ def _intended_freeze(root: Path) -> list[tuple[float, float]]:
             intended = _static_still(sh.spec) and not _morph_moving(sh, f, fps, tl.spec.video.bpm)
         elif isinstance(scene, Blank):
             intended = True
+        elif isinstance(scene, Card):
+            intended = _card_settled(tl.shots[scene.shot], f, fps, tl.spec.video.bpm, scene)
         else:
             intended = isinstance(scene, Wall) and wall_hold(f)
         if intended:
@@ -394,11 +396,58 @@ def _is_dark(color: str) -> bool:
     return (0.299 * r + 0.587 * g + 0.114 * b) < BLACK_PIX_TH
 
 
+def _dark_plate(sh, background: str) -> bool:
+    """A blank shows `video.background`. A card shows its own colour."""
+    if sh.spec.card is not None:
+        return _is_dark(sh.spec.card.color)
+    return bool(sh.spec.blank) and _is_dark(background)
+
+
+def _card_settled(sh, f: int, fps: float, bpm: float | None, scene: Card) -> bool:
+    """True once every line has finished revealing and a gold sweep has ended.
+
+    A settled card is a designed hold. While glyphs are still arriving, a freeze is a defect.
+    """
+    from montaj.render.text import _split
+
+    card = sh.spec.card
+    if card is None:
+        return False
+    fps_i = int(fps)
+    for line in card.text:
+        at = sh.start + (_dur_frames(line.at, fps_i, bpm, "card.at", []) or 0.0)
+        if line.reveal == "pop":
+            span = float(scene.span[1] - scene.span[0])
+            if f < at + (span / 5.0 if span > 0 else 0.0):
+                return False
+        else:
+            n = len(_split(line.text, line.by))
+            if line.stagger:
+                stagger = _dur_frames(line.stagger, fps_i, bpm, "card.stagger", []) or 0.0
+            else:
+                stagger = (0.07 if line.by == "char" else 0.16) * fps
+            if line.dur:
+                dur = _dur_frames(line.dur, fps_i, bpm, "card.dur", []) or 0.0
+            else:
+                dur = 0.9 * fps
+            if f < at + max(0, n - 1) * stagger + dur:
+                return False
+        if line.gold:
+            if line.sweep:
+                a = sh.start + (_dur_frames(line.sweep[0], fps_i, bpm, "card.sweep", []) or 0.0)
+                b = sh.start + (_dur_frames(line.sweep[1], fps_i, bpm, "card.sweep", []) or 0.0)
+            else:
+                a, b = float(sh.start), float(sh.end)
+            if a <= f < b and b > a:
+                return False
+    return True
+
+
 def _intended_black(root: Path) -> list[tuple[float, float]]:
     """Dark windows blackdetect should not call a defect.
 
     Shot 0's fade from a dark `video.background`, a blank on that background
-    (hold plus its in/out transitions), and the outro fade to black.
+    or a dark card (hold plus its in/out transitions), and the outro fade to black.
     """
     spec_file = root / "montaj.yaml"
     if not spec_file.is_file():
@@ -409,14 +458,14 @@ def _intended_black(root: Path) -> list[tuple[float, float]]:
     spans: list[tuple[float, float]] = []
     dark = _is_dark(spec.video.background)
     shots = tl.shots
-    if dark and shots:
+    if shots:
         first = shots[0]
         tr = first.spec.in_
-        if not first.spec.blank and tr is not None and tr.type == "fade" and tr.dur:
+        if dark and not first.spec.blank and tr is not None and tr.type == "fade" and tr.dur:
             dur = _frames(spec, tr.dur)
             spans.append((first.start / fps, (first.start + dur) / fps))
         for i, sh in enumerate(shots):
-            if not sh.spec.blank:
+            if not _dark_plate(sh, spec.video.background):
                 continue
             before = 0.0
             incoming = sh.spec.in_

@@ -13,6 +13,7 @@ from __future__ import annotations
 import math
 from collections import OrderedDict
 from pathlib import Path
+from types import SimpleNamespace
 
 import torch
 import torch.nn.functional as F
@@ -50,7 +51,7 @@ from montaj.render.text import (
 from montaj.render.transitions import fade, swirl, whip
 from montaj.render.wall import build_wall, wall_camera, wall_frame
 from montaj.spec import _dur_frames
-from montaj.timeline import Blank, Clip, Scene, Still, Timeline, Trans, Wall
+from montaj.timeline import Blank, Card, Clip, Scene, Still, Timeline, Trans, Wall
 
 # film.html 155: an omitted morph centre is (cx ?? .5, cy ?? .45). The spec leaves it unset.
 _MORPH_CENTER = (0.5, 0.45)
@@ -193,6 +194,7 @@ class Renderer:
         self._blocks: tuple = ()
         self._subs: tuple = ()
         self._rasters: RasterSet | None = None
+        self._card_rasters: dict[int, tuple[RasterLine, ...]] = {}
         self._captions: _LRU = _LRU(caps["captions"])
         self._shot: int | None = None
         self._owners: dict[str, dict[tuple, set[int]]] = {"photos": {}, "bgs": {}, "cards": {}}
@@ -350,6 +352,45 @@ class Renderer:
         # Each eval gets its own tensor so an in-place grade cannot tint the next blank.
         return self._bg.clone()
 
+    def _solid(self, color: str) -> torch.Tensor:
+        col = torch.tensor(_rgb(color), device=self.cv.device, dtype=torch.float32)
+        return col[:, None, None].expand(3, self.cv.H, self.cv.W).contiguous().clone()
+
+    def _card_render_lines(self, card, t0: float, end: float) -> tuple[TextLine, ...]:
+        """Same styling as an overlay line. Clocks are durations from the shot start."""
+        lines = []
+        for line in card.text:
+            if line.sweep:
+                sweep = (t0 + self._frames(line.sweep[0]), t0 + self._frames(line.sweep[1]))
+            else:
+                sweep = (t0, end)
+            lines.append(
+                self._line(
+                    SimpleNamespace(
+                        text=line.text,
+                        y=line.y,
+                        at=t0 + self._frames(line.at),
+                        style=line.style,
+                        italic=line.italic,
+                        gold=line.gold,
+                        color=line.color,
+                        size=line.size,
+                        weight=line.weight,
+                        tracking=line.tracking,
+                        line_height=line.line_height,
+                        by=line.by,
+                        stagger=None if line.stagger is None else self._frames(line.stagger),
+                        dur=None if line.dur is None else self._frames(line.dur),
+                        rise=line.rise,
+                        reveal=line.reveal,
+                        sweep=sweep,
+                        shadow=line.shadow,
+                        indent=line.indent,
+                    )
+                )
+            )
+        return tuple(lines)
+
     def _clip_source(self, stem: str) -> ClipSource:
         hit = self._clips.get(stem)
         if hit is None:
@@ -487,6 +528,22 @@ class Renderer:
             arrived = self._layer(sh, sh.morph.photo, other, fx, fy, z, px, py, tilt, False)
         return self._morph_pulse(base, arrived, sh, shot, t)
 
+    def _word_card(self, scene: Card, t: float) -> torch.Tensor:
+        """Colour and text are one picture, so a transition carries both."""
+        self._shot = scene.shot
+        card = self.tl.shots[scene.shot].spec.card
+        if card is None:
+            raise ValueError(f"shot {scene.shot} has no card")
+        img = self._solid(card.color)
+        rasters = self._card_rasters.get(scene.shot)
+        if not rasters:
+            return img
+        lines = self._card_render_lines(card, float(scene.t0), float(scene.end))
+        block = TextBlock(scene.span[0], scene.span[1], 0.0, 0.0, 0.0, lines)
+        return draw_text(
+            self.cv, img, [block], [], t, RasterSet(rasters, ()), fps=float(self.tl.fps),
+        )
+
     def _fade(self, a: torch.Tensor, b: torch.Tensor, x: float, blur: float) -> torch.Tensor:
         # blur 0 stays on M1 smoothstep (`fade`). film.html vis() line 411 eases with `es`
         # (line 73, sine). Line 417 blurs each side by (1 − opacity) · blur.
@@ -519,7 +576,16 @@ class Renderer:
             frame = shot.spec.frame
             if frame is not None and frame.caption and frame.caption not in captions:
                 captions.append(frame.caption)
-        if not self.tl.texts and not self.tl.subs and not captions:
+        card_lines: list[TextLine] = []
+        card_index: dict[int, tuple[int, int]] = {}
+        for shot in self.tl.shots:
+            card = shot.spec.card
+            if card is None:
+                continue
+            built = self._card_render_lines(card, float(shot.start), float(shot.end))
+            card_index[shot.index] = (len(card_lines), len(card_lines) + len(built))
+            card_lines.extend(built)
+        if not self.tl.texts and not self.tl.subs and not captions and not card_lines:
             self._rasters_ready = True
             return
         cache = self._dir / "build" / "text"
@@ -532,13 +598,18 @@ class Renderer:
         subs = tuple(Sub(s.from_, s.to, s.text, size=s.size, color=s.color) for s in self.tl.subs)
         device = self.cv.device
         scale = float(self.cv.k)
-        lines = tuple(_move_line(ln, device) for ln in raster_lines(flat, scale=scale, cache_dir=cache)) if flat else ()
+        everything = (*flat, *card_lines)
+        rasters = tuple(_move_line(ln, device) for ln in raster_lines(everything, scale=scale, cache_dir=cache)) if everything else ()
         sub_r = tuple(_move_image(im, device) for im in raster_subs(subs, scale=scale, cache_dir=cache)) if subs else ()
         self._blocks = tuple(blocks)
         self._subs = subs
+        n_overlay = len(flat)
         # Captions are card art, not the finish overlay. An empty RasterSet would still clone.
         if blocks or subs:
-            self._rasters = RasterSet(lines, sub_r)
+            self._rasters = RasterSet(rasters[:n_overlay], sub_r)
+        self._card_rasters = {
+            index: rasters[n_overlay + lo : n_overlay + hi] for index, (lo, hi) in card_index.items()
+        }
         for caption in captions:
             self._sprite(caption)
         self._rasters_ready = True
@@ -557,6 +628,8 @@ class Renderer:
     def _eval(self, scene: Scene, t: float) -> torch.Tensor:
         if isinstance(scene, Blank):
             return self._background()
+        if isinstance(scene, Card):
+            return self._word_card(scene, t)
         if isinstance(scene, Still):
             sh = self.tl.shots[scene.shot].spec
             if not _m2(sh):
