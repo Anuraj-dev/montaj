@@ -6,7 +6,17 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from montaj.render.core import EASE as EASE_FN, key as eval_key
-from montaj.spec import Shot, Spec, SpecError, _format_beat0, parse_wh, round_frame, validate_spec
+from montaj.spec import (
+    INCOMING_TRANS,
+    WALL_PULLBACK_ZOOM,
+    Shot,
+    Spec,
+    SpecError,
+    _format_beat0,
+    parse_wh,
+    round_frame,
+    validate_spec,
+)
 
 _TRACK_DEFAULT = {"dust": "linear", "glow": "linear", "bars": "sine"}
 
@@ -44,6 +54,7 @@ class Trans:
     axis: str = "x"
     center: tuple[float, float] | None = None
     blur: float = 0.0
+    zoom: float | None = None
 
 
 type Scene = Still | Wall | Clip | Blank | Trans
@@ -298,6 +309,14 @@ def _track_at(keys: list, t: float) -> float:
     return float(eval_key(float(t), keys))
 
 
+def _materialize_transition(sh: Shot) -> Shot:
+    """Write the wall-pullback zoom default onto the shot the hash dumps."""
+    tr = sh.in_
+    if tr is None or tr.type != "wall-pullback" or tr.zoom is not None:
+        return sh
+    return sh.model_copy(update={"in_": tr.model_copy(update={"zoom": WALL_PULLBACK_ZOOM})})
+
+
 def _shot_with_frame_keys(sh: Shot, i: int, parsed: dict[str, int]) -> Shot:
     if sh.wall is None:
         return sh
@@ -342,7 +361,7 @@ def _visible_span(resolved: list[ResolvedShot], i: int, parsed: dict[str, int]) 
     if i + 1 < len(resolved):
         nxt = resolved[i + 1]
         ntr = nxt.spec.in_
-        if ntr is not None and ntr.type in ("fade", "swirl", "whip"):
+        if ntr is not None and ntr.type in (*INCOMING_TRANS, "whip"):
             nd = parsed.get(f"shots[{i + 1}].in.dur")
             if nd is not None:
                 v1 = float(nxt.start) + (nd / 2.0 if ntr.type == "whip" else nd)
@@ -434,7 +453,7 @@ def resolve(spec: Spec, spec_dir: Path) -> Timeline:
                 start=start,
                 end=end,
                 kind=_shot_kind(sh),
-                spec=_shot_with_frame_keys(sh, i, parsed),
+                spec=_materialize_transition(_shot_with_frame_keys(sh, i, parsed)),
             )
         )
     n_frames = resolved[-1].end if resolved else 0
@@ -453,13 +472,20 @@ def resolve(spec: Spec, spec_dir: Path) -> Timeline:
         else:
             prev = resolved[i - 1]
             a = _base_scene(prev, spans[prev.index])
-        if tr.type in ("fade", "swirl"):
+        if tr.type in INCOMING_TRANS:
             t0 = float(sh.start)
             center = tr.center
             if tr.type == "swirl" and center is None and i > 0:
                 center = resolved[i - 1].spec.focus
+            zoom = float(tr.zoom) if tr.type == "wall-pullback" else None
             windows.append(
-                (t0, t0 + dur, Trans(kind=tr.type, a=a, b=b, t0=t0, dur=dur, center=center, blur=tr.blur))
+                (
+                    t0,
+                    t0 + dur,
+                    Trans(
+                        kind=tr.type, a=a, b=b, t0=t0, dur=dur, center=center, blur=tr.blur, zoom=zoom,
+                    ),
+                )
             )
         elif tr.type == "whip":
             t0 = float(sh.start) - dur / 2
