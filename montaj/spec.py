@@ -246,7 +246,7 @@ class Shot(Frozen):
     morph: Morph | None = None
     pulse: str | None = None
     blank: bool = False
-    card: CardSpec | None = None
+    card: CardSpec | None = Field(default=None, exclude_if=lambda v: v is None)
     in_: Transition | None = Field(default=None, alias="in")
     flash: float | None = None
 
@@ -1395,6 +1395,16 @@ def _check_text_line(path: str, line: TextLine, errors: list[str]) -> None:
     if line.reveal not in TEXT_REVEAL:
         errors.append(_line(f"{path}.reveal", f"unknown {line.reveal!r}", "use rise or pop"))
     _check_color(f"{path}.color", line.color, errors)
+    for name in ("y", "size", "weight", "tracking", "line_height", "rise", "indent"):
+        v = getattr(line, name)
+        if v is None:
+            continue
+        positive = name in ("size", "weight", "line_height")
+        if not math.isfinite(v) or (positive and v <= 0):
+            need = "finite and > 0" if positive else "finite"
+            errors.append(
+                _line(f"{path}.{name}", f"must be {need}, got {_fmt_num(v)}", f"use a design-px {name}")
+            )
 
 
 def _validate_card(

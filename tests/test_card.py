@@ -4,6 +4,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+import torch
 
 from montaj.project import segment_hash
 from montaj.spec import SpecError, load_spec
@@ -63,18 +64,42 @@ def test_card_edits_reach_segment_hash(tmp_path: Path) -> None:
     assert hashes(_CARD.replace("Hello", "Hullo")) != base
 
 
-@pytest.mark.gpu
 def test_card_renders_colour_and_text(tmp_path: Path) -> None:
-    """One card shot paints its colour and, once revealed, glyphs over it. Needs CUDA and Chromium."""
+    """The card scene itself (before the look's vignette and grain) is the colour with glyphs on it."""
     from montaj.render.canvas import Canvas
     from montaj.render.frame import Renderer
 
     p = _write(tmp_path, _CARD)
     p.write_text(p.read_text().replace("1080x1920", "270x480"))
     tl = resolve(load_spec(p), tmp_path)
-    cv = Canvas(tl.size[0], tl.size[1], device="cuda")
-    img = Renderer(tl, tmp_path, cv).frame(15)
+    r = Renderer(tl, tmp_path, Canvas(tl.size[0], tl.size[1], device="cpu"))
+    r._ensure_rasters()
+    img = r._eval(tl.plan(15).scene, 15.0)
     assert img.shape == (3, 480, 270)
-    corner = img[:, 0, 0]
-    assert (img - corner[:, None, None]).abs().amax() > 0.2  # glyphs differ from the colour
-    assert (img[:, :40, :] - corner[:, None, None]).abs().amax() < 0.05  # top is plain colour
+    flat = torch.tensor([0x22, 0x33, 0x44], dtype=torch.float32) / 255.0
+    diff = (img - flat[:, None, None]).abs().amax(dim=0)
+    assert diff[:40, :].max() < 1e-4  # the top is the plain colour
+    assert diff.max() > 0.2  # glyphs sit on it
+    assert diff[int(900 / 1920 * 480) - 30 : int(900 / 1920 * 480) + 30, :].max() > 0.2  # near y: 900
+
+
+def test_card_nonfinite_numeric_is_validation_error(tmp_path: Path) -> None:
+    errs = _errors(tmp_path, _CARD.replace("at: 0s", "at: 0s, weight: .nan"))
+    assert any("card.text[0].weight" in e and "finite" in e for e in errs)
+    errs = _errors(tmp_path, _CARD.replace("at: 0s", "at: 0s, size: -4"))
+    assert any("card.text[0].size" in e for e in errs)
+
+
+def test_card_field_does_not_change_existing_hashes(tmp_path: Path) -> None:
+    """A film with no card shot hashes exactly as it did before the card field existed."""
+    from PIL import Image
+
+    (tmp_path / "assets").mkdir()
+    Image.new("RGB", (40, 60)).save(tmp_path / "assets" / "p1.jpg")
+    p = _write(tmp_path, "  - photo: p1\n    hold: 20f\n  - blank: true\n    hold: 10f\n")
+    tl = resolve(load_spec(p), tmp_path)
+    got = [segment_hash(tl, seg, {"p1": "abc"}, "e1") for seg in tl.segments]
+    assert got == [
+        "f3275515065843b5dcf908991483c46a0ce59a18825e792e0c966d14bf83be76",
+        "cdda609de59fa0089e05b129c226170783a281a9ebc7a1bbb061a43036b35d5f",
+    ]
