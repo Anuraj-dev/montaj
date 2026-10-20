@@ -56,6 +56,12 @@ _STOPS = (
 _NAMED = {"cream": "#fbf1dc", "gold": "#f0c77e", "ink": "#4a2c1a"}
 _SIZE = {"serif": 84.0, "script": 84.0, "caps": 26.0, "deva": 62.0}
 _SHADOW_R = {"serif": 30.0, "script": 40.0, "caps": 16.0, "deva": 24.0}
+# Edge scrim: full strength on the outer fraction of the frame, then a cosine fade.
+_EDGE_PLATEAU = 0.28
+_EDGE_FADE = 0.22
+# Band scrim: the line box stays fully dark; this pad (design px) is the gradient.
+_BAND_PAD = 48.0
+_BAND_PAD_EM = 0.45
 
 # Faces the page actually uses. A failed load must reject: swallowing it lets a fallback
 # face paint real pixels, pass the nonblank check, and get cached as the requested font.
@@ -124,6 +130,15 @@ class TextLine:
 
 
 @dataclass(frozen=True)
+class TextBackdrop:
+    """Black scrim. `gradient` fades; `solid` is flat over the same footprint."""
+
+    type: str = "gradient"
+    strength: float = 0.8
+    place: str = "band"
+
+
+@dataclass(frozen=True)
 class TextBlock:
     start: float
     end: float
@@ -131,6 +146,7 @@ class TextBlock:
     fade_out: float
     blur: float
     lines: tuple[TextLine, ...]
+    backdrop: TextBackdrop | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.lines, tuple):
@@ -1165,6 +1181,102 @@ def _paint_line(dst: torch.Tensor, cv, block: TextBlock, line: TextLine, raster:
     _paint(dst, cv, block, line, raster, t, fps, _unit_ks(line, n, t, fps))
 
 
+def _line_extent(line: TextLine) -> tuple[float, float, float]:
+    size = float(line.size if line.size is not None else _SIZE.get(line.style, 84.0))
+    if line.line_height is not None:
+        lh = float(line.line_height)
+    elif line.style == "deva":
+        lh = 1.5
+    elif line.style == "serif":
+        lh = 1.1
+    else:
+        lh = 1.2
+    return size, line.y, line.y + size * lh
+
+
+def _edge_alpha(dist: torch.Tensor, strength: float, solid: bool) -> torch.Tensor:
+    """`dist` is 0 at the chosen edge and 1 at the far edge."""
+    fade_end = _EDGE_PLATEAU + _EDGE_FADE
+    full = torch.full_like(dist, strength)
+    if solid:
+        return torch.where(dist <= fade_end, full, torch.zeros_like(dist))
+    u = ((dist - _EDGE_PLATEAU) / _EDGE_FADE).clamp(0, 1)
+    soft = full * (0.5 * (1 + torch.cos(math.pi * u)))
+    alpha = torch.where(dist <= _EDGE_PLATEAU, full, soft)
+    return torch.where(dist <= fade_end, alpha, torch.zeros_like(dist))
+
+
+def _band_limits(block: TextBlock) -> tuple[float, float, float, float] | None:
+    if not block.lines:
+        return None
+    extents = [_line_extent(line) for line in block.lines]
+    pad = max(_BAND_PAD, _BAND_PAD_EM * max(size for size, _top, _bot in extents))
+    inner0 = min(top for _size, top, _bot in extents)
+    inner1 = max(bot for _size, _top, bot in extents)
+    if inner1 < inner0:
+        inner0, inner1 = inner1, inner0
+    return inner0 - pad, inner0, inner1, inner1 + pad
+
+
+def _band_alpha(rows: torch.Tensor, k: float, block: TextBlock, strength: float, solid: bool) -> torch.Tensor:
+    limits = _band_limits(block)
+    if limits is None:
+        return torch.zeros_like(rows)
+    outer0, inner0, inner1, outer1 = limits
+    y = (rows + 0.5) / k
+    if solid:
+        inside = (y >= outer0) & (y <= outer1)
+        return torch.where(inside, torch.full_like(rows, strength), torch.zeros_like(rows))
+    # Glyphs sit on the plateau. The pad is the gradient, so the scrim is not a hard bar.
+    alpha = torch.where(
+        (y >= inner0) & (y <= inner1), torch.full_like(rows, strength), torch.zeros_like(rows)
+    )
+    rise_w = inner0 - outer0
+    if rise_w > 1e-6:
+        u = ((y - outer0) / rise_w).clamp(0, 1)
+        rise = strength * 0.5 * (1 - torch.cos(math.pi * u))
+        alpha = torch.where((y >= outer0) & (y < inner0), rise, alpha)
+    fall_w = outer1 - inner1
+    if fall_w > 1e-6:
+        v = ((outer1 - y) / fall_w).clamp(0, 1)
+        fall = strength * 0.5 * (1 - torch.cos(math.pi * v))
+        alpha = torch.where((y > inner1) & (y <= outer1), fall, alpha)
+    return alpha
+
+
+def _scrim_alpha(dst: torch.Tensor, cv, block: TextBlock) -> torch.Tensor | None:
+    bd = block.backdrop
+    if bd is None:
+        return None
+    strength = min(1.0, max(0.0, float(bd.strength)))
+    if strength <= 0:
+        return None
+    h = dst.shape[-2]
+    rows = torch.arange(h, device=dst.device, dtype=dst.dtype)
+    solid = bd.type == "solid"
+    if bd.place in ("bottom", "top"):
+        center = (rows + 0.5) / h
+        dist = center if bd.place == "top" else (1 - center)
+        return _edge_alpha(dist, strength, solid)
+    return _band_alpha(rows, float(cv.k), block, strength, solid)
+
+
+def _darken(dst: torch.Tensor, alpha: torch.Tensor) -> None:
+    """Straight-alpha black. An RGB frame darkens; a transparent layer gains the scrim's alpha."""
+    a = alpha.view(1, -1, 1)
+    dst.mul_(1 - a)
+    if dst.shape[0] == 4:
+        dst[3:4].add_(a)
+
+
+def _paint_backdrop(dst: torch.Tensor, cv, block: TextBlock) -> None:
+    # Once per block, at rest. A per-word scrim would rise and pop with the reveal.
+    alpha = _scrim_alpha(dst, cv, block)
+    if alpha is None:
+        return
+    _darken(dst, alpha)
+
+
 def _rasters_of(rasters) -> tuple[tuple[RasterLine, ...], tuple[RasterImage, ...]]:
     if isinstance(rasters, RasterSet):
         return tuple(rasters.lines), tuple(rasters.subs)
@@ -1176,7 +1288,8 @@ def draw_text(cv, img: torch.Tensor, blocks, subs, t: float, rasters, *, fps: fl
 
     `subs` is in the task signature; the spec snippet omits it. `fps` (default 30) turns the
     0.2s/0.3s/0.5s sub ramps and the 0.02s vis threshold into frames. `rasters` is a `RasterSet`
-    or a sequence of `RasterLine` parallel to the blocks' lines.
+    or a sequence of `RasterLine` parallel to the blocks' lines. A block backdrop is painted
+    behind that block's lines and fades with the block.
     """
     with torch.no_grad():
         out = img.clone()
@@ -1196,11 +1309,13 @@ def draw_text(cv, img: torch.Tensor, blocks, subs, t: float, rasters, *, fps: fl
             if a <= 0.0:
                 continue
             if a >= 1.0 - 1e-6:
+                _paint_backdrop(out, cv, block)
                 for line, raster in group:
                     _paint_line(out, cv, block, line, raster, t, fps)
                 continue
             # Child filters first, then the block blur, then opacity (film.html:416-417).
             layer = torch.zeros(4, out.shape[-2], out.shape[-1], device=out.device, dtype=out.dtype)
+            _paint_backdrop(layer, cv, block)
             for line, raster in group:
                 _paint_line(layer, cv, block, line, raster, t, fps)
             layer = _blur(layer, (1.0 - a) * block.blur * cv.k)

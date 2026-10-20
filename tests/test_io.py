@@ -409,6 +409,62 @@ def test_sheet_caps_tile_count(tmp_path: Path) -> None:
     assert len(times) <= sheet.MAX_TILES
 
 
+def test_every_times_covers_60s_at_half_second() -> None:
+    """A 60s film at 0.5s is one sample per interval, from 0 through 59.5."""
+    times = sheet.every_times(60.0, 0.5)
+    assert len(times) == 120
+    assert times[0] == 0.0
+    assert times[-1] == pytest.approx(59.5)
+    assert times == pytest.approx([i * 0.5 for i in range(120)])
+    assert all(t < 60.0 for t in times)
+    assert -(-len(times) // sheet.MAX_TILES) == 10
+
+
+def test_every_times_rejects_bad_intervals() -> None:
+    with pytest.raises(ValueError, match="positive"):
+        sheet.every_times(60.0, 0)
+    with pytest.raises(ValueError, match="positive"):
+        sheet.every_times(60.0, -0.5)
+    with pytest.raises(ValueError, match="unknown duration"):
+        sheet.every_times(0.0, 0.5)
+    with pytest.raises(ValueError, match="finer than one frame"):
+        sheet.every_times(1.0, 0.001, fps=25)
+    assert len(sheet.every_times(100.0, 0.01)) == 10000  # no total cap; extraction is batched
+
+
+def test_pair_frames_sorts_numerically_across_the_999_1000_boundary() -> None:
+    files = [Path(f"frame_{i}.jpg") for i in (1000, 100, 999, 1, 1001, 10)]
+    picks = [1, 10, 100, 999, 1000, 1001]
+    assert [(i, p.name) for i, p in sheet.pair_frames(picks, files)] == [
+        (i, f"frame_{i}.jpg") for i in picks
+    ]
+
+
+def test_extract_120_frames_in_order(tmp_path: Path) -> None:
+    """120 frames overflow one ffmpeg select expression; batching keeps them all, in order."""
+    log = tmp_path / "io.log"
+    video = clip(tmp_path / "v.mp4", seconds=5.0, src="testsrc")  # 125 frames at 25 fps
+    times = [i / FPS for i in range(120)]
+    frames_ = sheet.extract(video, times, tmp_path / "f", info=encode.probe(video, log=log), log=log)
+    assert [i for i, _ in frames_] == list(range(120))
+    assert all(p.exists() for _, p in frames_)
+
+
+def test_sheets_pages_past_twelve_and_drops_stale(tmp_path: Path) -> None:
+    log = tmp_path / "io.log"
+    video = clip(tmp_path / "v.mp4", seconds=1.0, src="testsrc")
+    times = [i * 0.04 for i in range(13)]  # frames 0..12 at 25 fps
+    paths = sheet.sheets(video, tmp_path / "sheet.jpg", times, log=log)
+    assert [path.name for path in paths] == ["sheet.jpg", "sheet-2.jpg"]
+    for path in paths:
+        with Image.open(path) as img:
+            assert 0 < img.width <= 1536
+
+    one = sheet.sheet(video, tmp_path / "sheet.jpg", at=[0.2], log=log)
+    assert one.name == "sheet.jpg" and one.exists()
+    assert not (tmp_path / "sheet-2.jpg").exists()
+
+
 # --- qa -------------------------------------------------------------------------------------
 
 def _spans(*sections: str) -> Path:
@@ -634,3 +690,13 @@ def test_doctor_reports_a_config_that_cannot_load_and_a_failing_import(
     silent.chmod(0o755)
     line = doctor.faster_whisper_line(silent.as_posix(), timeout=1)
     assert line.startswith("FAIL faster_whisper:") and "did not finish" in line
+
+
+def test_check_expect_suppresses_warn_and_names_why(tmp_path: Path) -> None:
+    log = tmp_path / "qa.log"
+    video = _spans("color=c=black", "color=c=white")
+    exp = [qa.Expect("black", (0.0, 1.0), "HUD intro"), qa.Expect("frozen", (5.0, 6.0))]
+    lines = qa.check(video, log=log, intended_black=[(0.0, 1.0)], expect=exp)
+    assert not any(line.startswith("WARN black") for line in lines)
+    assert "INFO black 0–1s ignored as intended: HUD intro" in lines
+    assert "INFO expect frozen 5–6s not found" in lines
