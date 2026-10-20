@@ -20,6 +20,13 @@ Photo fields (`crop`, `focus`, swirl `center`, wall `at`) are source-image pixel
 - `shots[].photo` — string, photo or wall or clip — stem of the still. An integer in the YAML is read as a string. Mutually exclusive with `wall` and `clip`.
 - `shots[].clip` — string, photo or wall or clip — stem of a video file in `assets/` (`mp4`, `mov`, `webm`, `mkv`). Mutually exclusive with `photo` and `wall`.
 - `shots[].clip_in` — duration, default `0s` — source offset into the clip.
+- `shots[].camera` — list of keys, default none — keyframed punch-in on a clip, on the shot clock (`t` from the shot's start, fade-in included). Needs `clip`. Mutually exclusive with `focus` and `zoom`.
+- `shots[].camera[].t` — duration, required — when this key is reached. Keys run in increasing time; before the first key the camera holds it, after the last it holds that.
+- `shots[].camera[].zoom` — number >= 1, optional — multiple of cover: `1` shows the whole crop, `1.35` is a 35% punch-in. Leave it off to hold the previous zoom (first key: `1`). Moves geometrically between keys.
+- `shots[].camera[].focus` — `[x, y]`, optional — source-video pixel placed at the screen centre, kept inside the crop's cover so no border shows. Leave it off to hold the previous focus (first key: the crop centre).
+- `shots[].camera[].ease` — easing name, default `smooth` — how the camera travels into this key.
+- `shots[].speed` — number > 0 or list of `{t, v, ease}` keys, default `1` — playback speed of a clip. `2` plays twice as fast. Keys ease the speed (`v`) like a camera track; the source position is its integral at frame resolution. Needs `clip`. The source must last the hold (`ERR shots[3]: clip ends at 4.1s of source, needs 5.2s`). No reverse.
+- `shots[].freeze` — duration, default none — from this time in the shot to its end the clip shows the source frame it had here. Needs `clip`; must fall inside the hold.
 - `shots[].hold` — duration, hold or until — how long this shot is on screen. Exactly one of `hold` or `until`. A whole-beat hold (`4b`) ends on a beat of the grid (moving forward if the shot started off-beat), and beat holds never drift from rounding.
 - `shots[].until` — time expression, hold or until — the shot ends at this time from film start. Must fall after the shot's start.
 - `shots[].drift` — mapping, default none — Ken Burns zoom/pan on a photo. Needs `photo`. Mutually exclusive with `zoom`.
@@ -39,9 +46,9 @@ Photo fields (`crop`, `focus`, swirl `center`, wall `at`) are source-image pixel
 - `shots[].morph.center` — `[x, y]`, default none — screen fraction where the circle is centred.
 - `shots[].pulse` — `heartbeat`, default none — beat-locked scale pulse on the grid tempo, phased from the shot start. Needs `photo` and a grid (`video.bpm` or `audio.markers`).
 - `shots[].blank` — boolean, default false — show only `video.background`. Mutually exclusive with `photo`, `wall` and `clip`. Holds and fades like any other shot.
-- `shots[].crop` — `[x0, y0, x1, y1]`, default the full image — the part of the photo that is shown.
-- `shots[].focus` — `[x, y]`, default the crop centre — the photo point placed at the screen centre.
-- `shots[].zoom` — number, default cover — design pixels per photo pixel. Cover fits the crop with a hair of overscan.
+- `shots[].crop` — `[x0, y0, x1, y1]`, default the full image — the part of the photo that is shown. On a clip it is a box of the source video frame, in source px, inside the video.
+- `shots[].focus` — `[x, y]`, default the crop centre — the photo point placed at the screen centre. On a clip it is a source-video pixel inside the crop, a one-key `camera`.
+- `shots[].zoom` — number, default cover — design pixels per photo pixel. Cover fits the crop with a hair of overscan. On a clip it is a multiple of cover (>= 1), a one-key `camera`, as in `camera[].zoom`.
 - `shots[].in` — mapping, default none — how this shot arrives from the previous one. Omit `in` for a cut. See transitions.
 - `shots[].in.type` — `cut`, `fade`, `swirl` or `whip`, required inside `in` — which transition.
 - `shots[].in.dur` — duration, required except for a cut — length of the transition. It has to fit in the shots it overlaps.

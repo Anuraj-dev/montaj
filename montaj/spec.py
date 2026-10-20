@@ -190,6 +190,19 @@ class Morph(Frozen):
     center: tuple[float, float] | None = None
 
 
+class CameraKey(Frozen):
+    t: DurationStr | int
+    zoom: RealNum | None = None
+    focus: tuple[float, float] | None = None
+    ease: str = "smooth"
+
+
+class SpeedKey(Frozen):
+    t: DurationStr | int
+    v: RealNum
+    ease: str = "smooth"
+
+
 class Shot(Frozen):
     photo: PhotoId | None = None
     wall: WallSpec | None = None
@@ -200,6 +213,9 @@ class Shot(Frozen):
     crop: CropBox | None = None
     focus: tuple[float, float] | None = None
     zoom: float | None = None
+    camera: list[CameraKey] | None = None
+    speed: RealNum | list[SpeedKey] | None = None
+    freeze: DurationStr | int | None = None
     drift: Drift | None = None
     tone: Tone | None = None
     frame: FrameCard | None = None
@@ -484,6 +500,13 @@ def _duration_fields(spec: Spec) -> list[tuple[str, str]]:
             out.append((f"shots[{i}].hold", sh.hold))
         if sh.in_ is not None and sh.in_.dur is not None:
             out.append((f"shots[{i}].in.dur", sh.in_.dur))
+        if sh.freeze is not None:
+            out.append((f"shots[{i}].freeze", sh.freeze))
+        for k, ckey in enumerate(sh.camera or ()):
+            out.append((f"shots[{i}].camera[{k}].t", ckey.t))
+        if isinstance(sh.speed, list):
+            for k, skey in enumerate(sh.speed):
+                out.append((f"shots[{i}].speed[{k}].t", skey.t))
         if sh.wall is not None:
             for k, key in enumerate(sh.wall.camera.pos):
                 out.append((f"shots[{i}].wall.camera.pos[{k}].t", key.t))
@@ -976,6 +999,123 @@ def _check_finish(spec: Spec, errors: list[str]) -> None:
         )
 
 
+def _probe_clip(spec: Spec, spec_dir: Path | None, stem: str) -> tuple[int, int, float] | None:
+    """(width, height, seconds) of a clip asset, or None when it cannot be probed."""
+    if spec_dir is None:
+        return None
+    from montaj.encode import EncodeError, probe
+    from montaj.project import find_clip
+
+    try:
+        info = probe(find_clip(spec_dir / spec.assets, stem))
+    except (EncodeError, FileNotFoundError, OSError, ValueError):
+        return None
+    if info.width <= 0 or info.height <= 0:
+        return None
+    return info.width, info.height, info.duration
+
+
+def _finite_point(v: tuple[float, float]) -> bool:
+    return all(math.isfinite(c) for c in v)
+
+
+def _check_clip_shot(
+    spec: Spec,
+    i: int,
+    sh: Shot,
+    hold: int | None,
+    parsed: dict[str, int],
+    times: dict[str, float],
+    spec_dir: Path | None,
+    errors: list[str],
+) -> None:
+    """crop / focus / zoom / camera / speed / freeze on a clip shot."""
+    from montaj.clipmap import source_index
+
+    at = f"shots[{i}]"
+    n_err = len(errors)
+    if sh.camera is not None and (sh.focus is not None or sh.zoom is not None):
+        errors.append(_line(at, "camera and focus/zoom are mutually exclusive", "put them in camera keys"))
+    if sh.zoom is not None and (not math.isfinite(sh.zoom) or sh.zoom < 1):
+        errors.append(_line(f"{at}.zoom", f"clip zoom is a multiple of cover, got {_fmt_num(sh.zoom)}", "use >= 1"))
+    if sh.focus is not None and not _finite_point(sh.focus):
+        errors.append(_line(f"{at}.focus", "must be finite", "use [x, y] in source px"))
+    if sh.crop is not None:
+        x0, y0, x1, y1 = sh.crop
+        if x0 < 0 or y0 < 0 or x1 <= x0 or y1 <= y0:
+            errors.append(_line(f"{at}.crop", f"{list(sh.crop)} is not a box", "use [x0, y0, x1, y1] with x0 < x1, y0 < y1, all >= 0"))
+    points = [(f"{at}.focus", sh.focus)] if sh.focus is not None else []
+    if sh.camera is not None:
+        if not sh.camera:
+            errors.append(_line(f"{at}.camera", "need at least one key", "add {t: 0s, zoom: 1.0}"))
+        last: int | None = None
+        for k, ck in enumerate(sh.camera):
+            path = f"{at}.camera[{k}]"
+            if ck.ease not in EASE:
+                errors.append(_line(f"{path}.ease", f"unknown {ck.ease!r}", EASE_HINT))
+            if ck.zoom is not None and (not math.isfinite(ck.zoom) or ck.zoom < 1):
+                errors.append(_line(f"{path}.zoom", f"zoom is a multiple of cover, got {_fmt_num(ck.zoom)}", "use >= 1"))
+            if ck.focus is not None:
+                if _finite_point(ck.focus):
+                    points.append((f"{path}.focus", ck.focus))
+                else:
+                    errors.append(_line(f"{path}.focus", "must be finite", "use [x, y] in source px"))
+            t = parsed.get(f"{path}.t")
+            if t is not None:
+                if last is not None and t <= last:
+                    errors.append(_line(f"{path}.t", "keys must be in increasing time", "sort the keys"))
+                last = t
+    if isinstance(sh.speed, list):
+        if not sh.speed:
+            errors.append(_line(f"{at}.speed", "need at least one key", "add {t: 0s, v: 1}"))
+        last = None
+        for k, sk in enumerate(sh.speed):
+            path = f"{at}.speed[{k}]"
+            if sk.ease not in EASE:
+                errors.append(_line(f"{path}.ease", f"unknown {sk.ease!r}", EASE_HINT))
+            if not math.isfinite(sk.v) or sk.v <= 0:
+                errors.append(_line(f"{path}.v", f"must be finite and > 0, got {_fmt_num(sk.v)}", "reverse playback is not supported"))
+            t = parsed.get(f"{path}.t")
+            if t is not None:
+                if last is not None and t <= last:
+                    errors.append(_line(f"{path}.t", "keys must be in increasing time", "sort the keys"))
+                last = t
+    elif sh.speed is not None and (not math.isfinite(sh.speed) or sh.speed <= 0):
+        errors.append(_line(f"{at}.speed", f"must be finite and > 0, got {_fmt_num(sh.speed)}", "reverse playback is not supported"))
+    freeze = parsed.get(f"{at}.freeze")
+    if freeze is not None and hold is not None and freeze >= hold:
+        errors.append(_line(f"{at}.freeze", f"{freeze}f is at or after the end of the {hold}f hold", "use a time inside the hold"))
+    if len(errors) > n_err or not (sh.crop or sh.speed is not None or points):
+        return
+    # Source-dependent checks: crop and focus inside the frame, and speed not running off the end.
+    info = _probe_clip(spec, spec_dir, sh.clip)
+    if info is None:
+        return
+    w, h, seconds = info
+    if sh.crop is not None and (sh.crop[2] > w or sh.crop[3] > h):
+        errors.append(_line(f"{at}.crop", f"{list(sh.crop)} runs outside the {w}x{h} source", "keep the box inside the frame"))
+        return
+    box = sh.crop or (0, 0, w, h)
+    for path, (px, py) in points:
+        if not (box[0] <= px <= box[2] and box[1] <= py <= box[3]):
+            errors.append(_line(path, f"[{_fmt_num(px)}, {_fmt_num(py)}] is outside the crop {list(box)}", "focus is in source px"))
+    if sh.speed is None or hold is None or hold <= 0:
+        return
+    fps = spec.video.fps
+    if isinstance(sh.speed, list):
+        speed = [(parsed.get(f"{at}.speed[{k}].t", 0), sk.v, sk.ease) for k, sk in enumerate(sh.speed)]
+    else:
+        speed = float(sh.speed)
+    table = source_index(speed, freeze, hold)
+    assert table is not None
+    clip_in = times.get(f"{at}.clip_in", 0.0)
+    needs = (clip_in + table[-1] + 1) / fps
+    if needs > seconds + 1.5 / fps:
+        errors.append(
+            _line(at, f"clip ends at {seconds:.1f}s of source, needs {needs:.1f}s", "shorten hold, lower speed or clip_in")
+        )
+
+
 def _check_ease(path: str, ease: str, errors: list[str]) -> None:
     if ease not in EASE:
         errors.append(_line(path, f"unknown {ease!r}", EASE_HINT))
@@ -1159,6 +1299,12 @@ def validate_spec(
                             "use a value > 0",
                         )
                     )
+        if has_c:
+            _check_clip_shot(spec, i, sh, h, parsed, times, spec_dir, errors)
+        else:
+            for name in ("camera", "speed", "freeze"):
+                if getattr(sh, name) is not None:
+                    errors.append(_line(f"shots[{i}].{name}", f"{name} needs clip", "add clip:"))
         tr = sh.in_
         if tr is None:
             continue

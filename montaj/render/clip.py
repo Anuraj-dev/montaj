@@ -1,6 +1,9 @@
 """Video clips. One forward ffmpeg reader per shot window.
 
 The decoded span is `[clip_in, clip_in + hold)` — pass `hold` in seconds or `nframes`.
+A shot with speed or freeze passes `src`, the source frame for each shot frame; the
+decoded span is then `[clip_in, clip_in + max(src) + 1 frames)`. A shot with a crop or
+camera passes `crop` (source px) and decodes that box at `w x h` instead of covering the frame.
 Frames stay uint8 on CPU. `frame` converts that one frame to float on the caller's device.
 `clip_in` is `-ss` before `-i`, so decoded frame 0 is that far into the file.
 Timeline frame `t` is `floor(t − shot_start)`, clamped to the window.
@@ -29,10 +32,15 @@ FFMPEG = os.environ.get("MONTAJ_FFMPEG", "ffmpeg")
 _CACHE_FRAMES = 96
 # One frame composites two shots. A third live reader is closed.
 _MAX_LIVE = 2
+# Decoded frames are bigger than the output when a crop or camera keeps source detail.
+# The frame budget shrinks so the resident bytes never exceed 96 frames of 1080x1920.
+_CACHE_BYTES = _CACHE_FRAMES * 1080 * 1920 * 3
+_MIN_CAP = 4
 
 
-def window_key(clip_in: float, w: int, h: int, count: int) -> tuple:
-    return (round(float(clip_in), 6), int(w), int(h), int(count))
+def window_key(clip_in: float, w: int, h: int, count: int, crop: tuple | None = None) -> tuple:
+    key = (round(float(clip_in), 6), int(w), int(h), int(count))
+    return key if crop is None else key + (tuple(int(c) for c in crop),)
 
 
 def _read_one(stdout, w: int, h: int) -> torch.Tensor | None:
@@ -50,8 +58,10 @@ def _read_one(stdout, w: int, h: int) -> torch.Tensor | None:
 class _ClipWindow:
     """Forward reader for one hold. At most `cap` uint8 frames stay in `_frames`."""
 
-    def __init__(self, source: ClipSource, clip_in: float, w: int, h: int, count: int):
+    def __init__(self, source: ClipSource, clip_in: float, w: int, h: int, count: int,
+                 crop: tuple | None = None):
         self._source = weakref.ref(source)
+        self._crop = crop
         self._clip_in = float(clip_in)
         self._w = int(w)
         self._h = int(h)
@@ -105,7 +115,9 @@ class _ClipWindow:
         source = self._source()
         if source is None:
             raise RuntimeError("clip source is gone")
-        return source._spawn(self._clip_in, self._w, self._h, self._count)
+        if self._crop is None:
+            return source._spawn(self._clip_in, self._w, self._h, self._count)
+        return source._spawn(self._clip_in, self._w, self._h, self._count, self._crop)
 
     def _open(self) -> None:
         self._close_proc(check=False)
@@ -216,8 +228,8 @@ class ClipSource:
             raise ValueError(f"clip window is empty (nframes={nframes}, hold={hold})")
         return count
 
-    def _key(self, clip_in: float, w: int, h: int, count: int) -> tuple:
-        return window_key(clip_in, w, h, count)
+    def _key(self, clip_in: float, w: int, h: int, count: int, crop: tuple | None = None) -> tuple:
+        return window_key(clip_in, w, h, count, crop)
 
     def keep_windows(self, keys) -> None:
         """Close readers whose window this segment will not read."""
@@ -227,11 +239,11 @@ class ClipSource:
         self._bound_live(None)
 
     def frames(self, clip_in: float, w: int, h: int, nframes: int | None = None, *,
-               hold: float | None = None) -> tuple[torch.Tensor, ...]:
+               hold: float | None = None, crop: tuple | None = None) -> tuple[torch.Tensor, ...]:
         """uint8 CPU tensors (3, H, W) for the hold. The caller owns the tuple."""
         count = self._count(nframes, hold)
-        key = self._key(clip_in, w, h, count)
-        window = self._window(key, float(clip_in), int(w), int(h), count)
+        key = self._key(clip_in, w, h, count, crop)
+        window = self._window(key, float(clip_in), int(w), int(h), count, crop)
         out: list[torch.Tensor] = []
         for i in range(count):
             self._cache.move_to_end(key)
@@ -245,12 +257,14 @@ class ClipSource:
         self._trim()
         return tuple(out)
 
-    def _window(self, key: tuple, clip_in: float, w: int, h: int, count: int) -> _ClipWindow:
+    def _window(self, key: tuple, clip_in: float, w: int, h: int, count: int,
+                crop: tuple | None = None) -> _ClipWindow:
         hit = self._cache.get(key)
         if isinstance(hit, _ClipWindow):
             self._cache.move_to_end(key)
             return hit
-        window = _ClipWindow(self, clip_in, w, h, count)
+        self._cap = min(self._cap, max(_MIN_CAP, _CACHE_BYTES // (w * h * 3)))
+        window = _ClipWindow(self, clip_in, w, h, count, crop)
         self._cache[key] = window
         self._cache.move_to_end(key)
         self._trim()
@@ -295,9 +309,13 @@ class ClipSource:
                 continue
             break
 
-    def _spawn(self, clip_in: float, w: int, h: int, nframes: int):
+    def _spawn(self, clip_in: float, w: int, h: int, nframes: int, crop: tuple | None = None):
         fps = int(self.fps) if self.fps == int(self.fps) else self.fps
-        vf = f"fps={fps},scale={w}:{h}:force_original_aspect_ratio=increase,crop={w}:{h}"
+        if crop is None:
+            vf = f"fps={fps},scale={w}:{h}:force_original_aspect_ratio=increase,crop={w}:{h}"
+        else:
+            x0, y0, x1, y1 = (int(c) for c in crop)
+            vf = f"fps={fps},crop={x1 - x0}:{y1 - y0}:{x0}:{y0},scale={w}:{h}"
         cmd = [FFMPEG, "-v", "error", "-ss", f"{clip_in:.6f}", "-i", str(self.path),
                "-an", "-vf", vf, "-frames:v", str(nframes),
                "-f", "rawvideo", "-pix_fmt", "rgb24", "pipe:1"]
@@ -313,13 +331,20 @@ class ClipSource:
         return proc, err, thread
 
     def frame(self, t: float, shot_start: float, clip_in: float, w: int, h: int,
-              nframes: int | None = None, *, hold: float | None = None, device="cpu") -> torch.Tensor:
-        """`floor(t − shot_start)` clamped to the hold, float on `device`."""
-        count = self._count(nframes, hold)
-        key = self._key(clip_in, w, h, count)
-        i = math.floor(t - shot_start)
-        i = max(0, min(i, count - 1))
-        window = self._window(key, float(clip_in), int(w), int(h), count)
+              nframes: int | None = None, *, hold: float | None = None, device="cpu",
+              crop: tuple | None = None, src: tuple[int, ...] | None = None) -> torch.Tensor:
+        """`floor(t − shot_start)` clamped to the hold, float on `device`.
+
+        With `src`, that shot frame is looked up in it and the result is a source frame index.
+        """
+        if src is not None:
+            count = max(src) + 1
+            i = src[max(0, min(math.floor(t - shot_start), len(src) - 1))]
+        else:
+            count = self._count(nframes, hold)
+            i = max(0, min(math.floor(t - shot_start), count - 1))
+        key = self._key(clip_in, w, h, count, crop)
+        window = self._window(key, float(clip_in), int(w), int(h), count, crop)
         self._cache.move_to_end(key)
         tensor = window.at(i)
         self._cache.move_to_end(key)

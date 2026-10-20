@@ -299,6 +299,20 @@ def _track_at(keys: list, t: float) -> float:
 
 
 def _shot_with_frame_keys(sh: Shot, i: int, parsed: dict[str, int]) -> Shot:
+    """Camera, speed and freeze times become whole frames, so the renderer and the hash see frames."""
+    if sh.clip is not None:
+        update: dict = {}
+        if sh.camera is not None:
+            update["camera"] = [
+                key.model_copy(update={"t": parsed[f"shots[{i}].camera[{k}].t"]}) for k, key in enumerate(sh.camera)
+            ]
+        if isinstance(sh.speed, list):
+            update["speed"] = [
+                key.model_copy(update={"t": parsed[f"shots[{i}].speed[{k}].t"]}) for k, key in enumerate(sh.speed)
+            ]
+        if sh.freeze is not None:
+            update["freeze"] = parsed[f"shots[{i}].freeze"]
+        return sh.model_copy(update=update) if update else sh
     if sh.wall is None:
         return sh
     pos = [
