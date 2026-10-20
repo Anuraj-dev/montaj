@@ -9,21 +9,37 @@ from pathlib import Path
 from typing import Annotated
 
 import yaml
-from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, ValidationError, WrapSerializer
+from pydantic import (
+    BaseModel,
+    BeforeValidator,
+    ConfigDict,
+    Discriminator,
+    Field,
+    Tag,
+    ValidationError,
+    WrapSerializer,
+    model_validator,
+)
 
 EASE = ("linear", "smooth", "cubic", "outc", "inc", "expo", "ramp", "sine")
 EASE_HINT = "use linear, smooth, cubic, outc, inc, expo, ramp or sine"
-# These run across the first `dur` frames of the incoming shot, like a fade. `whip` is centred on the cut.
-AFTER_CUT = ("fade", "swirl", "glitch", "zoom", "dip", "push")
-TRANS_TYPES = ("cut", "fade", "swirl", "whip", "glitch", "zoom", "dip", "push")
+TRANS_TYPES = ("cut", "fade", "swirl", "whip", "glitch", "zoom", "dip", "push", "wall-pullback", "burn-white")
+# These occupy [start, start+dur) of the incoming shot. Whip is centred on the cut.
+INCOMING_TRANS = ("fade", "swirl", "glitch", "zoom", "dip", "push", "wall-pullback", "burn-white")
+TRANS_HINT = "use cut, fade, swirl, whip, glitch, zoom, dip, push, wall-pullback or burn-white"
 TRANS_STRENGTH_MAX = 4.0
-LOOK_NAMES = ("warm-film", "golden-film")
+# Starting magnification of a wall pull-back. Materialised onto the shot so the hash sees it.
+WALL_PULLBACK_ZOOM = 3.2
+LOOK_NAMES = ("warm-film", "golden-film", "clean", "cool-tech")
 INTRO_TYPES = ("white-lift",)
 OUTRO_TYPES = ("glow", "fade")
 TEXT_STYLES = ("serif", "script", "caps", "deva")
 TEXT_BY = ("word", "char")
 TEXT_REVEAL = ("rise", "pop")
 TEXT_COLORS = ("cream", "gold", "ink")
+BACKDROP_TYPES = ("gradient", "solid")
+BACKDROP_PLACES = ("bottom", "top", "band")
+BACKDROP_STRENGTH = 0.8
 _DUR = re.compile(r"^([+-]?(?:\d+(?:\.\d*)?|\.\d+))([fbs])$")
 _BARE = re.compile(r"^[+-]?(?:\d+(?:\.\d*)?|\.\d+)$")
 _WH = re.compile(r"^(\d+)x(\d+)$")
@@ -107,12 +123,30 @@ class IntroOutro(Frozen):
     dur: DurationStr
 
 
+class LutLook(Frozen):
+    lut: str
+    strength: RealNum = 1.0
+    vignette: RealNum = 0.0
+    grain: RealNum = 0.0
+
+
+def _look_kind(v: object) -> str:
+    """A name or a `{lut: …}` mapping. The tag keeps pydantic from reporting both branches."""
+    return "look_lut" if isinstance(v, (dict, LutLook)) else "look_name"
+
+
+Look = Annotated[
+    Annotated[str, Tag("look_name")] | Annotated[LutLook, Tag("look_lut")],
+    Discriminator(_look_kind),
+]
+
+
 class Video(Frozen):
     size: str
     fps: int
     bpm: float | None = None
     beat0: DurationStr | None = None
-    look: str
+    look: Look
     intro: IntroOutro | None = None
     outro: IntroOutro | None = None
     motion_blur: int = 1
@@ -125,9 +159,11 @@ class Transition(Frozen):
     center: tuple[float, float] | None = None
     axis: str = "x"
     blur: float = 0.0
-    strength: RealNum | None = None
-    seed: Annotated[int, Field(strict=True)] | None = None
-    color: str | None = None
+    # Absent stays out of model_dump so films without these keep their segment hash.
+    strength: RealNum | None = Field(default=None, exclude_if=lambda v: v is None)
+    seed: Annotated[int, Field(strict=True)] | None = Field(default=None, exclude_if=lambda v: v is None)
+    color: str | None = Field(default=None, exclude_if=lambda v: v is None)
+    zoom: RealNum | None = Field(default=None, exclude_if=lambda v: v is None)
 
 
 class WallPrint(Frozen):
@@ -238,12 +274,37 @@ class TextLine(Frozen):
     indent: float = 0.0
 
 
+class TextBackdrop(Frozen):
+    """Dark scrim behind a text block. The compositor paints it; no image asset."""
+
+    type: str = "gradient"
+    strength: RealNum = BACKDROP_STRENGTH
+    place: str = "band"
+
+
+def _coerce_backdrop(v: object) -> object:
+    """`true`, `gradient` and `solid` are the default scrim. A mapping sets the knobs."""
+    if v is None or isinstance(v, TextBackdrop):
+        return v
+    if v is True:
+        return {}
+    if isinstance(v, str):
+        return {"type": v}
+    if v is False:
+        raise ValueError("omit backdrop to turn it off")
+    return v
+
+
 class TextBlock(Frozen):
     from_: TimeExpr = Field(alias="from")
     to: TimeExpr
     fade_in: DurationStr | None = None
     fade_out: DurationStr | None = None
     blur: float = 10.0
+    # Absent stays out of model_dump so a film with no scrim keeps its segment hash.
+    backdrop: Annotated[TextBackdrop | None, BeforeValidator(_coerce_backdrop)] = Field(
+        default=None, exclude_if=lambda v: v is None
+    )
     lines: list[TextLine]
 
 
@@ -286,6 +347,41 @@ class Fx(Frozen):
     pos: tuple[float, float] | None = None
 
 
+class ExpectSpan(Frozen):
+    """One designed black or frozen window. Times are film-start expressions, so markers work."""
+
+    black: tuple[TimeExpr, TimeExpr] | None = None
+    frozen: tuple[TimeExpr, TimeExpr] | None = None
+    why: str | None = None
+
+    @model_validator(mode="after")
+    def _one_kind(self) -> ExpectSpan:
+        if self.black is None and self.frozen is None:
+            raise ValueError("need black or frozen")
+        if self.black is not None and self.frozen is not None:
+            raise ValueError("set black or frozen, not both")
+        if self.why is None:
+            return self
+        why = self.why.strip()
+        if not why or "\n" in self.why or "\r" in self.why:
+            raise ValueError("why must be one non-empty line")
+        if why != self.why:
+            return self.model_copy(update={"why": why})
+        return self
+
+
+class LoudnessTarget(Frozen):
+    """Override `check`'s integrated-loudness target. `tol` is LU around `i`."""
+
+    i: RealNum
+    tol: RealNum = 1.0
+
+
+class CheckSpec(Frozen):
+    expect: list[ExpectSpan] = Field(default_factory=list)
+    loudness: LoudnessTarget | None = None
+
+
 class Spec(Frozen):
     video: Video
     assets: str = "assets"
@@ -296,6 +392,7 @@ class Spec(Frozen):
     text: list[TextBlock] = Field(default_factory=list)
     subs: list[Sub] = Field(default_factory=list)
     tracks: Tracks | None = None
+    check: CheckSpec | None = None
 
 
 def _yaml_path(loc: tuple) -> str:
@@ -303,6 +400,8 @@ def _yaml_path(loc: tuple) -> str:
     for x in loc:
         if x == "in_":
             x = "in"
+        if x in ("look_name", "look_lut"):  # discriminator tags, not spec keys
+            continue
         if isinstance(x, int):
             if parts:
                 parts[-1] = f"{parts[-1]}[{x}]"
@@ -345,6 +444,10 @@ def _from_pydantic(exc: ValidationError) -> list[str]:
             hint = "use integer source-px"
         elif "not a boolean" in msg:
             hint = "use a number"
+        elif msg in ("need black or frozen", "set black or frozen, not both"):
+            hint = "use black: [0s, 2s] or frozen: [logo, logo+0.5s]"
+        elif msg == "why must be one non-empty line":
+            hint = "a short reason, one line"
         lines.append(_line(path, msg, hint))
     return lines
 
@@ -570,6 +673,11 @@ def _time_strings(spec: Spec) -> list[str]:
     if spec.tracks is not None:
         for keys in (spec.tracks.dust, spec.tracks.glow, spec.tracks.bars):
             out.extend(k.t for k in keys)
+    if spec.check is not None:
+        for item in spec.check.expect:
+            pair = item.black if item.black is not None else item.frozen
+            if pair:
+                out.extend(pair)
     return out
 
 
@@ -964,6 +1072,21 @@ def _check_color(path: str, color: str | None, errors: list[str]) -> None:
         errors.append(_line(path, f"unknown colour {color!r}", "use cream, gold, ink or #rrggbb"))
 
 
+def _check_backdrop(path: str, bd: TextBackdrop, errors: list[str]) -> None:
+    if bd.type not in BACKDROP_TYPES:
+        errors.append(_line(f"{path}.type", f"unknown {bd.type!r}", "use gradient or solid"))
+    if not math.isfinite(bd.strength) or bd.strength < 0 or bd.strength > 1:
+        errors.append(
+            _line(
+                f"{path}.strength",
+                f"must be from 0 to 1, got {_fmt_num(bd.strength)}",
+                "use a fraction",
+            )
+        )
+    if bd.place not in BACKDROP_PLACES:
+        errors.append(_line(f"{path}.place", f"unknown {bd.place!r}", "use bottom, top or band"))
+
+
 def _choices(names: tuple[str, ...]) -> str:
     return " or ".join(names)
 
@@ -972,9 +1095,34 @@ def _whole_number(v: float) -> bool:
     return isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v) and v == int(v)
 
 
-def _check_finish(spec: Spec, errors: list[str]) -> None:
-    if spec.video.look not in LOOK_NAMES:
-        errors.append(_line("video.look", f"unknown {spec.video.look!r}", f"use {_choices(LOOK_NAMES)}"))
+def _check_lut_look(look: LutLook, errors: list[str], spec_dir: Path | None) -> None:
+    from montaj.cube import load_cube
+
+    for name in ("strength", "vignette", "grain"):
+        v = getattr(look, name)
+        if not math.isfinite(v) or not 0.0 <= v <= 1.0:
+            errors.append(_line(f"video.look.{name}", f"must be 0..1, got {_fmt_num(v)}", "use a number from 0 to 1"))
+    if not look.lut.lower().endswith(".cube"):
+        errors.append(_line("video.look.lut", f"{look.lut!r} is not a .cube file", "use a path ending in .cube"))
+        return
+    if spec_dir is None:
+        return
+    path = spec_dir / look.lut
+    if not path.is_file():
+        errors.append(_line("video.look.lut", f"{look.lut!r} not found", "path relative to the spec file"))
+        return
+    try:
+        load_cube(path)
+    except (OSError, ValueError) as e:
+        errors.append(_line("video.look.lut", f"{look.lut!r}: {e}", "use a 3D .cube up to 65 points (or a 1D .cube)"))
+
+
+def _check_finish(spec: Spec, errors: list[str], spec_dir: Path | None = None) -> None:
+    look = spec.video.look
+    if isinstance(look, LutLook):
+        _check_lut_look(look, errors, spec_dir)
+    elif look not in LOOK_NAMES:
+        errors.append(_line("video.look", f"unknown {look!r}", f"use {', '.join(LOOK_NAMES)} or {{lut: file.cube}}"))
     intro = spec.video.intro
     if intro is not None and intro.type not in INTRO_TYPES:
         errors.append(
@@ -1201,9 +1349,22 @@ def validate_spec(
             continue
         if tr.type not in TRANS_TYPES:
             errors.append(
-                _line(f"shots[{i}].in.type", f"unknown {tr.type!r}", "use cut, fade, swirl, whip, glitch, zoom, dip or push")
+                _line(f"shots[{i}].in.type", f"unknown {tr.type!r}", TRANS_HINT)
             )
             continue
+        if tr.zoom is not None and tr.type != "wall-pullback":
+            errors.append(
+                _line(f"shots[{i}].in.zoom", "zoom is for wall-pullback", "remove zoom")
+            )
+        if tr.type == "wall-pullback" and tr.zoom is not None:
+            if not math.isfinite(tr.zoom) or tr.zoom <= 1:
+                errors.append(
+                    _line(
+                        f"shots[{i}].in.zoom",
+                        f"must be finite and > 1, got {_fmt_num(tr.zoom)}",
+                        "use a zoom above 1, for example 3.2",
+                    )
+                )
         if tr.type == "cut":
             continue
         if tr.type in ("whip", "push") and tr.axis not in ("x", "y"):
@@ -1222,7 +1383,7 @@ def validate_spec(
             errors.append(
                 _line(f"shots[{i}].in", "no previous shot to transition from", "remove in or use type: fade")
             )
-        if tr.type in AFTER_CUT:
+        if tr.type in INCOMING_TRANS:
             if h is not None and d > h:
                 errors.append(
                     _line(
@@ -1251,7 +1412,7 @@ def validate_spec(
                 )
 
     _reject_overlap_windows(spec, holds, parsed, errors)
-    _check_finish(spec, errors)
+    _check_finish(spec, errors, spec_dir)
 
     for i, fx in enumerate(spec.fx):
         kinds = [
@@ -1300,7 +1461,72 @@ def validate_spec(
 
     _validate_text(spec, markers, fps, bpm, times, errors, beat0=beat0)
     _validate_tracks(spec, markers, fps, bpm, times, errors, beat0=beat0)
+    _validate_check(spec, markers, fps, bpm, times, errors, beat0=beat0)
     return parsed, times, markers, bpm, beat0
+
+
+def _sec_label(frames: float, fps: int) -> str:
+    seconds = frames / float(fps) if fps > 0 else frames
+    text = f"{seconds:.4f}".rstrip("0").rstrip(".")
+    return f"{text}s"
+
+
+def _validate_check(
+    spec: Spec,
+    markers: dict[str, float],
+    fps: int,
+    bpm: float | None,
+    times: dict[str, float],
+    errors: list[str],
+    *,
+    beat0: float = 0.0,
+) -> None:
+    """Resolve `check.expect` spans and the optional loudness target.
+
+    A span that never shows up in the render is not an error here: `check` reports it
+    as INFO, so a stale annotation survives an edit instead of failing validate.
+    """
+    if spec.check is None:
+        return
+    loud = spec.check.loudness
+    if loud is not None:
+        if not math.isfinite(loud.i):
+            errors.append(
+                _line("check.loudness.i", f"must be finite, got {_fmt_num(loud.i)}", "use i: -14")
+            )
+        if not math.isfinite(loud.tol) or loud.tol < 0:
+            errors.append(
+                _line(
+                    "check.loudness.tol",
+                    f"must be >= 0, got {_fmt_num(loud.tol)}",
+                    "use tol: 1",
+                )
+            )
+    for i, item in enumerate(spec.check.expect):
+        kind = "black" if item.black is not None else "frozen"
+        pair = item.black if item.black is not None else item.frozen
+        if pair is None:
+            continue
+        ends: list[float | None] = []
+        for j, raw in enumerate(pair):
+            val = _parse_time(
+                raw, markers, fps, bpm, f"check.expect[{i}].{kind}[{j}]", errors, beat0=beat0
+            )
+            ends.append(val)
+        if ends[0] is None or ends[1] is None:
+            continue
+        start, end = ends[0], ends[1]
+        if end <= start:
+            errors.append(
+                _line(
+                    f"check.expect[{i}].{kind}",
+                    f"ends at or before the start ({_sec_label(start, fps)} to {_sec_label(end, fps)})",
+                    "end must be later than start",
+                )
+            )
+            continue
+        times[f"check.expect[{i}].start"] = start
+        times[f"check.expect[{i}].end"] = end
 
 
 def _validate_text(
@@ -1318,6 +1544,8 @@ def _validate_text(
             val = _parse_time(raw, markers, fps, bpm, f"text[{i}].{field}", errors, beat0=beat0)
             if val is not None:
                 times[f"text[{i}].{field}"] = val
+        if block.backdrop is not None:
+            _check_backdrop(f"text[{i}].backdrop", block.backdrop, errors)
         if not block.lines:
             errors.append(_line(f"text[{i}].lines", "need at least one line", "add a line"))
         for j, line in enumerate(block.lines):
@@ -1379,7 +1607,7 @@ def _validate_tracks(
 
 
 def _trans_window(kind: str, start: int, dur: int) -> tuple[float, float]:
-    if kind in AFTER_CUT:
+    if kind in INCOMING_TRANS:
         return float(start), float(start + dur)
     half = dur / 2
     return float(start) - half, float(start) + half
@@ -1396,7 +1624,7 @@ def _reject_overlap_windows(
     wins: list[tuple[int, float, float]] = []
     for i, sh in enumerate(spec.shots):
         tr = sh.in_
-        if tr is None or tr.type not in (*AFTER_CUT, "whip"):
+        if tr is None or tr.type not in (*INCOMING_TRANS, "whip"):
             continue
         d = parsed.get(f"shots[{i}].in.dur")
         st = starts[i]

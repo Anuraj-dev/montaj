@@ -136,7 +136,7 @@ def test_window_starts_at_cut_and_carries_params(tmp_path, inline, kind):
     if kind == "glitch":
         assert (sc.strength, sc.seed) == (1.5, 3)
     if kind == "dip":
-        assert sc.color == "#ffffff"
+        assert sc.dip_color == "#ffffff"
     if kind == "push":
         assert sc.axis == "y"
 
@@ -247,3 +247,4 @@ def test_cuda_matches_cpu(cv, ab, name):
     want = _call(name, cv, a, b, 0.5)
     got = _call(name, gcv, a.cuda(), b.cuda(), 0.5).cpu()
     assert (got - want).abs().max() < 2 / 255
+

@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 import math
+from dataclasses import dataclass
 
+import numpy as np
 import torch
 import torch.nn.functional as F
 
@@ -17,7 +19,16 @@ LOOKS = {"warm-film": {
     "col": [1.0, 0.55, 0.25],
     "intro_bloom": 0.9, "intro_lift": 0.35, "intro_lift_frac": 0.8,
     "outro_bloom": 0.55, "outro_rim": 0.10, "outro_ramp": 45.0,
-}, "golden-film": {"kind": "golden-film"}}
+}, "golden-film": {"kind": "golden-film"},
+    # Graded looks: no amber leaks, no intro bloom, no glow outro. They keep flashes and the fade.
+    # lift/gain are a scalar or a per-channel [r, g, b].
+    "clean": {"kind": "graded", "sharpen": 0.15, "scurve": 0.0, "lift": 0.0, "gain": 1.0, "vignette": 0.08},
+    "cool-tech": {
+        "kind": "graded", "sharpen": 0.2, "scurve": 0.1, "vignette": 0.12,
+        "lift": [0.0, 0.010, 0.014], "gain": [0.97, 1.0, 1.03],
+    },
+}
+GRADED_DEFAULTS = {"sharpen": 0.0, "scurve": 0.0, "lift": 0.0, "gain": 1.0, "vignette": 0.0, "grain": 0.0, "strength": 1.0}
 
 
 def _odd(x: float) -> int:
@@ -82,6 +93,72 @@ def _warm(cv, img, f: float, look: dict, flashes: list, leaks: list, intro, outr
     return img.clamp(0, 1)
 
 
+@dataclass(frozen=True)
+class LutTexture:
+    """A parsed `.cube` on the render device. 3D: (1,3,N,N,N) [b][g][r]. 1D: (N,3)."""
+
+    dims: int
+    tex: torch.Tensor
+    dmin: torch.Tensor  # (3,1,1)
+    dmax: torch.Tensor
+
+
+def lut_texture(cube, device) -> LutTexture:
+    t = torch.from_numpy(np.ascontiguousarray(cube.table)).to(device)
+    if cube.dims == 3:
+        t = t.permute(3, 0, 1, 2)[None].contiguous()
+    lo = torch.tensor(cube.dmin, device=device, dtype=torch.float32)[:, None, None]
+    hi = torch.tensor(cube.dmax, device=device, dtype=torch.float32)[:, None, None]
+    return LutTexture(cube.dims, t, lo, hi)
+
+
+def apply_lut(img: torch.Tensor, lut: LutTexture) -> torch.Tensor:
+    """(3,H,W) in 0..1 -> graded, trilinear for 3D and linear per channel for 1D. Not clamped."""
+    x = ((img - lut.dmin) / (lut.dmax - lut.dmin)).clamp(0, 1)
+    if lut.dims == 3:
+        grid = (x.permute(1, 2, 0) * 2 - 1)[None, None]  # x,y,z = r,g,b
+        out = F.grid_sample(lut.tex, grid, mode="bilinear", padding_mode="border", align_corners=True)
+        return out[0, :, 0]
+    n = lut.tex.shape[0]
+    pos = x * (n - 1)
+    i0 = pos.floor().clamp(0, n - 2)
+    w = pos - i0
+    i0 = i0.long()
+    chans = [lut.tex[:, c][i0[c]] * (1 - w[c]) + lut.tex[:, c][i0[c] + 1] * w[c] for c in range(3)]
+    return torch.stack(chans)
+
+
+def _channels(v, device) -> torch.Tensor:
+    return torch.as_tensor(v, device=device, dtype=torch.float32).reshape(-1, 1, 1)
+
+
+def _graded(cv, img, f: float, look: dict, flashes: list):
+    """clean, cool-tech and `look: {lut: ...}`: sharpen, curve, lift/gain, LUT, vignette, grain, flashes.
+
+    `look["lut"]` is a LutTexture or None; `strength` lerps ungraded -> LUT output.
+    """
+    L = {**GRADED_DEFAULTS, **look}
+    if L["sharpen"]:
+        n = max(3, _odd(5 * cv.k))
+        bl = F.conv2d(img[:, None], _binomial(n, cv.device)[None, None], padding=n // 2)[:, 0]
+        img = (img + L["sharpen"] * (img - bl)).clamp(0, 1)
+    if L["scurve"]:
+        img = img * img * (3 - 2 * img) * L["scurve"] + img * (1 - L["scurve"])
+    img = _channels(L["lift"], cv.device) + img * _channels(L["gain"], cv.device)
+    if L.get("lut") is not None:
+        graded = apply_lut(img.clamp(0, 1), L["lut"])
+        img = img + (graded - img) * L["strength"]
+    if L["vignette"]:
+        img = img * (1 - L["vignette"] * ((((cv.XX - cv.W / 2) / (cv.W * 0.62)) ** 2
+                     + ((cv.YY - cv.H / 2) / (cv.H * 0.62)) ** 2).clamp(0, 1.3)))[None]
+    if L["grain"]:
+        img = img + (grain(cv, img.clamp(0, 1), f) - img) * L["grain"]
+    for c, k in flashes:
+        if 0 <= f - c < 6:
+            img = img + (1 - img) * k * (1 - (f - c) / 6) ** 2
+    return img.clamp(0, 1)
+
+
 def _is_plan(obj) -> bool:
     return hasattr(obj, "flashes") and hasattr(obj, "dust") and hasattr(obj, "fade_out")
 
@@ -122,7 +199,10 @@ def finish(cv, img, f, look, plan=None, overlay=None, intro=None, outro=None):
         img = rgb_split(cv, img, amount, (f - at) / dur)
     if isinstance(look, dict) and look.get("kind") == "golden-film":
         return _golden(cv, img, f, look, plan, overlay)
-    out = _warm(cv, img, f, look, plan.flashes, plan.leaks, plan.intro, plan.outro)
+    if isinstance(look, dict) and look.get("kind") == "graded":
+        out = _graded(cv, img, f, look, plan.flashes)
+    else:
+        out = _warm(cv, img, f, look, plan.flashes, plan.leaks, plan.intro, plan.outro)
     if callable(overlay):
         out = overlay(out)
     # Fade after the grade and the overlay, so text and the warm look go to black too.

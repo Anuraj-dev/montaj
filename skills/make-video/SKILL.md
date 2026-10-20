@@ -54,8 +54,9 @@ check and review round after that is a `montaj` command that costs no tokens. Ru
    - Order shots as an arc: calm open, build, peak, quiet end.
    - Text is short and centred; one idea per card. Width budget on a 1080-wide frame: about 24 characters of
      `script` at `size: 100`; scale `size` down in proportion for longer lines.
-   - Text reads best on a calm backdrop: a dark or plain moment, a dimmed photo or its own card, not a face. A
-     closing title usually holds to the last frame.
+   - Text reads best on a calm backdrop: a dark or plain moment, a dimmed photo or its own card, not a face. On a
+     bright frame, `backdrop: true` on the text block paints a dark gradient behind the lines (`place`: `band`,
+     `bottom` or `top`). A closing title usually holds to the last frame.
    - Subtitles follow the song: start them at the first sung word in `markers.json`; an instrumental intro
      can carry a title or no text. `subs[].size` / `color` lift them off a busy backdrop.
    - Framing: `focus: [x, y]` (source px) puts a face at the screen centre; `crop` trims.
