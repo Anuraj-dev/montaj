@@ -6,7 +6,7 @@ import json
 import math
 import re
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Literal
 
 import yaml
 from pydantic import (
@@ -15,6 +15,7 @@ from pydantic import (
     ConfigDict,
     Discriminator,
     Field,
+    StrictInt,
     Tag,
     ValidationError,
     WrapSerializer,
@@ -418,6 +419,9 @@ class LoudnessTarget(Frozen):
 class CheckSpec(Frozen):
     expect: list[ExpectSpan] = Field(default_factory=list)
     loudness: LoudnessTarget | None = None
+    digits: Literal["none", "spec"] | None = None
+    faces: Literal["none"] | None = None
+    sample: StrictInt = 3  # strict: YAML `true` must not coerce to 1
 
 
 class Spec(Frozen):
@@ -1685,6 +1689,8 @@ def validate_spec(
 
     _reject_overlap_windows(spec, holds, parsed, errors)
     _check_finish(spec, errors, spec_dir)
+    if spec.check is not None and not 1 <= spec.check.sample <= 30:
+        errors.append(_line("check.sample", f"must be 1 to 30, got {spec.check.sample}", "use sample: 3"))
 
     for i, fx in enumerate(spec.fx):
         kinds = [fx.leak is not None, fx.flash is not None, fx.hit is not None, fx.burst is not None]
