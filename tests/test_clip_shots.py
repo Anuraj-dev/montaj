@@ -324,3 +324,65 @@ def test_gpu_clip_shot_renders_a_finished_frame(tmp_path: Path) -> None:
     for f in (0, 10, 29, 30, 40):
         frame = rend.frame(f)
         assert frame.shape == (3, 640, 360) and bool(torch.isfinite(frame).all())
+
+
+# ---------------------------------------------------------------- review regressions
+
+
+def _subsampled_clip(path: Path) -> None:
+    """200x100 yuv420p, neutral chroma, luma a position-dependent pattern (no wrap-free neighbours)."""
+    _ffmpeg(
+        "-f", "lavfi", "-i", "color=size=200x100:rate=30:duration=1,format=yuv420p,"
+        "geq=lum='mod(X*5+Y*3,256)':cb=128:cr=128",
+        "-c:v", "ffv1", "-pix_fmt", "yuv420p", str(path),
+    )
+
+
+@pytest.mark.parametrize("box", [(21, 11, 140, 90), (21, 11, 22, 12), (3, 5, 4, 100)])
+def test_crop_is_exact_on_chroma_subsampled_video(tmp_path: Path, box: tuple[int, int, int, int]) -> None:
+    """Odd offsets and sizes must not be rounded to the 2x2 chroma grid."""
+    _subsampled_clip(tmp_path / "sub.mkv")
+    clip = ClipSource(tmp_path / "sub.mkv", 30)
+    x0, y0, x1, y1 = box
+    full = clip.frames(0.0, 200, 100, nframes=1)[0]
+    boxed = clip.frames(0.0, x1 - x0, y1 - y0, nframes=1, crop=box)[0]
+    assert boxed.shape == (3, y1 - y0, x1 - x0)
+    assert torch.allclose(boxed.float(), full[:, y0:y1, x0:x1].float(), atol=1.0)
+
+
+def test_zero_fps_is_an_error_not_a_crash(tmp_path: Path) -> None:
+    assets = tmp_path / "assets"
+    assets.mkdir()
+    _numbered_clip(assets / "rec.mkv")
+    path = tmp_path / "montaj.yaml"
+    path.write_text(
+        "video:\n  size: 108x192\n  fps: 0\n  look: warm-film\nassets: assets\n"
+        "shots:\n  - {clip: rec, hold: 30f, speed: 1}\n"
+    )
+    with pytest.raises(SpecError) as ei:
+        load_spec(path)
+    assert any("fps" in e for e in ei.value.errors)
+
+
+def test_unused_clip_fields_keep_legacy_segment_hashes(tmp_path: Path) -> None:
+    """Pinned from the pre-clip-fields release: camera/speed/freeze must not enter an old film's hash."""
+    from PIL import Image
+
+    assets = tmp_path / "assets"
+    assets.mkdir()
+    for stem in "ab":
+        Image.new("RGB", (8, 8), (20, 40, 60)).save(assets / f"{stem}.jpg")
+    path = tmp_path / "montaj.yaml"
+    path.write_text(
+        "video:\n  size: 1080x1920\n  fps: 30\n  look: warm-film\nassets: assets\nshots:\n"
+        "  - {photo: a, hold: 10f, zoom: 1.2, focus: [4, 4]}\n"
+        "  - {photo: b, hold: 12f, crop: [1, 1, 5, 5]}\n"
+        "  - {blank: true, hold: 8f}\n"
+    )
+    tl = resolve(load_spec(path), tmp_path)
+    got = [segment_hash(tl, s, {"a": "x", "b": "y"}, "e1") for s in tl.segments]
+    assert got == [
+        "ca1fb13b58722cdcfa8a76f7c60b77959bd77ae8d0a5d5cfead00d4e6ae95ec9",
+        "db968c8a68cc62e55dc111961096a139e4844847fdea7ff453372b1b41fa4ba1",
+        "5cb54da7acd1c9af1f192dfc2a83a8902fec03924d962cf464b6a43f3e76e99f",
+    ]

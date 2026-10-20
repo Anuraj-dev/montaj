@@ -251,9 +251,10 @@ class Shot(Frozen):
     crop: CropBox | None = None
     focus: tuple[float, float] | None = None
     zoom: float | None = None
-    camera: list[CameraKey] | None = None
-    speed: RealNum | list[SpeedKey] | None = None
-    freeze: DurationStr | int | None = None
+    # Absent stays out of model_dump so films that never use these keep their segment hash.
+    camera: list[CameraKey] | None = Field(default=None, exclude_if=lambda v: v is None)
+    speed: RealNum | list[SpeedKey] | None = Field(default=None, exclude_if=lambda v: v is None)
+    freeze: DurationStr | int | None = Field(default=None, exclude_if=lambda v: v is None)
     drift: Drift | None = None
     tone: Tone | None = None
     frame: FrameCard | None = None
@@ -1249,9 +1250,9 @@ def _check_clip_shot(
     for path, (px, py) in points:
         if not (box[0] <= px <= box[2] and box[1] <= py <= box[3]):
             errors.append(_line(path, f"[{_fmt_num(px)}, {_fmt_num(py)}] is outside the crop {list(box)}", "focus is in source px"))
-    if sh.speed is None or hold is None or hold <= 0:
-        return
     fps = spec.video.fps
+    if sh.speed is None or hold is None or hold <= 0 or fps <= 0:
+        return
     if isinstance(sh.speed, list):
         speed = [(parsed.get(f"{at}.speed[{k}].t", 0), sk.v, sk.ease) for k, sk in enumerate(sh.speed)]
     else:

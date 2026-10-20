@@ -315,7 +315,7 @@ class ClipSource:
             vf = f"fps={fps},scale={w}:{h}:force_original_aspect_ratio=increase,crop={w}:{h}"
         else:
             x0, y0, x1, y1 = (int(c) for c in crop)
-            vf = f"fps={fps},crop={x1 - x0}:{y1 - y0}:{x0}:{y0},scale={w}:{h}"
+            vf = f"fps={fps},crop={x1 - x0}:{y1 - y0}:{x0}:{y0}:exact=1,scale={w}:{h}"
         cmd = [FFMPEG, "-v", "error", "-ss", f"{clip_in:.6f}", "-i", str(self.path),
                "-an", "-vf", vf, "-frames:v", str(nframes),
                "-f", "rawvideo", "-pix_fmt", "rgb24", "pipe:1"]
