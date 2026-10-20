@@ -170,9 +170,15 @@ def segment_hash(
     text_ids: set[int] = set()
     sub_ids: set[int] = set()
     plans = []
+    overlay_ids: set[int] = set()
     for f in range(seg.start, seg.end):
         plan = tl.plan(f)
-        plans.append(_hash_form(asdict(plan)))
+        plan_d = asdict(plan)
+        # Films without overlays keep their old hashes: the empty field is not hashed.
+        if not plan_d["overlays"]:
+            del plan_d["overlays"]
+        plans.append(_hash_form(plan_d))
+        overlay_ids.update(plan.overlays)
         referenced |= _scene_shots(plan.scene)
         text_ids.update(plan.texts)
         sub_ids.update(plan.subs)
@@ -205,6 +211,10 @@ def segment_hash(
             str(i): tl.spec.subs[i].model_dump(mode="json", by_alias=True)
             for i in sorted(sub_ids)
         }
+    if overlay_ids:
+        # Resolved values (frames, defaults), not the spec text: a marker edit that moves
+        # the window, or a default changing, must reach the hash.
+        payload["overlays"] = {str(i): asdict(tl.overlays[i]) for i in sorted(overlay_ids)}
     captions = any(
         tl.shots[i].spec.frame is not None and tl.shots[i].spec.frame.caption
         for i in referenced

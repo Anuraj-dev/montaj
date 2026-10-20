@@ -151,6 +151,23 @@ Photo fields (`crop`, `focus`, swirl `center`, wall `at`) are source-image pixel
 - `tracks.*[].t` — time expression, required — when this key is reached.
 - `tracks.*[].v` — number, required — value at this key.
 - `tracks.*[].ease` — easing name, default `linear` for dust and glow, `sine` for bars — the curve into this key.
+- `overlays` — list, default none — vector HUD shapes drawn over the picture, anti-aliased on the GPU. Graded with the picture, under text. Screen values are design px. A shape is drawn on frames `from` ≤ f < `to`.
+- `overlays[].shape` — `ring`, `brackets` or `line`, required. (`waveform` is rejected for now.)
+- `overlays[].from` — time expression, required — first frame the shape shows.
+- `overlays[].to` — time expression, required — end of the window; must be after `from`.
+- `overlays[].center` — `[x, y]`, required with ring — ring centre.
+- `overlays[].radius` — number or `[from, to]`, required with ring — ring radius; a pair animates over the window with `ease`.
+- `overlays[].sweep` — number or `[from, to]` degrees, 0–360, default `360` — arc extent, clockwise from 12 o'clock; a pair draws the arc on over the window. Ring only.
+- `overlays[].box` — `[x0, y0, x1, y1]`, required with brackets — the framed region; four corner marks, no edges between them.
+- `overlays[].arm` — number, default `28` — bracket arm length. Brackets only; capped at half the box side.
+- `overlays[].points` — list of `[x, y]`, at least 2, required with line — a polyline.
+- `overlays[].draw` — duration, default none — brackets grow / the line draws on from its first point over this long from `from`, eased with `ease`. Omit it to show the shape fully the whole window. Brackets and line only.
+- `overlays[].width` — number, default `3` — stroke width.
+- `overlays[].color` — `#rrggbb`, default `#ffffff`.
+- `overlays[].opacity` — number 0–1, default `1`.
+- `overlays[].glow` — number ≥ 0, default `0` — soft halo around the stroke, screened under it. About `0.6` is a gentle neon.
+- `overlays[].ease` — easing name, default `smooth` — curve for radius, sweep and draw.
+- `overlays[].above_finish` — boolean, default false — skip the look, so the shape stays crisp and ungraded; still under text, and fades with the picture.
 - `check` — mapping, default none — designed QA exceptions. The renderer does not read this, so it does not change the segment hash.
 - `check.expect` — list, default none — black or frozen spans `check` treats as designed. A span that matches no detected span prints `INFO expect <kind> <start>–<end>s not found`.
 - `check.expect[].black` — `[start, end]` time expressions, black or frozen — a designed black window. Set this or `frozen`, not both. `end` must be later than `start`.

@@ -48,6 +48,7 @@ TEXT_STYLES = ("serif", "script", "caps", "deva")
 TEXT_BY = ("word", "char")
 TEXT_REVEAL = ("rise", "pop")
 TEXT_COLORS = ("cream", "gold", "ink")
+OVERLAY_SHAPES = ("ring", "brackets", "line")
 BACKDROP_TYPES = ("gradient", "solid")
 BACKDROP_PLACES = ("bottom", "top", "band")
 BACKDROP_STRENGTH = 0.8
@@ -418,6 +419,27 @@ class Fx(Frozen):
     pos: tuple[float, float] | None = None
 
 
+class Overlay(Frozen):
+    """Vector HUD shape drawn over the picture. Which fields apply depends on `shape`."""
+
+    shape: str
+    from_: TimeExpr = Field(alias="from")
+    to: TimeExpr
+    center: tuple[RealNum, RealNum] | None = None
+    radius: RealNum | tuple[RealNum, RealNum] | None = None
+    sweep: RealNum | tuple[RealNum, RealNum] | None = None
+    box: tuple[RealNum, RealNum, RealNum, RealNum] | None = None
+    arm: RealNum | None = None
+    points: list[tuple[RealNum, RealNum]] | None = None
+    draw: DurationStr | None = None
+    width: RealNum = 3.0
+    color: str = "#ffffff"
+    opacity: RealNum = 1.0
+    glow: RealNum = 0.0
+    ease: str = "smooth"
+    above_finish: bool = False
+
+
 class ExpectSpan(Frozen):
     """One designed black or frozen window. Times are film-start expressions, so markers work."""
 
@@ -466,6 +488,7 @@ class Spec(Frozen):
     text: list[TextBlock] = Field(default_factory=list)
     subs: list[Sub] = Field(default_factory=list)
     tracks: Tracks | None = None
+    overlays: list[Overlay] = Field(default_factory=list)
     check: CheckSpec | None = None
 
 
@@ -768,6 +791,10 @@ def _time_strings(spec: Spec) -> list[str]:
                 out.extend(line.sweep)
     for sub in spec.subs:
         out.extend([sub.from_, sub.to])
+    for ov in spec.overlays:
+        out.extend([ov.from_, ov.to])
+        if ov.draw:
+            out.append(ov.draw)
     if spec.tracks is not None:
         for keys in (spec.tracks.dust, spec.tracks.glow, spec.tracks.bars):
             out.extend(k.t for k in keys)
@@ -2014,6 +2041,7 @@ def validate_spec(
 
     _validate_text(spec, markers, fps, bpm, times, errors, beat0=beat0)
     _validate_tracks(spec, markers, fps, bpm, times, errors, beat0=beat0)
+    _validate_overlays(spec, markers, fps, bpm, times, errors, beat0=beat0)
     _validate_check(spec, markers, fps, bpm, times, errors, beat0=beat0)
     return parsed, times, markers, bpm, beat0, clip_ins
 
@@ -2186,6 +2214,90 @@ def _validate_text(
                 )
             )
         _check_color(f"subs[{i}].color", sub.color, errors)
+
+
+def _finite_all(vals) -> bool:
+    return all(isinstance(v, (int, float)) and math.isfinite(v) for v in vals)
+
+
+def _validate_overlays(
+    spec: Spec,
+    markers: dict[str, float],
+    fps: int,
+    bpm: float | None,
+    times: dict[str, float],
+    errors: list[str],
+    *,
+    beat0: float = 0.0,
+) -> None:
+    # Fields each shape reads; anything else set on it is a mistake worth naming.
+    uses = {
+        "ring": {"center", "radius", "sweep"},
+        "brackets": {"box", "arm", "draw"},
+        "line": {"points", "draw"},
+    }
+    needs = {"ring": ("center", "radius"), "brackets": ("box",), "line": ("points",)}
+    shape_fields = {"center", "radius", "sweep", "box", "arm", "points", "draw"}
+    for i, ov in enumerate(spec.overlays):
+        p = f"overlays[{i}]"
+        spans: dict[str, float] = {}
+        for field, raw in (("from", ov.from_), ("to", ov.to)):
+            val = _parse_time(raw, markers, fps, bpm, f"{p}.{field}", errors, beat0=beat0)
+            if val is not None:
+                times[f"{p}.{field}"] = val
+                spans[field] = val
+        if len(spans) == 2 and spans["to"] <= spans["from"]:
+            errors.append(_line(f"{p}.to", "must be after from", "lengthen the window"))
+        if ov.draw is not None:
+            d = _dur_frames(ov.draw, fps, bpm, f"{p}.draw", errors)
+            if d is not None:
+                if d <= 0:
+                    errors.append(_line(f"{p}.draw", "must be > 0", "use 0.3s, or omit draw"))
+                times[f"{p}.draw"] = d
+        if ov.shape == "waveform":
+            errors.append(
+                _line(f"{p}.shape", "waveform is not implemented yet", f"use {_choices(OVERLAY_SHAPES)}")
+            )
+            continue
+        if ov.shape not in OVERLAY_SHAPES:
+            errors.append(_line(f"{p}.shape", f"unknown {ov.shape!r}", f"use {_choices(OVERLAY_SHAPES)}"))
+        else:
+            for name in needs[ov.shape]:
+                if getattr(ov, name) is None:
+                    errors.append(_line(f"{p}.{name}", f"required for {ov.shape}", f"set {name}"))
+            for name in sorted(shape_fields - uses[ov.shape]):
+                if getattr(ov, name) is not None:
+                    errors.append(_line(f"{p}.{name}", f"not used by {ov.shape}", f"remove {name}"))
+        if ov.center is not None and not _finite_all(ov.center):
+            errors.append(_line(f"{p}.center", "must be finite", "use [x, y] in design px"))
+        if ov.radius is not None:
+            rs = ov.radius if isinstance(ov.radius, tuple) else (ov.radius,)
+            if not _finite_all(rs) or min(rs) < 0:
+                errors.append(_line(f"{p}.radius", "must be finite and >= 0", "use 220 or [40, 220]"))
+        if ov.sweep is not None:
+            ss = ov.sweep if isinstance(ov.sweep, tuple) else (ov.sweep,)
+            if not _finite_all(ss) or min(ss) < 0 or max(ss) > 360:
+                errors.append(_line(f"{p}.sweep", "degrees must be in 0..360", "use 90 or [0, 360]"))
+        if ov.box is not None:
+            x0, y0, x1, y1 = ov.box
+            if not _finite_all(ov.box) or x1 <= x0 or y1 <= y0:
+                errors.append(_line(f"{p}.box", "need [x0, y0, x1, y1] with x1 > x0 and y1 > y0", "design px"))
+        if ov.arm is not None and (not math.isfinite(ov.arm) or ov.arm <= 0):
+            errors.append(_line(f"{p}.arm", "must be finite and > 0", "use a design-px length such as 28"))
+        if ov.points is not None:
+            if len(ov.points) < 2:
+                errors.append(_line(f"{p}.points", "need at least 2 points", "use [[x, y], [x, y]]"))
+            elif not all(_finite_all(pt) for pt in ov.points):
+                errors.append(_line(f"{p}.points", "must be finite", "use design px"))
+        if not math.isfinite(ov.width) or ov.width <= 0:
+            errors.append(_line(f"{p}.width", f"must be finite and > 0, got {_fmt_num(ov.width)}", "use 3"))
+        if not math.isfinite(ov.opacity) or not 0.0 <= ov.opacity <= 1.0:
+            errors.append(_line(f"{p}.opacity", f"must be in 0..1, got {_fmt_num(ov.opacity)}", "use 0.8"))
+        if not math.isfinite(ov.glow) or ov.glow < 0:
+            errors.append(_line(f"{p}.glow", f"must be finite and >= 0, got {_fmt_num(ov.glow)}", "use 0.6"))
+        if not _HEX.match(ov.color):
+            errors.append(_line(f"{p}.color", f"unknown colour {ov.color!r}", "use #rrggbb"))
+        _check_ease(f"{p}.ease", ov.ease, errors)
 
 
 def _validate_tracks(

@@ -51,6 +51,7 @@ from montaj.render.text import (
     raster_lines,
     raster_subs,
 )
+from montaj.render.overlay import draw_overlays
 from montaj.render.transitions import burn_white, fade, swirl, wall_pullback, whip
 from montaj.render.wall import build_wall, wall_camera, wall_frame
 from montaj.spec import _dur_frames
@@ -736,11 +737,15 @@ class Renderer:
             self._sprite(caption)
         self._rasters_ready = True
 
-    def _overlay(self, f: int):
-        if self._rasters is None:
+    def _overlay(self, f: int, above: list):
+        """Hook run inside `finish`: `above_finish` shapes, then text, so text always sits on top."""
+        if self._rasters is None and not above:
             return None
 
         def overlay(img: torch.Tensor) -> torch.Tensor:
+            img = draw_overlays(self.cv, img, above, float(f))
+            if self._rasters is None:
+                return img
             return draw_text(
                 self.cv, img, self._blocks, self._subs, float(f), self._rasters, fps=float(self.tl.fps),
             )
@@ -821,4 +826,9 @@ class Renderer:
                     sample = self._eval(plan.scene, t)
                     acc = sample if acc is None else acc + sample
                 acc = acc / n
-            return finish(self.cv, acc, f, self._look(), plan, self._overlay(f))
+            # Plain overlays are graded with the picture. `above_finish` ones skip the look but
+            # still land under text and fade with the picture.
+            ovs = [self.tl.overlays[i] for i in plan.overlays]
+            acc = draw_overlays(self.cv, acc, [o for o in ovs if not o.above_finish], float(f))
+            above = [o for o in ovs if o.above_finish]
+            return finish(self.cv, acc, f, self._look(), plan, self._overlay(f, above))
