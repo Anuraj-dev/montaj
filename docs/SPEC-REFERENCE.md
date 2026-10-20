@@ -1,6 +1,6 @@
 # Spec reference
 
-Photo fields (`crop`, `focus`, swirl `center`, wall `at`) are source-image pixels. `zoom`, the wall grid and leak size are design pixels of a 1080-wide frame, so a half-size preview matches the final framing. Durations are `22f` (frames), `4b` (beats on the grid) or `1.5s`; a bare number is an error. The beat grid is `video.bpm` plus a phase `beat0` (see below). A plain beat time (`at: 8b`, `until: 16b`, a marker defined as `8b`) means `beat0 + 8` beats; durations (`hold`, `dur`, `stagger`, `in.dur`) and offsets (`ch1+2b`) are spans. A time expression is a duration from film start, or `<marker>[±duration]` (`ch1`, `ch1+2.4s`, `pre2-6f`). Marker names are `[a-z][a-z0-9_]*`. Marker values may be a duration, `word:<i>` (start of word `i` in `audio.markers`), or another marker plus an optional duration offset; cycles are an error.
+Photo fields (`crop`, `focus`, swirl `center`, wall `at`) are source-image pixels. `zoom`, the wall grid and leak size are design pixels of a 1080-wide frame, so a half-size preview matches the final framing. Durations are `22f` (frames), `4b` (beats on the grid) or `1.5s`; a bare number is an error. The beat grid is `video.bpm` plus a phase `beat0` (see below). A plain beat time (`at: 8b`, `until: 16b`, a marker defined as `8b`) means `beat0 + 8` beats; durations (`hold`, `dur`, `stagger`, `in.dur`) and offsets (`ch1+2b`) are spans. A time expression is a duration from film start, or `<marker>[±duration]` (`ch1`, `ch1+2.4s`, `pre2-6f`). Marker names are `[a-z][a-z0-9_]*`. Marker values may be a duration, `event:<clip>/<field>=<value>[,<field>~=<substring>][#n]` (time of that event in `assets/<clip>.events.json`, same contract as `at_event`), `word:<i>` (start of word `i` in `audio.markers`), or another marker plus an optional duration offset; cycles are an error.
 
 - `video.size` — string, required — output `WxH`, both numbers even. Preview halves each side, rounded down to even.
 - `video.fps` — integer, required — frames per second.
@@ -20,6 +20,8 @@ Photo fields (`crop`, `focus`, swirl `center`, wall `at`) are source-image pixel
 - `shots[].photo` — string, photo or wall or clip — stem of the still. An integer in the YAML is read as a string. Mutually exclusive with `wall` and `clip`.
 - `shots[].clip` — string, photo or wall or clip — stem of a video file in `assets/` (`mp4`, `mov`, `webm`, `mkv`). Mutually exclusive with `photo` and `wall`.
 - `shots[].clip_in` — duration, default `0s` — source offset into the clip.
+- `shots[].at_event` — mapping, default none — pick `clip_in` from `assets/<clip>.events.json`: `{kind, <field>: value, contains: {<field>: substring}, nth}`; `nth` is 1-based among matches. A miss is an error listing the values present. Needs `clip`; exclusive with `clip_in`. The resolved time is written into the shot, so changing `nth` re-renders only that shot.
+- `shots[].pre` — duration, default `0s` — start this long before the `at_event` time (clamped error if before the clip start). Needs `at_event`.
 - `shots[].hold` — duration, hold or until — how long this shot is on screen. Exactly one of `hold` or `until`. A whole-beat hold (`4b`) ends on a beat of the grid (moving forward if the shot started off-beat), and beat holds never drift from rounding.
 - `shots[].until` — time expression, hold or until — the shot ends at this time from film start. Must fall after the shot's start.
 - `shots[].drift` — mapping, default none — Ken Burns zoom/pan on a photo. Needs `photo`. Mutually exclusive with `zoom`.
@@ -149,3 +151,6 @@ Easing (the curve into a camera key):
 - `inc` — creeps, then arrives quickly.
 - `expo` — very slow, then very fast, then very slow.
 - `ramp` — slow, fast through the middle, then slow again.
+
+## Event logs (screen recordings)
+`montaj ingest-rec raw/take.mp4 --events raw/take.events.json` copies the recording to `assets/` and writes `assets/<stem>.events.json`. Input and output are a JSON list `[{"t": 3.42, "kind": "state", ...fields}]`; `t` is finite seconds. Input `t` is seconds from record start; ingest subtracts the file's first video PTS, so in `assets/` `t` is seconds from the first video frame, the same clock as `clip_in`. Rows stay in log order. Field values are exact-matched (numbers numerically); `contains:` / `~=` match substrings of string fields.

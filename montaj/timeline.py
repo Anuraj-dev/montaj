@@ -313,6 +313,13 @@ def _shot_with_frame_keys(sh: Shot, i: int, parsed: dict[str, int]) -> Shot:
     return sh.model_copy(update={"wall": sh.wall.model_copy(update={"camera": cam})})
 
 
+def _with_picked_clip_in(sh: Shot, clip_in: str | None) -> Shot:
+    """Materialise an `at_event` pick as `clip_in`, so the segment hash sees the resolved time."""
+    if sh.at_event is None:
+        return sh
+    return sh.model_copy(update={"clip_in": clip_in, "at_event": None, "pre": None})
+
+
 def _shot_kind(sh: Shot) -> str:
     if sh.blank:
         return "blank"
@@ -411,7 +418,7 @@ def _resolve_tracks(spec: Spec, times: dict[str, float]) -> dict[str, list]:
 
 def resolve(spec: Spec, spec_dir: Path) -> Timeline:
     errors: list[str] = []
-    parsed, times, markers, bpm, beat0 = validate_spec(spec, errors, spec_dir=spec_dir)
+    parsed, times, markers, bpm, beat0, clip_ins = validate_spec(spec, errors, spec_dir=spec_dir)
     size = parse_wh(spec.video.size, "video.size", errors, even=True)
     if errors:
         raise SpecError(errors)
@@ -434,7 +441,7 @@ def resolve(spec: Spec, spec_dir: Path) -> Timeline:
                 start=start,
                 end=end,
                 kind=_shot_kind(sh),
-                spec=_shot_with_frame_keys(sh, i, parsed),
+                spec=_shot_with_frame_keys(_with_picked_clip_in(sh, clip_ins.get(i)), i, parsed),
             )
         )
     n_frames = resolved[-1].end if resolved else 0

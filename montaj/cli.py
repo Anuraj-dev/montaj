@@ -20,7 +20,7 @@ from montaj.audio import music as music_gen
 from montaj.audio.music import parse_duration
 from montaj.doctor import doctor
 from montaj.encode import export, probe
-from montaj.ingest import ingest
+from montaj.ingest import IngestError, ingest, ingest_rec
 from montaj import taste
 from montaj.qa import BLACK_PIX_TH, check
 from montaj.review.server import serve as serve_review
@@ -40,7 +40,7 @@ class _Usage(Exception):
 
 
 _COMMANDS = (
-    "doctor", "new", "ingest", "validate", "render", "sheet", "check", "export", "music",
+    "doctor", "new", "ingest", "ingest-rec", "validate", "render", "sheet", "check", "export", "music",
     "review", "watch", "taste",
 )
 
@@ -65,6 +65,10 @@ def _parser() -> argparse.ArgumentParser:
 
     ing = sub.add_parser("ingest")
     ing.add_argument("--photos", required=True)
+
+    rec = sub.add_parser("ingest-rec")
+    rec.add_argument("video")
+    rec.add_argument("--events", default=None)
 
     sub.add_parser("validate")
 
@@ -251,6 +255,18 @@ def _cmd_new(ns: argparse.Namespace, root: Path) -> list[str]:
     ingest(photos, assets, sheet_path=dest / "build" / "ingest-sheet.jpg")
     shown = dest.as_posix()
     return [f"OK {shown}/montaj.yaml sheet={shown}/build/ingest-sheet.jpg"]
+
+
+def _cmd_ingest_rec(ns: argparse.Namespace, root: Path) -> list[str]:
+    assets = _assets_dir(root, _assets_rel(root / "montaj.yaml"))
+    events = _at(root, ns.events) if ns.events else None
+    try:
+        rec = ingest_rec(_at(root, ns.video), assets, events=events, log=root / "build" / "ingest-rec.log")
+    except IngestError as exc:
+        return [f"ERR {exc}"]
+    n_ev = f" {rec.n_events} events" if rec.events_path else ""
+    audio = f" {rec.audio_streams} audio stream{'s' if rec.audio_streams != 1 else ''}"
+    return [f"OK {rec.stem} {rec.duration:.1f}s {rec.fps:g}fps{audio}{n_ev} -> {rec.path.name}"]
 
 
 def _cmd_ingest(ns: argparse.Namespace, root: Path) -> list[str]:
@@ -593,6 +609,8 @@ def _dispatch(ns: argparse.Namespace, root: Path) -> list[str]:
         return _cmd_new(ns, root)
     if ns.cmd == "ingest":
         return _cmd_ingest(ns, root)
+    if ns.cmd == "ingest-rec":
+        return _cmd_ingest_rec(ns, root)
     if ns.cmd == "validate":
         return _cmd_validate(root)
     if ns.cmd == "render":
