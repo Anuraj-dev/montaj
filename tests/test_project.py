@@ -168,3 +168,44 @@ def test_hash_frame_caption_includes_text_assets(tmp_path: Path, monkeypatch):
     h2 = segment_hash(tl2, tl2.segments[0], shas2, "e1")
     monkeypatch.setattr(project_mod, "_text_asset_shas", lambda: {"text.css": "b" * 64})
     assert segment_hash(tl2, tl2.segments[0], shas2, "e1") == h2
+
+
+# Hashes computed on the parent of the wall-pullback/burn-white change (engine "e1", fake shas).
+# New optional fields (shot model_dump and Trans asdict) must not move them.
+_PRE_ZOOM_HASHES = [
+    "735e33326e9f3c14d03b134b72986ce3f37734a7913b0e0ae72b7ba8d8326d61",
+    "5d83a867dc2f10b36c9315b4c3466ef688eacabf1d03884482952ff1e067baef",
+    "5b3c685770ab96711f0dbf2406eeb7c834b372b763a0bdb6f61dbb65bcbb385c",
+    "9c5263220a91f49479b8de3a61d07dc1b9bddc42befe35a0ac41b59dd99d7b33",
+    "dbb97a186433669ad550a0dd4ca55c283516bb264a187b144d12550e34ad254e",
+]
+_PRE_ZOOM_SHOTS = (
+    "  - {photo: a, hold: 20f}\n"
+    "  - {photo: b, hold: 20f, in: {type: fade, dur: 8f}}\n"
+    "  - {photo: c, hold: 20f, in: {type: swirl, dur: 8f}}\n"
+    "  - {photo: d, hold: 20f, in: {type: whip, dur: 8f}}\n"
+    "  - {photo: e, hold: 20f, in: {type: cut}}\n"
+)
+
+
+def test_existing_transitions_keep_pre_zoom_segment_hashes(tmp_path: Path):
+    stems = list("abcde")
+    tl, _ = _resolve(tmp_path, _PRE_ZOOM_SHOTS, stems)
+    shas = {s: f"sha-{s}" for s in stems}
+    assert [segment_hash(tl, seg, shas, "e1") for seg in tl.segments] == _PRE_ZOOM_HASHES
+
+
+def test_wall_pullback_zoom_reaches_the_hash(tmp_path: Path):
+    stems = ["a", "b"]
+    shas = {s: f"sha-{s}" for s in stems}
+
+    def hashes(zoom: str) -> list[str]:
+        shots = (
+            "  - {photo: a, hold: 20f}\n"
+            f"  - {{photo: b, hold: 20f, in: {{type: wall-pullback, dur: 8f{zoom}}}}}\n"
+        )
+        tl, _ = _resolve(tmp_path, shots, stems)
+        return [segment_hash(tl, seg, shas, "e1") for seg in tl.segments]
+
+    assert hashes("") == hashes(", zoom: 3.2")
+    assert hashes("") != hashes(", zoom: 2")

@@ -100,6 +100,19 @@ def _text_asset_shas() -> dict[str, str]:
     return out
 
 
+# Plan fields added after the first release. A None value is left out of the hash input so
+# films that never use the field keep their cached segments. Append here when adding one.
+_HASH_OMIT_NONE = ("zoom",)
+
+
+def _hash_form(v):
+    if isinstance(v, dict):
+        return {k: _hash_form(x) for k, x in v.items() if not (k in _HASH_OMIT_NONE and x is None)}
+    if isinstance(v, (list, tuple)):
+        return [_hash_form(x) for x in v]
+    return v
+
+
 def segment_hash(
     tl: Timeline,
     seg: Segment,
@@ -112,7 +125,7 @@ def segment_hash(
     plans = []
     for f in range(seg.start, seg.end):
         plan = tl.plan(f)
-        plans.append(asdict(plan))
+        plans.append(_hash_form(asdict(plan)))
         referenced |= _scene_shots(plan.scene)
         text_ids.update(plan.texts)
         sub_ids.update(plan.subs)
@@ -135,6 +148,9 @@ def segment_hash(
         "shots": shots,
         "photos": photos,
     }
+    look = tl.spec.video.look
+    if not isinstance(look, str):  # the .cube bytes, not just its path, decide the pixels
+        payload["lut"] = asset_sha[f"lut:{look.lut}"]
     if text_ids:
         payload["texts"] = {
             str(i): tl.spec.text[i].model_dump(mode="json", by_alias=True)

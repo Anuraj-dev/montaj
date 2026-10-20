@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import shutil
 import sys
 import time
@@ -19,14 +20,14 @@ from montaj.audio import compose as compose_audio
 from montaj.audio import music as music_gen
 from montaj.audio.music import parse_duration
 from montaj.doctor import doctor
-from montaj.encode import export, probe
+from montaj.encode import MediaInfo, export, probe
 from montaj.ingest import ingest
 from montaj import taste
-from montaj.qa import BLACK_PIX_TH, check
+from montaj.qa import BLACK_PIX_TH, Expect, check, clip_overruns, union
 from montaj.review.server import serve as serve_review
 from montaj.review.summary import summary as review_summary
-from montaj.sheet import MAX_TILES, pick_times, sheet
-from montaj.spec import SpecError, _dur_frames, load_spec
+from montaj.sheet import MAX_TILES, every_times, pick_times, sheet, sheets
+from montaj.spec import INCOMING_TRANS, SpecError, _dur_frames, load_spec
 from montaj.timeline import Blank, Still, Wall, resolve, wall_static_spans
 from montaj.watch import watch
 
@@ -74,7 +75,9 @@ def _parser() -> argparse.ArgumentParser:
     group.add_argument("--final", action="store_true")
 
     sh = sub.add_parser("sheet")
-    sh.add_argument("--at", default=None)
+    when = sh.add_mutually_exclusive_group()
+    when.add_argument("--at", default=None)
+    when.add_argument("--every", default=None)
     sh.add_argument("--video", default=None)
 
     ck = sub.add_parser("check")
@@ -286,29 +289,46 @@ def _cmd_render(ns: argparse.Namespace, root: Path) -> list[str]:
     ]
 
 
-def _seconds(raw: str) -> float:
-    """A `--at` time: `4.5` or `4.5s`, like a spec duration in seconds."""
+def _seconds(raw: str, flag: str = "--at") -> float:
+    """A time in seconds: `4.5` or `4.5s`. `--every` must be a positive interval."""
     text = raw.strip()
     try:
-        return float(text[:-1] if text.endswith("s") else text)
+        value = float(text[:-1] if text.endswith("s") else text)
     except ValueError:
-        raise ValueError(f"--at {text!r}: use seconds like 4.5 or 4.5s") from None
+        hint = "0.5 or 0.5s" if flag == "--every" else "4.5 or 4.5s"
+        raise ValueError(f"{flag} {text!r}: use seconds like {hint}") from None
+    if flag == "--every" and (not math.isfinite(value) or value <= 0):
+        raise ValueError(f"{flag} {text!r}: use a positive interval like 0.5s")
+    return value
+
+
+def _shown_frames(times: list[float], info: MediaInfo) -> int:
+    """How many distinct frames `extract` will keep. The OK line counts those."""
+    n_frames = int(round(info.duration * info.fps)) or 1
+    return len({min(max(0, int(round(t * info.fps))), n_frames - 1) for t in times})
 
 
 def _cmd_sheet(ns: argparse.Namespace, root: Path) -> list[str]:
     video = _video(root, ns.video)
     log = root / "build" / "sheet.log"
     info = probe(video, log=log)
-    at = None
-    if ns.at:
-        at = [_seconds(part) for part in str(ns.at).split(",") if part.strip()]
-    # Pass the times in, so sheet does not probe into the process cwd's build/.
-    # sheet() keeps at most MAX_TILES. Count the same list it will draw.
-    times = pick_times(video, at, n=MAX_TILES, info=info)[:MAX_TILES]
-    sheet(video, root / "build" / "sheet.jpg", at=times, log=log)
-    n_frames = int(round(info.duration * info.fps)) or 1
-    shown = len({min(max(0, int(round(t * info.fps))), n_frames - 1) for t in times})
-    return [f"OK build/sheet.jpg {shown} frames"]
+    out = root / "build" / "sheet.jpg"
+    if ns.every is not None:
+        interval = _seconds(str(ns.every), flag="--every")
+        # Fixed stride from t=0. Pages past 12 frames so a 60s film at 0.5s fits.
+        times = every_times(info.duration, interval, fps=info.fps)
+        paths = sheets(video, out, times, log=log)
+    else:
+        at = None
+        if ns.at:
+            at = [_seconds(part) for part in str(ns.at).split(",") if part.strip()]
+        # Pass the times in, so sheet does not probe into the process cwd's build/.
+        # sheet() keeps at most MAX_TILES. Count the same list it will draw.
+        times = pick_times(video, at, n=MAX_TILES, info=info)[:MAX_TILES]
+        paths = [sheet(video, out, at=times, log=log)]
+    shown = _shown_frames(times, info)
+    rels = " ".join(path.resolve().relative_to(root.resolve()).as_posix() for path in paths)
+    return [f"OK {rels} {shown} frames"]
 
 
 def _static_still(spec) -> bool:
@@ -429,7 +449,7 @@ def _intended_black(root: Path) -> list[tuple[float, float]]:
                     nd = _frames(spec, outgoing.dur)
                     if outgoing.type == "whip":
                         after = nd / 2.0
-                    elif outgoing.type in ("fade", "swirl"):
+                    elif outgoing.type in INCOMING_TRANS:
                         after = nd
             spans.append((max(0.0, (sh.start - before) / fps), (sh.end + after) / fps))
     if tl.n_frames:
@@ -438,6 +458,19 @@ def _intended_black(root: Path) -> list[tuple[float, float]]:
             _dur, start = fade
             spans.append((start / fps, tl.n_frames / fps))
     return spans
+
+
+def _check_overrides(root: Path) -> tuple[list[Expect], float | None, float | None]:
+    """Resolved `check.expect` spans, plus an optional loudness target and tolerance."""
+    spec_file = root / "montaj.yaml"
+    if not spec_file.is_file():
+        return [], None, None
+    tl = resolve(load_spec(spec_file), root)
+    expects = [Expect(item.kind, (item.start, item.end), item.why) for item in tl.check_expects]
+    loud = None if tl.spec.check is None else tl.spec.check.loudness
+    if loud is None:
+        return expects, None, None
+    return expects, float(loud.i), float(loud.tol)
 
 
 def _av_tol(root: Path) -> float | None:
@@ -451,12 +484,26 @@ def _av_tol(root: Path) -> float | None:
     return 1.0 / float(spec.video.fps)
 
 
+def _clip_overruns(root: Path) -> list[str]:
+    """Clip shots whose timeline read runs past the source. No spec means no new lines."""
+    spec_file = root / "montaj.yaml"
+    if not spec_file.is_file():
+        return []
+    tl = resolve(load_spec(spec_file), root)
+    return clip_overruns(tl, _assets_dir(root, tl.spec.assets), log=root / "build" / "qa.log")
+
+
 def _cmd_check(ns: argparse.Namespace, root: Path) -> list[str]:
+    expects, loud_i, loud_tol = _check_overrides(root)
+    black = union([*_intended_black(root), *(item.span for item in expects if item.kind == "black")])
+    freeze = union([*_intended_freeze(root), *(item.span for item in expects if item.kind == "frozen")])
     lines = check(
-        _video(root, ns.video), _intended_freeze(root),
+        _video(root, ns.video), freeze,
         log=root / "build" / "qa.log", av_tol=_av_tol(root),
-        intended_black=_intended_black(root),
+        intended_black=black, expect=expects,
+        loudness_target=loud_i, loudness_tol=loud_tol,
     )
+    lines.extend(_clip_overruns(root))
     warns = sum(line.startswith("WARN") for line in lines)
     lines.append(f"WARN check: {warns} warnings" if warns else "OK check")
     return lines
