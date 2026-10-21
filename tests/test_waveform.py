@@ -269,13 +269,11 @@ def test_changing_the_source_audio_changes_the_hash_and_the_frames(tmp_path: Pat
 
 @needs_ffmpeg
 def test_source_window_matches_placement_and_edits(tmp_path: Path) -> None:
-    from montaj.audio.mix import _render_clip, source_window
+    from montaj.audio.mix import source_window
 
     music = _tone(tmp_path / "m.wav", 2.0, 80.0, 0.55)
     voice = _tone(tmp_path / "v.wav", 1.0, 440.0, 0.4)
     full_music = decode(str(music))
-    span = decode(str(music), start=1000, count=500)
-    assert np.array_equal(span, full_music[1000:1500])
     plan = MixPlan(
         str(music),
         edits=(EditOp("cut", 0.4, 0.7),),
@@ -293,43 +291,47 @@ def test_source_window_matches_placement_and_edits(tmp_path: Path) -> None:
     tail = source_window(plan, "music", len(edited) - 100, len(edited) + 400)
     assert np.allclose(tail[:100], edited[-100:], atol=1e-6) and np.all(tail[100:] == 0)
 
-    cache: dict = {}
     n = SR  # covers both voice placements; the tick is a different id
-    acc = np.zeros((n, 2), np.float32)
-    for c in plan.clips:
-        if c.id != "voice":
-            continue
-        start, x = _render_clip(c, cache, None)
-        lo, hi = max(start, 0), min(start + len(x), n)
-        if lo < hi:
-            acc[lo:hi] += x[lo - start:lo - start + (hi - lo)]
+    acc = _mixer_sum(plan, "voice", n)
     voiced = source_window(plan, "voice", 0, n)
     assert np.allclose(voiced, acc, atol=1e-6)
     assert float(np.max(np.abs(voiced))) > 0.05  # the sum is actually in the window
 
 
-@needs_ffmpeg
-def test_decode_span_matches_full_decode_when_resampled(tmp_path: Path) -> None:
-    mono = _mono_wav(tmp_path / "m.wav", 0.5 * np.sin(2 * np.pi * 220 * np.arange(SR) / SR))
-    full = decode(str(mono))
-    got = decode(str(mono), start=2000, count=1000)
-    assert full.shape[1] == 2 and np.allclose(full[:, 0], full[:, 1])
-    assert np.allclose(got, full[2000:3000], atol=1e-6)
+def _mixer_sum(plan: MixPlan, source: str, n: int) -> np.ndarray:
+    """What `mix_audio` adds to the bed for `source`, before ducking, over `[0, n)`."""
+    from montaj.audio.mix import _render_clip
 
-    # 44.1 kHz: the span is taken after the same resample as a full decode.
-    raw = tmp_path / "a.f32"
-    sr = 44100
-    n = 2 * sr
-    x = (0.5 * np.sin(2 * np.pi * 440 * np.arange(n) / sr)).astype("<f4")
-    raw.write_bytes(np.ascontiguousarray(np.stack([x, x * 0.25], 1)).tobytes())
-    wav = tmp_path / "a44.wav"
-    subprocess.check_call(
-        ["ffmpeg", "-y", "-v", "error", "-f", "f32le", "-ar", str(sr), "-ac", "2", "-i", str(raw), str(wav)]
+    cache: dict = {}
+    acc = np.zeros((n, 2), np.float32)
+    for c in plan.clips:
+        if c.id != source:
+            continue
+        start, x = _render_clip(c, cache, None)
+        lo, hi = max(start, 0), min(start + len(x), n)
+        if lo < hi:
+            acc[lo:hi] += x[lo - start:lo - start + (hi - lo)]
+    return acc
+
+
+@needs_ffmpeg
+def test_compressed_sources_match_the_mixer_to_the_last_sample(tmp_path: Path) -> None:
+    """Vorbis pads its container duration; the bars must still end where the mixed clip ends."""
+    from montaj.audio.mix import source_window
+
+    wav = _tone(tmp_path / "v.wav", 1.0, 440.0, 0.5)
+    ogg = tmp_path / "v.ogg"
+    subprocess.check_call(["ffmpeg", "-y", "-v", "error", "-i", str(wav), "-c:a", "libvorbis", str(ogg)])
+    plan = MixPlan(
+        str(ogg),
+        edits=(EditOp("cut", 0.3, 0.5),),
+        clips=(Placed("voice", str(ogg), 0, 0.0, None, 0.25, -3.0, 0.3),),  # `out` omitted
     )
-    full = decode(str(wav))
-    a, count = 24_000, 12_000
-    got = decode(str(wav), start=a, count=count)
-    assert len(got) == count and np.allclose(got, full[a:a + count], atol=1e-6)
+    n = 2 * SR
+    assert np.array_equal(source_window(plan, "voice", 0, n), _mixer_sum(plan, "voice", n))
+    edited = apply_edits(decode(str(ogg)), plan.edits)
+    got = source_window(plan, "music", 0, len(edited) + 100)
+    assert np.array_equal(got[:len(edited)], edited) and not got[len(edited):].any()
 
 
 # --- raster -------------------------------------------------------------------
