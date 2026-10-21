@@ -106,8 +106,8 @@ audio:
   edit:
     - {loop: [16b, 20b], times: 2}
   clips:
-    - {src: assets/voice1, at: 0.9s, id: voice, gain: -6dB}
-    - {src: assets/voice2, at: logo+0.9s, id: voice, gain: -6dB}
+    - {src: voice1, at: 0.9s, id: voice, gain: -6dB}
+    - {src: voice2, at: logo+0.9s, id: voice, gain: -6dB}
     - {src: "synth:whoosh", at: [4b, 7b, 10b, 13b], offset: -0.16s, gain: -14dB}
     - {src: "synth:tick", at: [4b, 7b, 10b, 13b], gain: -16dB}
     - {src: "synth:riser", at: 12b, gain: -14dB}

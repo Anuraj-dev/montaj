@@ -21,7 +21,7 @@ from pathlib import Path
 import numpy as np
 
 from montaj.encode import FFMPEG, FFPROBE, EncodeError
-from montaj.spec import _DUR, _line, _parse_time
+from montaj.spec import _DUR, _assets_dir, _line, _parse_time
 
 SR = 48000
 MIX_REV = "1"  # bump when the mixed samples change for the same plan
@@ -268,6 +268,7 @@ def plan_audio(spec, spec_dir: Path | None, markers: dict[str, float], fps: int,
     if a is None:
         return None
     root = spec_dir or Path(".")
+    assets = _assets_dir(spec, spec_dir)
     ops = edit_ops(a.edit, fps, bpm, beat0, errors)
     if ops and len(ops) == len(a.edit):
         total = _track_seconds(root / a.track)
@@ -277,7 +278,7 @@ def plan_audio(spec, spec_dir: Path | None, markers: dict[str, float], fps: int,
     clips: list[Placed] = []
     for i, c in enumerate(a.clips):
         base = f"audio.clips[{i}]"
-        src = _clip_src(c.src, root, f"{base}.src", errors)
+        src = _clip_src(c.src, root, assets, f"{base}.src", errors)
         if c.stream is not None and (isinstance(c.stream, bool) or c.stream < 0):
             errors.append(_line(f"{base}.stream", f"need an audio stream index >= 0, got {c.stream!r}", "use 0"))
         if c.id is not None and not re.match(r"^[a-z][a-z0-9_]*$", c.id):
@@ -333,16 +334,19 @@ def _track_seconds(path: Path) -> float | None:
     return value if math.isfinite(value) and value > 0 else None
 
 
-def _clip_src(raw: str, root: Path, path: str, errors: list[str]) -> str | None:
+def _clip_src(raw: str, root: Path, assets: Path | None, path: str, errors: list[str]) -> str | None:
     if raw.startswith("synth:"):
         if raw[6:] not in SYNTH:
             errors.append(_line(path, f"unknown synth {raw[6:]!r}", f"have: {', '.join(SYNTH)}"))
             return None
         return raw
-    found = _find_src(root, raw)
+    found = _find_src(root, raw)  # a spec-relative file wins over the same name in assets
+    if found is None and assets is not None:
+        found = _find_src(assets, raw)
     if found is None:
+        where = "the spec file" if assets is None else f"the spec file or {assets}"
         errors.append(_line(path, f"{raw!r} not found",
-                            f"path relative to the spec file (extension optional) or synth:<{'|'.join(SYNTH)}>"))
+                            f"path relative to {where} (extension optional) or synth:<{'|'.join(SYNTH)}>"))
         return None
     return str(found.resolve())
 
