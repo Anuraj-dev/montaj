@@ -1,15 +1,18 @@
-"""Vector HUD overlays: ring/arc, brackets, polyline. Pure `fn(cv, img, overlays, f)`.
+"""Vector HUD overlays: ring/arc, brackets, polyline, waveform. Pure `fn(cv, img, overlays, f)`.
 
 Each shape is a signed distance in device px, anti-aliased with a 1 px linear ramp
 (coverage = 0.5 - d), drawn on a bounding window so a small ring costs a small tensor.
 Design-px values scale by `cv.k`. A `glow` blurs the coverage and screens it under the
 crisp shape. The renderer reads only the ResolvedOverlay values it is handed (no files).
+A waveform's bar heights are `levels` computed at resolve time; this module never opens audio.
 """
 from __future__ import annotations
 
 import math
 
 import torch
+
+from montaj.timeline import waveform_index
 
 from .core import EASE
 from .shots import css_blur
@@ -126,8 +129,69 @@ def _coverage(kind, X, Y) -> torch.Tensor | None:
     return None if dist is None else (0.5 - (dist - half)).clamp(0.0, 1.0)
 
 
+def _pixel_span(a: float, b: float, limit: int) -> tuple[int, int]:
+    """Device pixels whose centres lie in [a, b), clipped to [0, limit)."""
+    lo = max(0, math.ceil(a - 0.5))
+    hi = min(limit, math.floor(b - 0.5 - 1e-9) + 1)
+    return lo, hi
+
+
+def _draw_waveform(cv, img: torch.Tensor, ov, f: float) -> torch.Tensor:
+    """Vertical bars in `box`, mirrored about its horizontal centre. Nothing outside the box."""
+    if not ov.levels or ov.box is None:
+        return img
+    i = waveform_index(ov.from_, f)
+    if i < 0 or i >= len(ov.levels):
+        return img
+    row = ov.levels[i]
+    if not row or max(row) <= 0.0:
+        return img
+    k = float(cv.k)
+    x0, y0, x1, y1 = (float(v) * k for v in ov.box)
+    if x1 <= x0 or y1 <= y0:
+        return img
+    ix0, ix1 = _pixel_span(x0, x1, cv.W)
+    iy0, iy1 = _pixel_span(y0, y1, cv.H)
+    if ix1 <= ix0 or iy1 <= iy0:
+        return img
+    X = (torch.arange(ix0, ix1, device=img.device, dtype=img.dtype) + 0.5)[None, :].expand(iy1 - iy0, -1)
+    Y = (torch.arange(iy0, iy1, device=img.device, dtype=img.dtype) + 0.5)[:, None].expand(-1, ix1 - ix0)
+    n = len(row)
+    slot = (x1 - x0) / n
+    hw = min(float(ov.width) * k, slot) / 2.0
+    cy = (y0 + y1) / 2.0
+    half_box = (y1 - y0) / 2.0
+    cov = torch.zeros((iy1 - iy0, ix1 - ix0), device=img.device, dtype=img.dtype)
+    zero = torch.zeros((), device=img.device, dtype=img.dtype)
+    for bi, level in enumerate(row):
+        if level <= 0.0:
+            continue
+        cx = x0 + (bi + 0.5) * slot
+        hh = float(level) * half_box
+        dx = (X - cx).abs() - hw
+        dy = (Y - cy).abs() - hh
+        dist = torch.hypot(dx.clamp(min=0), dy.clamp(min=0)) + torch.minimum(torch.maximum(dx, dy), zero)
+        cov = torch.maximum(cov, (0.5 - dist).clamp(0.0, 1.0))
+    mask = (X >= x0) & (X < x1) & (Y >= y0) & (Y < y1)
+    cov = torch.where(mask, cov, torch.zeros_like(cov))
+    sigma = (2.0 * ov.width + 4.0) * k if ov.glow > 0 else 0.0
+    g = None
+    if sigma > 0.0:
+        g = (css_blur(cov[None], sigma)[0] * ov.glow * ov.opacity).clamp(0.0, 1.0)
+        g = torch.where(mask, g, torch.zeros_like(g))
+    rgb = torch.tensor(_rgb(ov.color), device=img.device, dtype=img.dtype)[:, None, None]
+    win = img[:, iy0:iy1, ix0:ix1]
+    if g is not None:
+        win = 1.0 - (1.0 - win) * (1.0 - rgb * g)
+    painted = win * (1.0 - cov * ov.opacity) + rgb * (cov * ov.opacity)
+    img[:, iy0:iy1, ix0:ix1] = torch.where(mask[None], painted, img[:, iy0:iy1, ix0:ix1])
+    return img
+
+
 def draw_overlay(cv, img: torch.Tensor, ov, f: float) -> torch.Tensor:
     """Paint one overlay at frame f onto `img` (3, H, W) in place; returns it."""
+    if ov.shape == "waveform":
+        return _draw_waveform(cv, img, ov, f)
     k = float(cv.k)
     got = _shape(ov, f, k)
     if got is None:

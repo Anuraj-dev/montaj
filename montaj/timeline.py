@@ -10,11 +10,13 @@ from montaj.render.core import EASE as EASE_FN, key as eval_key
 from montaj.spec import (
     INCOMING_TRANS,
     WALL_PULLBACK_ZOOM,
+    WAVEFORM_BARS,
     Shot,
     Spec,
     SpecError,
     TextBackdrop,
     _format_beat0,
+    _line,
     parse_wh,
     round_frame,
     validate_spec,
@@ -175,7 +177,11 @@ class ResolvedSub:
 
 @dataclass(frozen=True)
 class ResolvedOverlay:
-    """One `overlays[]` entry with times in frames and animated fields as (from, to) pairs."""
+    """One `overlays[]` entry with times in frames and animated fields as (from, to) pairs.
+
+    `levels` is set only on a waveform: one row of bar peaks per frame in the window,
+    quantised to 1/255. The renderer reads the row and does not open the audio.
+    """
 
     shape: str
     from_: float
@@ -193,6 +199,7 @@ class ResolvedOverlay:
     glow: float
     ease: str
     above_finish: bool
+    levels: tuple[tuple[float, ...], ...] | None = None
 
 
 @dataclass(frozen=True)
@@ -610,7 +617,80 @@ def _pair(v) -> tuple[float, float] | None:
 DEFAULT_ARM = 28.0  # design px
 
 
-def _resolve_overlays(spec: Spec, times: dict[str, float]) -> list[ResolvedOverlay]:
+def waveform_frames(from_: float, to: float) -> range:
+    """Integer frames `f` with `from_ <= f < to`: the rows of a waveform's `levels`."""
+    start = math.ceil(from_ - 1e-9)
+    end = math.floor(to - 1e-9) + 1
+    if end < start:
+        return range(start, start)
+    return range(start, end)
+
+
+def waveform_index(from_: float, f: float) -> int:
+    """Row of `levels` for frame `f`. Negative when `f` is before the window."""
+    return int(math.floor(f + 1e-6)) - math.ceil(from_ - 1e-9)
+
+
+def _waveform_levels(
+    spec: Spec,
+    times: dict[str, float],
+    spec_dir: Path,
+    markers: dict[str, float],
+    bpm: float | None,
+    beat0: float,
+) -> list[tuple[tuple[float, ...], ...] | None]:
+    """Per-frame bar peaks for each waveform. None for every other shape.
+
+    One local decode cache for this resolve. Nothing is stored on the module.
+    """
+    from montaj.audio.mix import band_levels, frame_sample, plan_audio, source_window
+    from montaj.encode import EncodeError
+
+    errors: list[str] = []
+    plan = plan_audio(spec, spec_dir, markers, spec.video.fps, bpm, beat0, errors)
+    if plan is None or errors:
+        raise SpecError(errors or [_line("audio", "no audio block", "add audio: with a track or clips")])
+    fps = spec.video.fps
+    cache: dict = {}
+    out: list[tuple[tuple[float, ...], ...] | None] = []
+    for i, ov in enumerate(spec.overlays):
+        if ov.shape != "waveform":
+            out.append(None)
+            continue
+        p = f"overlays[{i}]"
+        frames = waveform_frames(times[f"{p}.from"], times[f"{p}.to"])
+        bars = WAVEFORM_BARS if ov.bars is None else int(ov.bars)
+        if not frames or fps <= 0 or ov.source is None:
+            out.append(tuple((0.0,) * bars for _ in frames))
+            continue
+        s0 = frame_sample(frames.start, fps)
+        s1 = frame_sample(frames.stop, fps)
+        try:
+            audio = source_window(plan, ov.source, s0, s1, cache=cache)
+        except EncodeError as exc:
+            raise SpecError([_line(f"{p}.source", str(exc).splitlines()[0], "check the audio file")]) from exc
+        rows = []
+        for f in frames:
+            a = frame_sample(f, fps) - s0
+            b = frame_sample(f + 1, fps) - s0
+            rows.append(band_levels(audio[max(0, a):max(0, b)], bars))
+        out.append(tuple(rows))
+    return out
+
+
+def _resolve_overlays(
+    spec: Spec,
+    times: dict[str, float],
+    spec_dir: Path,
+    markers: dict[str, float],
+    bpm: float | None,
+    beat0: float,
+) -> list[ResolvedOverlay]:
+    levels = (
+        _waveform_levels(spec, times, spec_dir, markers, bpm, beat0)
+        if any(ov.shape == "waveform" for ov in spec.overlays)
+        else [None] * len(spec.overlays)
+    )
     out: list[ResolvedOverlay] = []
     for i, ov in enumerate(spec.overlays):
         p = f"overlays[{i}]"
@@ -632,6 +712,7 @@ def _resolve_overlays(spec: Spec, times: dict[str, float]) -> list[ResolvedOverl
                 glow=float(ov.glow),
                 ease=ov.ease,
                 above_finish=ov.above_finish,
+                levels=levels[i],
             )
         )
     return out
@@ -794,7 +875,7 @@ def resolve(spec: Spec, spec_dir: Path) -> Timeline:
         markers=markers,
         texts=texts,
         subs=subs,
-        overlays=_resolve_overlays(spec, times),
+        overlays=_resolve_overlays(spec, times, spec_dir, markers, bpm, beat0),
         _hits=hits,
         _splits=splits,
         _bursts=bursts,

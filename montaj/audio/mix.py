@@ -4,6 +4,9 @@
 `render_mix` turns the plan into one stereo 48 kHz float wav in `build/audio/`, keyed by a hash of
 the plan and the input bytes; `encode.mux` then treats that wav exactly as it treats `audio.track`.
 A spec without any of the three never reaches this module at render time (`MixPlan.active`).
+
+`source_window` is the same placement and edit math over a sample span, for waveform levels.
+Resolve stores those levels; the renderer does not call into here.
 """
 from __future__ import annotations
 
@@ -405,29 +408,64 @@ def synth(name: str) -> np.ndarray:
 # --- IO ----------------------------------------------------------------------------------------
 
 
-def decode(path: str, stream: int = 0, *, log: Path | None = None) -> np.ndarray:
-    """Audio of `path` (or its `stream`-th audio stream) as float32 `(n, 2)` at 48 kHz."""
+def decode(path: str, stream: int = 0, *, log: Path | None = None,
+           start: int | None = None, count: int | None = None) -> np.ndarray:
+    """Audio of `path` (or its `stream`-th audio stream) as float32 `(n, 2)` at 48 kHz.
+
+    `start` and `count` are samples on that 48 kHz timeline. Set them and the result
+    is `decode(path)[start:start+count]` (zero past the ends). ffmpeg stops at the end
+    of the span, so the tail is not read. `-ss` is not used: on compressed audio it is
+    not sample-accurate against the full decode the mixer writes.
+    """
+    if count is not None and count <= 0:
+        return np.zeros((0, 2), np.float32)
+    if start is not None and start < 0:
+        raise ValueError(f"decode start must be >= 0, got {start}")
     if path.startswith("synth:"):
         mono = synth(path[6:])
-        return np.stack([mono, mono], axis=1)
+        audio = np.stack([mono, mono], axis=1)
+        if start is None and count is None:
+            return audio
+        a = 0 if start is None else start
+        b = len(audio) if count is None else a + count
+        return _pad_slice(audio, a, b)
     # ffmpeg's mono -> stereo upmix drops 3 dB; decode mono as mono and duplicate it ourselves.
     probe = subprocess.run(
         [FFPROBE, "-v", "error", "-select_streams", f"a:{stream}", "-show_entries", "stream=channels",
          "-of", "csv=p=0", path], stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
     mono = probe.stdout.decode().strip() == "1"
     cmd = [FFMPEG, "-v", "error", "-nostdin", "-i", path, "-map", f"0:a:{stream}",
-           "-ac", "1" if mono else "2", "-ar", str(SR), "-f", "f32le", "-"]
+           "-ac", "1" if mono else "2", "-ar", str(SR)]
+    if start is not None or count is not None:
+        a = 0 if start is None else start
+        # atrim runs after aresample, so the sample index is the same one `decode()` returns.
+        end = "" if count is None else f":end_sample={a + count}"
+        cmd += ["-af", f"aresample={SR},atrim=start_sample={a}{end},asetpts=PTS-STARTPTS"]
+    cmd += ["-f", "f32le", "-"]
     proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
     err = proc.stderr.decode("utf-8", "replace")
     if log is not None:
         log.parent.mkdir(parents=True, exist_ok=True)
         with open(log, "a") as fh:
             fh.write(f"\n$ {' '.join(cmd)}\n{err}")
-    if proc.returncode != 0 or not proc.stdout:
+    span = start is not None or count is not None
+    if proc.returncode != 0 or (not proc.stdout and not span):
         tail = "\n".join(err.strip().splitlines()[-3:])
         raise EncodeError(f"mix: cannot read audio stream {stream} of {path}", tail)
-    pcm = np.frombuffer(proc.stdout, dtype="<f4").astype(np.float32)
-    return np.repeat(pcm[:, None], 2, axis=1) if mono else pcm.reshape(-1, 2)
+    if not proc.stdout:
+        audio = np.zeros((0, 2), np.float32)
+    else:
+        pcm = np.frombuffer(proc.stdout, dtype="<f4").astype(np.float32)
+        audio = np.repeat(pcm[:, None], 2, axis=1) if mono else pcm.reshape(-1, 2)
+    if count is None:
+        return audio
+    if len(audio) == count:
+        return audio
+    fitted = np.zeros((count, 2), np.float32)
+    n = min(len(audio), count)
+    if n:
+        fitted[:n] = audio[:n]
+    return fitted
 
 
 def write_wav(path: Path, audio: np.ndarray) -> None:
@@ -463,12 +501,8 @@ def _slice(x: np.ndarray, lo: int, hi: int) -> np.ndarray:
     return out
 
 
-def apply_edits(music: np.ndarray, ops: tuple[EditOp, ...] | list[EditOp]) -> np.ndarray:
-    """Splice `music` per `ops`. Joins get an equal-power crossfade that keeps the length exact."""
-    n = len(music)
-    bad = edit_range_error(ops, n / SR)
-    if bad is not None:
-        raise EncodeError(f"mix: audio.edit[{bad[0]}] {bad[1]}", "keep edit points inside the track")
+def _edit_parts(ops: tuple[EditOp, ...] | list[EditOp], n: int) -> list[tuple[int, int]]:
+    """Source sample ranges that concatenate to the edited music. Adjacent pieces merge."""
     parts: list[list[int]] = []
     for s, length in _pieces(list(ops), n / SR):
         s0 = round(s * SR)
@@ -479,9 +513,19 @@ def apply_edits(music: np.ndarray, ops: tuple[EditOp, ...] | list[EditOp]) -> np
             parts[-1][1] = s1
         else:
             parts.append([s0, s1])
+    return [(a, b) for a, b in parts]
+
+
+def apply_edits(music: np.ndarray, ops: tuple[EditOp, ...] | list[EditOp]) -> np.ndarray:
+    """Splice `music` per `ops`. Joins get an equal-power crossfade that keeps the length exact."""
+    n = len(music)
+    bad = edit_range_error(ops, n / SR)
+    if bad is not None:
+        raise EncodeError(f"mix: audio.edit[{bad[0]}] {bad[1]}", "keep edit points inside the track")
+    parts = _edit_parts(ops, n)
     if not parts:
         raise EncodeError("mix: audio.edit leaves no music", "check the cut/loop ranges against the track length")
-    out = np.concatenate([music[s0:s1] for s0, s1 in parts])
+    out = np.concatenate([music[a:b] for a, b in parts])
     half = round(XFADE_S * SR / 2)
     pos = 0
     for k in range(len(parts) - 1):
@@ -496,31 +540,219 @@ def apply_edits(music: np.ndarray, ops: tuple[EditOp, ...] | list[EditOp]) -> np
     return out
 
 
+def _placed_span(c: Placed, n_src: int) -> tuple[int, int, int]:
+    """`(film start, source start, length)` after `in`/`out` and a negative `at` trim."""
+    lo = round(c.in_s * SR)
+    hi = n_src if c.out_s is None else min(n_src, round(c.out_s * SR))
+    at = round(c.at_s * SR)
+    if at < 0:  # drop the head that would play before the film starts
+        lo -= at
+        at = 0
+    return at, lo, max(0, hi - lo)
+
+
+def _shape_placement(x: np.ndarray, p0: int, length: int, gain_db: float, pan: float) -> None:
+    """Fade, gain and pan `x` in place. `x` holds placement indices `[p0, p0+len(x))` of `length`."""
+    fade_n = min(round(CLIP_FADE_S * SR), length // 2)
+    if fade_n > 0 and len(x):
+        ramp = np.sin(np.linspace(0.0, np.pi / 2, fade_n, dtype=np.float32)) ** 2
+        idx = np.arange(p0, p0 + len(x))
+        head = idx < fade_n
+        tail = idx >= length - fade_n
+        if head.any():
+            x[head] *= ramp[idx[head], None]
+        if tail.any():
+            x[tail] *= ramp[length - 1 - idx[tail], None]
+    x *= np.float32(10 ** (gain_db / 20))
+    if pan:
+        ang = (pan + 1) * np.pi / 4
+        x *= np.array([math.sqrt(2) * math.cos(ang), math.sqrt(2) * math.sin(ang)], dtype=np.float32)
+
+
 def _render_clip(c: Placed, cache: dict, log: Path | None) -> tuple[int, np.ndarray]:
     """`(start sample, stereo samples)` for one placement, trimmed, faded, gained and panned."""
     key = (c.src, c.stream)
     if key not in cache:
         cache[key] = decode(c.src, c.stream, log=log)
     x = cache[key]
-    lo = round(c.in_s * SR)
-    hi = len(x) if c.out_s is None else min(len(x), round(c.out_s * SR))
-    x = x[lo:hi].copy()
-    start = round(c.at_s * SR)
-    if start < 0:  # an offset can reach before the film start: drop the head
-        x = x[-start:]
-        start = 0
-    if len(x) == 0:
-        return start, x
-    f = min(round(CLIP_FADE_S * SR), len(x) // 2)
-    if f > 0:
-        ramp = np.sin(np.linspace(0.0, np.pi / 2, f, dtype=np.float32)) ** 2
-        x[:f] *= ramp[:, None]
-        x[-f:] *= ramp[::-1, None]
-    x *= np.float32(10 ** (c.gain_db / 20))
-    if c.pan:
-        ang = (c.pan + 1) * np.pi / 4
-        x *= np.array([math.sqrt(2) * math.cos(ang), math.sqrt(2) * math.sin(ang)], dtype=np.float32)
-    return start, x
+    at, src, length = _placed_span(c, len(x))
+    if length <= 0:
+        return at, np.zeros((0, 2), np.float32)
+    piece = np.array(x[src:src + length], dtype=np.float32, copy=True)
+    _shape_placement(piece, 0, length, c.gain_db, c.pan)
+    return at, piece
+
+
+def _pad_slice(audio: np.ndarray, a: int, b: int) -> np.ndarray:
+    """`audio[a:b]`, zero where the range leaves the array."""
+    out = np.zeros((b - a, audio.shape[1]), np.float32)
+    lo, hi = max(a, 0), min(b, len(audio))
+    if lo < hi:
+        out[lo - a:hi - a] = audio[lo:hi]
+    return out
+
+
+def _pos_int(v: object) -> int | None:
+    if isinstance(v, bool) or v is None:
+        return None
+    if isinstance(v, int) and v > 0:
+        return v
+    if isinstance(v, str) and v.isdigit() and int(v) > 0:
+        return int(v)
+    return None
+
+
+def _probe_output_samples(path: str, stream: int) -> int:
+    """Samples `decode(path)` would return, from the container duration when it is exact enough."""
+    proc = subprocess.run(
+        [FFPROBE, "-v", "error", "-select_streams", f"a:{stream}",
+         "-show_entries", "stream=duration,sample_rate,nb_samples", "-of", "json", path],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+    st: dict = {}
+    try:
+        streams = json.loads(proc.stdout.decode() or "{}").get("streams") or []
+        if streams:
+            st = streams[0]
+    except ValueError:
+        st = {}
+    nb, sr = _pos_int(st.get("nb_samples")), _pos_int(st.get("sample_rate"))
+    if nb is not None and sr == SR:
+        return nb
+    try:
+        seconds = float(st.get("duration") or 0.0)
+    except (TypeError, ValueError):
+        seconds = 0.0
+    if seconds > 0:
+        return int(round(seconds * SR))
+    return len(decode(path, stream))
+
+
+def _cached_len(path: str, stream: int, cache: dict) -> int:
+    key = ("len", path, stream)
+    if key not in cache:
+        cache[key] = len(synth(path[6:])) if path.startswith("synth:") else _probe_output_samples(path, stream)
+    return cache[key]
+
+
+def _take(path: str, stream: int, a: int, b: int, cache: dict, n: int) -> np.ndarray:
+    """Samples `[a, b)` of the 48 kHz decode, zero outside `[0, n)`. The tail past `b` is not read."""
+    out = np.zeros((b - a, 2), np.float32)
+    lo, hi = max(a, 0), min(b, n)
+    if lo >= hi:
+        return out
+    key = (path, stream, lo, hi)
+    if key not in cache:
+        got = decode(path, stream, start=lo, count=hi - lo)
+        if len(got) != hi - lo:
+            fixed = np.zeros((hi - lo, 2), np.float32)
+            m = min(len(got), hi - lo)
+            if m:
+                fixed[:m] = got[:m]
+            got = fixed
+        cache[key] = got
+    got = cache[key]
+    out[lo - a:lo - a + len(got)] = got
+    return out
+
+
+def _edited_samples(path: str, ops, s0: int, s1: int, cache: dict, n: int) -> np.ndarray:
+    """Edited-music samples `[s0, s1)` on the output timeline. Same joins as `apply_edits`."""
+    bad = edit_range_error(ops, n / SR)
+    if bad is not None:
+        raise EncodeError(f"mix: audio.edit[{bad[0]}] {bad[1]}", "keep edit points inside the track")
+    parts = _edit_parts(ops, n)
+    if not parts:
+        raise EncodeError("mix: audio.edit leaves no music", "check the cut/loop ranges against the track length")
+    out = np.zeros((s1 - s0, 2), np.float32)
+    pos = 0
+    for a, b in parts:
+        lo, hi = max(pos, s0), min(pos + (b - a), s1)
+        if lo < hi:
+            src = a + (lo - pos)
+            chunk = _take(path, 0, src, src + (hi - lo), cache, n)
+            out[lo - s0:lo - s0 + len(chunk)] = chunk
+        pos += b - a
+    half = round(XFADE_S * SR / 2)
+    pos = 0
+    for k in range(len(parts) - 1):
+        pos += parts[k][1] - parts[k][0]
+        h = min(half, (parts[k][1] - parts[k][0]) // 2, (parts[k + 1][1] - parts[k + 1][0]) // 2)
+        if h < 1:
+            continue
+        z0, z1 = pos - h, pos + h
+        if z1 <= s0 or z0 >= s1:
+            continue
+        left = _take(path, 0, parts[k][1] - h, parts[k][1] + h, cache, n)
+        right = _take(path, 0, parts[k + 1][0] - h, parts[k + 1][0] + h, cache, n)
+        theta = np.linspace(0.0, np.pi / 2, 2 * h, dtype=np.float32)[:, None]
+        mixed = left * np.cos(theta) + right * np.sin(theta)
+        w0, w1 = max(z0, s0), min(z1, s1)
+        out[w0 - s0:w1 - s0] = mixed[w0 - z0:w1 - z0]
+    return out
+
+
+def frame_sample(frame: int, fps: int) -> int:
+    """First 48 kHz sample of integer film frame `frame`."""
+    return int(round(int(frame) * SR / float(fps)))
+
+
+def _q_level(peak: float) -> float:
+    """Clamp to 0..1 and quantise to 1/255. The same samples always land on the same step."""
+    if not math.isfinite(peak) or peak <= 0.0:
+        return 0.0
+    q = int(math.floor(min(1.0, peak) * 255.0 + 0.5))
+    return min(q, 255) / 255.0
+
+
+def band_levels(samples: np.ndarray, bars: int) -> tuple[float, ...]:
+    """Peak of each equal slice of one frame, mono mean of the channels, quantised to 1/255."""
+    bars = int(bars)
+    if bars <= 0:
+        return ()
+    n = int(samples.shape[0]) if getattr(samples, "ndim", 0) else 0
+    if n <= 0:
+        return (0.0,) * bars
+    mono = samples.mean(axis=1) if samples.ndim == 2 else samples
+    edges = (np.arange(bars + 1) * n) // bars
+    row: list[float] = []
+    for i in range(bars):
+        a, b = int(edges[i]), int(edges[i + 1])
+        peak = float(np.max(np.abs(mono[a:b]))) if b > a else 0.0
+        row.append(_q_level(peak))
+    return tuple(row)
+
+
+def source_window(plan: MixPlan, source: str, s0: int, s1: int, *, cache: dict | None = None) -> np.ndarray:
+    """Stereo film-timeline samples `[s0, s1)` of one waveform source.
+
+    `music` is the track after `audio.edit`. Any other name is every placement with that
+    id, summed after the placement fade, gain and pan. Only those sources are opened,
+    and only the samples the span needs. `cache` is the caller's dict, not module state.
+    """
+    if s1 < s0:
+        raise ValueError(f"source window {s0}:{s1} is backwards")
+    cache = {} if cache is None else cache
+    if source == "music":
+        n = _cached_len(plan.track, 0, cache)
+        if not plan.edits:
+            return _take(plan.track, 0, s0, s1, cache, n)
+        return _edited_samples(plan.track, plan.edits, s0, s1, cache, n)
+    out = np.zeros((s1 - s0, 2), np.float32)
+    for c in plan.clips:
+        if c.id != source:
+            continue
+        n = _cached_len(c.src, c.stream, cache)
+        at, src, length = _placed_span(c, n)
+        if length <= 0:
+            continue
+        a, b = max(s0, at), min(s1, at + length)
+        if a >= b:
+            continue
+        p0 = a - at
+        piece = _take(c.src, c.stream, src + p0, src + (b - at), cache, n).copy()
+        _shape_placement(piece, p0, length, c.gain_db, c.pan)
+        out[a - s0:a - s0 + len(piece)] += piece
+    return out
 
 
 def duck_gain(source: np.ndarray, plan: DuckPlan, n: int) -> np.ndarray:
@@ -617,5 +849,6 @@ def check_lines(stats: dict) -> list[str]:
     return lines
 
 
-__all__ = ["DuckPlan", "EditOp", "MixPlan", "MixStats", "Placed", "apply_edits", "check_lines",
-           "duck_gain", "edit_ops", "edit_range_error", "plan_audio", "plan_hash", "render_mix", "shift_words", "synth"]
+__all__ = ["DuckPlan", "EditOp", "MixPlan", "MixStats", "Placed", "apply_edits", "band_levels",
+           "check_lines", "decode", "duck_gain", "edit_ops", "edit_range_error", "frame_sample",
+           "plan_audio", "plan_hash", "render_mix", "shift_words", "source_window", "synth"]

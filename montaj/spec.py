@@ -54,7 +54,9 @@ TEXT_SIDES = ("left", "right")
 # Weights that ship as font files; a missing weight would silently fall back to the nearest.
 TEXT_WEIGHTS = {"sans": (400, 600, 700), "mono": (400, 700)}
 TEXT_COLORS = ("cream", "gold", "ink")
-OVERLAY_SHAPES = ("ring", "brackets", "line")
+OVERLAY_SHAPES = ("ring", "brackets", "line", "waveform")
+WAVEFORM_BARS = 32  # default bar count; each bar is one slice of that frame's audio
+WAVEFORM_BARS_MAX = 128
 BACKDROP_TYPES = ("gradient", "solid")
 BACKDROP_PLACES = ("bottom", "top", "band")
 BACKDROP_STRENGTH = 0.8
@@ -521,6 +523,12 @@ class Overlay(Frozen):
     glow: RealNum = 0.0
     ease: str = "smooth"
     above_finish: bool = False
+    # Absent on the other shapes, and left out of model_dump, so a ring film's dump stays what it was.
+    source: str | None = Field(default=None, exclude_if=lambda v: v is None)
+    # `true` would otherwise become 1, a legal bar count.
+    bars: Annotated[int | None, BeforeValidator(_reject_bool)] = Field(
+        default=None, exclude_if=lambda v: v is None
+    )
 
 
 class ExpectSpan(Frozen):
@@ -2380,6 +2388,22 @@ def _finite_all(vals) -> bool:
     return all(isinstance(v, (int, float)) and math.isfinite(v) for v in vals)
 
 
+def _check_waveform_source(spec: Spec, ov: Overlay, path: str, errors: list[str]) -> None:
+    """`source` is `music` or an `audio.clips[].id`. No audio block is its own error."""
+    if spec.audio is None:
+        errors.append(_line(f"{path}.source", "no audio block", "add audio: with a track or clips"))
+        return
+    if ov.source is None or ov.source == "music":
+        return  # a missing source is already "required for waveform"
+    ids = sorted({c.id for c in spec.audio.clips if c.id})
+    if ov.source not in ids:
+        errors.append(_line(
+            f"{path}.source",
+            f"unknown source {ov.source!r}",
+            f"use music or a clip id (have: {', '.join(ids) or 'none'})",
+        ))
+
+
 def _validate_overlays(
     spec: Spec,
     markers: dict[str, float],
@@ -2395,9 +2419,15 @@ def _validate_overlays(
         "ring": {"center", "radius", "sweep"},
         "brackets": {"box", "arm", "draw"},
         "line": {"points", "draw"},
+        "waveform": {"box", "source", "bars"},
     }
-    needs = {"ring": ("center", "radius"), "brackets": ("box",), "line": ("points",)}
-    shape_fields = {"center", "radius", "sweep", "box", "arm", "points", "draw"}
+    needs = {
+        "ring": ("center", "radius"),
+        "brackets": ("box",),
+        "line": ("points",),
+        "waveform": ("box", "source"),
+    }
+    shape_fields = {"center", "radius", "sweep", "box", "arm", "points", "draw", "source", "bars"}
     for i, ov in enumerate(spec.overlays):
         p = f"overlays[{i}]"
         spans: dict[str, float] = {}
@@ -2414,11 +2444,6 @@ def _validate_overlays(
                 if d <= 0:
                     errors.append(_line(f"{p}.draw", "must be > 0", "use 0.3s, or omit draw"))
                 times[f"{p}.draw"] = d
-        if ov.shape == "waveform":
-            errors.append(
-                _line(f"{p}.shape", "waveform is not implemented yet", f"use {_choices(OVERLAY_SHAPES)}")
-            )
-            continue
         if ov.shape not in OVERLAY_SHAPES:
             errors.append(_line(f"{p}.shape", f"unknown {ov.shape!r}", f"use {_choices(OVERLAY_SHAPES)}"))
         else:
@@ -2428,6 +2453,14 @@ def _validate_overlays(
             for name in sorted(shape_fields - uses[ov.shape]):
                 if getattr(ov, name) is not None:
                     errors.append(_line(f"{p}.{name}", f"not used by {ov.shape}", f"remove {name}"))
+            if ov.shape == "waveform":
+                _check_waveform_source(spec, ov, p, errors)
+                if ov.bars is not None and not 1 <= ov.bars <= WAVEFORM_BARS_MAX:
+                    errors.append(_line(
+                        f"{p}.bars",
+                        f"must be from 1 to {WAVEFORM_BARS_MAX}, got {ov.bars}",
+                        f"use {WAVEFORM_BARS}",
+                    ))
         if ov.center is not None and not _finite_all(ov.center):
             errors.append(_line(f"{p}.center", "must be finite", "use [x, y] in design px"))
         if ov.radius is not None:

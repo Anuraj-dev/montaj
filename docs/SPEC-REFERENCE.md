@@ -182,17 +182,19 @@ Photo fields (`crop`, `focus`, swirl `center`, wall `at`) are source-image pixel
 - `tracks.*[].v` — number, required — value at this key.
 - `tracks.*[].ease` — easing name, default `linear` for dust and glow, `sine` for bars — the curve into this key.
 - `overlays` — list, default none — vector HUD shapes drawn over the picture, anti-aliased on the GPU. Graded with the picture, under text. Screen values are design px. A shape is drawn on frames `from` ≤ f < `to`.
-- `overlays[].shape` — `ring`, `brackets` or `line`, required. (`waveform` is rejected for now.)
+- `overlays[].shape` — `ring`, `brackets`, `line` or `waveform`, required.
 - `overlays[].from` — time expression, required — first frame the shape shows.
 - `overlays[].to` — time expression, required — end of the window; must be after `from`.
 - `overlays[].center` — `[x, y]`, required with ring — ring centre.
 - `overlays[].radius` — number or `[from, to]`, required with ring — ring radius; a pair animates over the window with `ease`.
 - `overlays[].sweep` — number or `[from, to]` degrees, 0–360, default `360` — arc extent, clockwise from 12 o'clock; a pair draws the arc on over the window. Ring only.
-- `overlays[].box` — `[x0, y0, x1, y1]`, required with brackets — the framed region; four corner marks, no edges between them.
+- `overlays[].box` — `[x0, y0, x1, y1]`, required with brackets and waveform — brackets: four corner marks, no edges. waveform: vertical bars fill the region, mirrored about its horizontal centre.
+- `overlays[].source` — clip id or `music`, required with waveform — an `audio.clips[].id` (every clip with that id, summed after gain and placement) or `music` (the track after `audio.edit`, before duck and loudnorm). Unknown source, or no `audio` block, is an error. `music` is the track even if a clip uses that id.
+- `overlays[].bars` — integer 1–128, default `32`, waveform only — how many vertical bars. Each bar is the peak of its slice of that frame, quantised to 1/255.
 - `overlays[].arm` — number, default `28` — bracket arm length. Brackets only; capped at half the box side.
 - `overlays[].points` — list of `[x, y]`, at least 2, required with line — a polyline.
 - `overlays[].draw` — duration, default none — brackets grow / the line draws on from its first point over this long from `from`, eased with `ease`. Omit it to show the shape fully the whole window. Brackets and line only.
-- `overlays[].width` — number, default `3` — stroke width.
+- `overlays[].width` — number, default `3` — stroke width in design px. On a waveform, the bar thickness, capped at the slot so bars stay inside the box.
 - `overlays[].color` — `#rrggbb`, default `#ffffff`.
 - `overlays[].opacity` — number 0–1, default `1`.
 - `overlays[].glow` — number ≥ 0, default `0` — soft halo around the stroke, screened under it. About `0.6` is a gentle neon.
