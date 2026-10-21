@@ -267,6 +267,39 @@ def test_spec_rejects_bad_audio(tmp_path: Path, audio: str, needle: str) -> None
     assert needle in str(exc.value)
 
 
+def _planned_srcs(tmp_path: Path) -> list[str]:
+    spec = load_spec(tmp_path / "montaj.yaml")
+    tl = resolve(spec, tmp_path)
+    plan = mix.plan_audio(tl.spec, tmp_path, tl.markers, 30, 120.0, 0.0, [])
+    return [c.src for c in plan.clips]
+
+
+def test_clip_src_bare_asset_name_resolves_from_assets(tmp_path: Path) -> None:
+    spec_path = write_spec(tmp_path, "  clips:\n    - {src: line, at: 1s}\n    - {src: line.wav, at: 2s}\n")
+    spec_path.write_text(spec_path.read_text().replace("assets: assets\n", "assets: media\n", 1))
+    write_wav(tmp_path / "media" / "line.wav", tone(0.4, 500.0))
+    want = str((tmp_path / "media" / "line.wav").resolve())
+    assert _planned_srcs(tmp_path) == [want, want]
+
+
+def test_clip_src_spec_relative_wins_over_assets(tmp_path: Path) -> None:
+    write_spec(tmp_path, "  clips:\n    - {src: tone, at: 1s}\n    - {src: tone.wav, at: 2s}\n")
+    write_wav(tmp_path / "tone.wav", tone(0.2, 440.0))
+    write_wav(tmp_path / "assets" / "tone.wav", tone(0.2, 880.0))
+    want = str((tmp_path / "tone.wav").resolve())
+    assert _planned_srcs(tmp_path) == [want, want]
+
+
+def test_clip_src_missing_names_the_assets_dir(tmp_path: Path) -> None:
+    write_spec(tmp_path, "  clips:\n    - {src: nope, at: 1s}\n")
+    with pytest.raises(SpecError) as exc:
+        load_spec(tmp_path / "montaj.yaml")
+    line = next(err for err in exc.value.errors if err.startswith("audio.clips[0].src:"))
+    assert "'nope' not found" in line
+    hint = line.split("(", 1)[1]
+    assert "spec file" in hint and str(tmp_path / "assets") in hint
+
+
 def test_beat_units_in_clips_need_a_grid(tmp_path: Path) -> None:
     spec_path = write_spec(tmp_path, "  clips:\n    - {src: sfx/whoosh, at: 2b}\n")
     spec_path.write_text(spec_path.read_text().replace("bpm: 120, ", ""))
