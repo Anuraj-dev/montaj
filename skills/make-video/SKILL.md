@@ -28,6 +28,11 @@ check and review round after that is a `montaj` command that costs no tokens. Ru
    `<project>/build/ingest-sheet.jpg` once. Recipes (`~/Anuraj-dev/montaj/recipes/`):
    - `birthday-short` — 28 s photo montage: cuts, fades and swirls on a beat grid, a photo wall, warm-film.
    - `birthday-song-film` — 165 s lyric film: text cards, subtitles, song markers, Ken Burns, golden-film.
+   - `tech-launch` — 14 s 16:9 product/app launch on screen recordings: HUD boot, four feature punch-ins, glitch
+     drop, logo hit, voice + SFX, cool-tech. For a product or app launch ask: product name and tagline, four features
+     (a chip word each), the recordings (`montaj ingest-rec`, with event logs if any), voice lines, 16:9 or 9:16.
+     See `recipes/tech-launch.md`. Without `--photos`, `montaj new <project> --recipe tech-launch` also makes
+     synthetic demo assets (log: `build/new-demo.log`), so it renders as-is.
    `assets/assets.json` lists each stem's `w`, `h`: a landscape photo loses its sides in 9:16, so frame it with
    `frame:` (polaroid card) or aim `focus` at the face. Done when you can name each stem's content in a few words.
 
