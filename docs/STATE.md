@@ -1,19 +1,16 @@
 # Montaj — State
-> Agent-native video harness: YAML spec in, finished video out, zero-token re-render/review · Last checkpoint: 2026-10-02
+> Agent-native video harness: YAML spec in, finished video out, zero-token re-render/review · Last checkpoint: 2026-10-21
 
 ## 🚧 In progress / next
-- M4.5 hardening is done (2026-10-02). Remaining from it:
-  1. Walls keep every print at full resolution while the wall is on screen (Sol HIGH, deferred): downsample prints
-     to wall resolution when the wall is built. Needed before 3–5 min films with 60–100-print walls.
-  2. A hold edit re-renders every later segment (FramePlans carry absolute frames; grain/leaks key on `f`).
-     Accepted for now: a 28 s final renders in ~40 s.
-- Then M5 (narrowed): one `custom` shot, pure `fn(t)`, source bytes in the segment hash.
-- Product goal (Raja, 2026-10-02): Claude Sonnet 5.5 / Opus 5.5 do the creative work (including composing their own
-  music in Python); the CLI absorbs every tedious step so their token cost stays minimal. Other models finishing a
-  video at all is fine. Keep the skill non-strict.
+- GitHub issues #1–19 all merged into `main` and pushed (2026-10-21); issues closed with their merge sha.
+- Open worktrees with uncommitted, unmerged work (keep): `montaj-wt/launch-film` (`feat/engine-launch-film`),
+  `montaj-wt/export-wa-audio` (`fix/export-whatsapp-audio-copy`). `montaj-wt/w10-grok47` is merged and clean;
+  remove it with `git worktree remove` + `git branch -d wip/w10-grok47`. 13 unmerged `wip/w*` branches stay local.
+- Backlog: lower-thirds are a title chip + subtitle (no bar/slide yet); wall prints at full res (downsample at build);
+  hold edit re-renders later segments; M5 `custom` shot; BENCHMARK.md entry for the issue batch.
 
 ## Status
-- M1–M4.5 on `main`, pushed to the public GitHub repo (origin/main). `wip/*` model branches stay local only.
+- M1–M4.5 and the issue batch pushed to origin/main. `wip/*` branches stay local only.
 - M1 engine (Vidyut parity on raw frames). M2: text cards, subtitles, Ken Burns, frame cards, morph, clips,
   golden-film, markers, music gen/analyze, two-pass loudnorm. M3: `review` page, `watch`, `taste`. M4: skill
   `skills/make-video/SKILL.md` linked into `~/.claude/skills` and `~/.codex/skills`.
@@ -30,16 +27,18 @@
   - `check` no longer flags a morph's eased ends as frozen; `sheet --at 4s` accepts seconds.
 - Composed-music benchmark: Sonnet 5.5 0.27M input-eq / 19 turns / $0.65; Opus 5.5 0.31M / 23 turns / $1.27; both
   `OK check` with music they wrote. Films in `~/Anuraj-dev/montaj-projects/arshiya/{sonnet,opus}-5.5-composed/`.
-- Tests: `uv run pytest -q` 327 passed (288 CPU + 39 GPU).
+- Tests (main at `1deaf74`): CPU 641 passed, GPU 48 passed (run GPU serially, 8 GB).
 
 ## Architecture map
 - Contracts -> `docs/specs/001-m1-engine.md`, `002-m2-text-music.md`, `003-m3-review-loop.md`
 - Spec fields -> `docs/SPEC-REFERENCE.md` · recipes -> `recipes/birthday-short.yaml`, `birthday-song-film.yaml`,
   `recipes/music/compose-example.py`
-- spec/timeline/hash -> `montaj/spec.py` (`layout_shots`, beat grid), `timeline.py`, `project.py`
+- spec/timeline/hash -> `montaj/spec.py` (`layout_shots`, beat grid), `timeline.py` (waveform levels,
+  `mux_fade`), `project.py`
 - GPU renderer -> `montaj/render/` (`frame.py` Renderer + LRUs; `text.py` Chromium rasters; `shots.py`; `golden.py`;
   `clip.py` forward readers)
-- pipeline/cache -> `montaj/pipeline.py` · audio -> `montaj/audio/` (`compose.py`, `analyze.py`), `gpulock.py`,
+- pipeline/cache -> `montaj/pipeline.py` · audio -> `montaj/audio/` (`mix.py` multitrack + `source_window`,
+  `compose.py`, `analyze.py`), `gpulock.py`,
   `config.py`
 - review loop -> `montaj/review/`, `watch.py`, `taste.py` · CLI -> `montaj/cli.py` · skill -> `skills/make-video/`
 
@@ -54,9 +53,14 @@
 - One engine: Python + torch GPU compositor; film2.py / film.html are parity oracles.
 - Segment-hash cache: renderer reads only FramePlan + shots + assets, so one edit re-renders its segments.
 - Engine built in waves by external models, scored in `docs/BENCHMARK.md`; Sol reviews.
-- Commit straight to `main` (Raja's call: no CI); one concern per commit.
+- Issue work: one worktree `~/Anuraj-dev/montaj-wt/g47-i<N>` per issue, Sol review, Sonnet fixes, `--no-ff` local merge.
 
 ## Gotchas
+- Leave alone: the `launch-film` and `export-wa-audio` worktrees (uncommitted work). Workers never `git stash`.
+- Waveform overlay bars follow the heard mix: post-edit/duck stems, the mix peak ceiling, and mux's `afade`
+  (`timeline.mux_fade`, sample-exact vs ffmpeg). Loudnorm (one constant gain) is deliberately not mirrored.
+- Hash compatibility: new optional fields use `Field(default=None, exclude_if=lambda v: v is None)` or
+  `project._HASH_OMIT_NONE/_EMPTY`; existing films' segment hashes must not change.
 - Model routing: grok-4.6 tight-spec logic, grok-4.7 render work, gpt-5.6-luna xhigh fast-tier implementer
   (CLI/audio), Sol (gpt-6.1-sol) medium review. Fix rounds resume the worker (`grok -r <id>`); a resumed grok
   session keeps its old cwd, so name the worktree path in the prompt and check the diff landed there.
