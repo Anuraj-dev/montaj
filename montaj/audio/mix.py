@@ -5,7 +5,7 @@
 the plan and the input bytes; `encode.mux` then treats that wav exactly as it treats `audio.track`.
 A spec without any of the three never reaches this module at render time (`MixPlan.active`).
 
-`source_window` slices one source's stem, built the way `mix_audio` builds it, for waveform levels.
+`source_window` slices one source's part of that mix (same code, same duck and ceiling) for waveform levels.
 Resolve stores those levels; the renderer does not call into here.
 """
 from __future__ import annotations
@@ -583,33 +583,6 @@ def band_levels(samples: np.ndarray, bars: int) -> tuple[float, ...]:
     return tuple(row)
 
 
-def source_window(plan: MixPlan, source: str, s0: int, s1: int, *, cache: dict | None = None) -> np.ndarray:
-    """Stereo film-timeline samples `[s0, s1)` of one waveform source, zero outside it.
-
-    `music` is the track after `audio.edit`; any other name is every placement with that id,
-    summed. Both are built by the same `decode`/`apply_edits`/`_render_clip` calls `mix_audio`
-    makes, so the bars follow the soundtrack exactly. Only the named files are decoded, each
-    once per `cache` (the caller's dict, not module state).
-    """
-    if s1 < s0:
-        raise ValueError(f"source window {s0}:{s1} is backwards")
-    cache = {} if cache is None else cache
-    key = ("stem", source)
-    if key not in cache:
-        if source == "music":
-            if (plan.track, 0) not in cache:
-                cache[(plan.track, 0)] = decode(plan.track, 0)
-            music = cache[(plan.track, 0)]
-            cache[key] = apply_edits(music, plan.edits) if plan.edits else music
-        else:
-            placed = [_render_clip(c, cache, None) for c in plan.clips if c.id == source]
-            stem = np.zeros((max((at + len(x) for at, x in placed), default=0), 2), np.float32)
-            for at, x in placed:
-                stem[at:at + len(x)] += x
-            cache[key] = stem
-    return _slice(cache[key], s0, s1)
-
-
 def duck_gain(source: np.ndarray, plan: DuckPlan, n: int) -> np.ndarray:
     """Per-sample linear music gain: `depth` while `source` speaks, eased by attack and release.
 
@@ -635,11 +608,12 @@ def duck_gain(source: np.ndarray, plan: DuckPlan, n: int) -> np.ndarray:
     return 10 ** (plan.depth_db * amount / 20)
 
 
-def mix_audio(plan: MixPlan, *, log: Path | None = None) -> tuple[np.ndarray, MixStats]:
-    music = decode(plan.track, 0, log=log)
-    if plan.edits:
-        music = apply_edits(music, plan.edits)
-    cache: dict = {}
+def _mix_parts(plan: MixPlan, cache: dict, log: Path | None) -> tuple[np.ndarray, list, float]:
+    """`(music bed after edits and duck, [(clip, start, samples)], duck dB)`: what `mix_audio` sums."""
+    key = (plan.track, 0)
+    if key not in cache:
+        cache[key] = decode(plan.track, 0, log=log)
+    music = apply_edits(cache[key], plan.edits) if plan.edits else cache[key]
     placed = [(c, *_render_clip(c, cache, log)) for c in plan.clips]
     total = max([len(music)] + [s + len(x) for _, s, x in placed])
     bed = np.zeros((total, 2), dtype=np.float32)
@@ -653,6 +627,11 @@ def mix_audio(plan: MixPlan, *, log: Path | None = None) -> tuple[np.ndarray, Mi
         g = duck_gain(src, plan.duck, total).astype(np.float32)
         bed *= g[:, None]
         duck_db = float(20 * np.log10(g.min())) if len(g) else 0.0
+    return bed, placed, duck_db
+
+
+def mix_audio(plan: MixPlan, *, log: Path | None = None) -> tuple[np.ndarray, MixStats]:
+    bed, placed, duck_db = _mix_parts(plan, {}, log)
     for _, s, x in placed:
         bed[s : s + len(x)] += x
     peak = float(np.max(np.abs(bed))) if len(bed) else 0.0
@@ -660,7 +639,44 @@ def mix_audio(plan: MixPlan, *, log: Path | None = None) -> tuple[np.ndarray, Mi
     if clipped:
         bed *= np.float32(PEAK_CEILING / peak)
     peak_db = 20 * math.log10(peak) if peak > 0 else -120.0
-    return bed, MixStats(total / SR, peak_db, clipped, len(placed), duck_db)
+    return bed, MixStats(len(bed) / SR, peak_db, clipped, len(placed), duck_db)
+
+
+def source_window(plan: MixPlan, source: str, s0: int, s1: int, *, cache: dict | None = None) -> np.ndarray:
+    """Stereo film-timeline samples `[s0, s1)` of one waveform source as it sits in the mix.
+
+    `music` is the track after `audio.edit` and the duck; any other name is every placement
+    with that id, summed. Both come from `_mix_parts` and take the mix's peak-ceiling scale, so
+    the bars follow what `mix_audio` writes. A plan that is not `active` skips the mixer at
+    render time, so it gets no scale. Loudnorm and `audio.fade_out` happen later, at mux.
+    `cache` is the caller's dict, not module state.
+    """
+    if s1 < s0:
+        raise ValueError(f"source window {s0}:{s1} is backwards")
+    cache = {} if cache is None else cache
+    if "parts" not in cache:
+        bed, placed, _ = _mix_parts(plan, cache, None)
+        scale = 1.0
+        if plan.active:
+            full = bed.copy()
+            for _, s, x in placed:
+                full[s : s + len(x)] += x
+            peak = float(np.max(np.abs(full))) if len(full) else 0.0
+            if peak > PEAK_CEILING:
+                scale = PEAK_CEILING / peak
+        cache["parts"] = (bed, placed, np.float32(scale))
+    bed, placed, scale = cache["parts"]
+    key = ("stem", source)
+    if key not in cache:
+        if source == "music":
+            stem = bed
+        else:
+            stem = np.zeros_like(bed)
+            for c, s, x in placed:
+                if c.id == source:
+                    stem[s : s + len(x)] += x
+        cache[key] = stem * scale
+    return _slice(cache[key], s0, s1)
 
 
 def plan_hash(plan: MixPlan) -> str:

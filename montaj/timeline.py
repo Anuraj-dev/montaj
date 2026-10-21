@@ -638,19 +638,29 @@ def _waveform_levels(
     markers: dict[str, float],
     bpm: float | None,
     beat0: float,
+    n_frames: int,
 ) -> list[tuple[tuple[float, ...], ...] | None]:
-    """Per-frame bar peaks for each waveform. None for every other shape.
+    """Per-frame bar peaks for each waveform, as heard. None for every other shape.
 
     One local decode cache for this resolve. Nothing is stored on the module.
     """
-    from montaj.audio.mix import band_levels, frame_sample, plan_audio, source_window
+    import numpy as np
+
+    from montaj.audio.mix import SR, band_levels, frame_sample, plan_audio, source_window
     from montaj.encode import EncodeError
+    from montaj.spec import _dur_frames
 
     errors: list[str] = []
     plan = plan_audio(spec, spec_dir, markers, spec.video.fps, bpm, beat0, errors)
     if plan is None or errors:
         raise SpecError(errors or [_line("audio", "no audio block", "add audio: with a track or clips")])
     fps = spec.video.fps
+    # mux fades the film's last `audio.fade_out` linearly to zero (afade after loudnorm); so do the bars.
+    end = frame_sample(n_frames, fps) if fps > 0 else 0
+    fade_n = 0
+    if spec.audio is not None and spec.audio.fade_out and fps > 0:
+        ff = _dur_frames(spec.audio.fade_out, fps, bpm, "audio.fade_out", [])
+        fade_n = 0 if ff is None else min(end, round(ff / fps * SR))
     cache: dict = {}
     out: list[tuple[tuple[float, ...], ...] | None] = []
     for i, ov in enumerate(spec.overlays):
@@ -669,6 +679,9 @@ def _waveform_levels(
             audio = source_window(plan, ov.source, s0, s1, cache=cache)
         except EncodeError as exc:
             raise SpecError([_line(f"{p}.source", str(exc).splitlines()[0], "check the audio file")]) from exc
+        if fade_n > 0 and s1 > end - fade_n:
+            gain = np.clip((end - np.arange(s0, s1)) / fade_n, 0.0, 1.0).astype(np.float32)
+            audio = audio * gain[:, None]
         rows = []
         for f in frames:
             a = frame_sample(f, fps) - s0
@@ -685,9 +698,10 @@ def _resolve_overlays(
     markers: dict[str, float],
     bpm: float | None,
     beat0: float,
+    n_frames: int,
 ) -> list[ResolvedOverlay]:
     levels = (
-        _waveform_levels(spec, times, spec_dir, markers, bpm, beat0)
+        _waveform_levels(spec, times, spec_dir, markers, bpm, beat0, n_frames)
         if any(ov.shape == "waveform" for ov in spec.overlays)
         else [None] * len(spec.overlays)
     )
@@ -875,7 +889,7 @@ def resolve(spec: Spec, spec_dir: Path) -> Timeline:
         markers=markers,
         texts=texts,
         subs=subs,
-        overlays=_resolve_overlays(spec, times, spec_dir, markers, bpm, beat0),
+        overlays=_resolve_overlays(spec, times, spec_dir, markers, bpm, beat0, n_frames),
         _hits=hits,
         _splits=splits,
         _bursts=bursts,

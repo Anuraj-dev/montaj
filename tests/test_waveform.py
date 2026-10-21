@@ -110,13 +110,14 @@ def test_levels_follow_a_sine_silence_and_loudness(tmp_path: Path) -> None:
         assert tl.overlays[0].levels is not None
         return tl.overlays[0].levels
 
-    loud, again, quiet, silent = rows(0.8, "loud"), rows(0.8, "again"), rows(0.2, "quiet"), None
+    # 0.7 voice + 0.2 music stays under the mix ceiling, so the bars read the sine's own peak.
+    loud, again, quiet, silent = rows(0.7, "loud"), rows(0.7, "again"), rows(0.2, "quiet"), None
     assert loud == again  # same samples, same quantised rows
     # Frame 1 is past the 15 ms placement fade. One 30 Hz cycle fills the frame, so the
     # bars are not a flat line and the tallest one is the sine's peak.
     assert max(loud[1]) > min(loud[1])
     assert max(loud[1]) > max(quiet[1]) > 0.0
-    assert max(loud[1]) == pytest.approx(0.8, abs=2 / 255)
+    assert max(loud[1]) == pytest.approx(0.7, abs=2 / 255)
 
     d = tmp_path / "silent"
     d.mkdir()
@@ -269,10 +270,10 @@ def test_changing_the_source_audio_changes_the_hash_and_the_frames(tmp_path: Pat
 
 @needs_ffmpeg
 def test_source_window_matches_placement_and_edits(tmp_path: Path) -> None:
-    from montaj.audio.mix import source_window
+    from montaj.audio.mix import mix_audio, source_window
 
-    music = _tone(tmp_path / "m.wav", 2.0, 80.0, 0.55)
-    voice = _tone(tmp_path / "v.wav", 1.0, 440.0, 0.4)
+    music = _tone(tmp_path / "m.wav", 2.0, 80.0, 0.2)
+    voice = _tone(tmp_path / "v.wav", 1.0, 440.0, 0.15)
     full_music = decode(str(music))
     plan = MixPlan(
         str(music),
@@ -280,9 +281,10 @@ def test_source_window_matches_placement_and_edits(tmp_path: Path) -> None:
         clips=(
             Placed("voice", str(voice), 0, 0.0, None, 0.2, -6.0, -0.5),
             Placed("voice", str(voice), 0, 0.1, 0.4, 0.5, 3.0, 0.0),
-            Placed("blip", "synth:tick", 0, 0.0, None, 0.0, 0.0, 1.0),
+            Placed("blip", "synth:tick", 0, 0.0, None, 0.0, -12.0, 1.0),
         ),
     )
+    assert not mix_audio(plan)[1].clipped  # no ceiling scale: the windows are the raw stems
     edited = apply_edits(full_music, plan.edits)
     s0, s1 = 10_000, min(len(edited), 60_000)
     got = source_window(plan, "music", s0, s1)
@@ -317,7 +319,7 @@ def _mixer_sum(plan: MixPlan, source: str, n: int) -> np.ndarray:
 @needs_ffmpeg
 def test_compressed_sources_match_the_mixer_to_the_last_sample(tmp_path: Path) -> None:
     """Vorbis pads its container duration; the bars must still end where the mixed clip ends."""
-    from montaj.audio.mix import source_window
+    from montaj.audio.mix import mix_audio, source_window
 
     wav = _tone(tmp_path / "v.wav", 1.0, 440.0, 0.5)
     ogg = tmp_path / "v.ogg"
@@ -325,13 +327,54 @@ def test_compressed_sources_match_the_mixer_to_the_last_sample(tmp_path: Path) -
     plan = MixPlan(
         str(ogg),
         edits=(EditOp("cut", 0.3, 0.5),),
-        clips=(Placed("voice", str(ogg), 0, 0.0, None, 0.25, -3.0, 0.3),),  # `out` omitted
+        clips=(Placed("voice", str(ogg), 0, 0.0, None, 0.25, -9.0, 0.3),),  # `out` omitted
     )
+    assert not mix_audio(plan)[1].clipped  # no ceiling scale: the windows are the raw stems
     n = 2 * SR
     assert np.array_equal(source_window(plan, "voice", 0, n), _mixer_sum(plan, "voice", n))
     edited = apply_edits(decode(str(ogg)), plan.edits)
     got = source_window(plan, "music", 0, len(edited) + 100)
     assert np.array_equal(got[:len(edited)], edited) and not got[len(edited):].any()
+
+
+@needs_ffmpeg
+def test_sources_sum_to_the_mix_with_duck_and_ceiling(tmp_path: Path) -> None:
+    """Every source's window, added up, is exactly what `mix_audio` writes: duck and peak scale included."""
+    from montaj.audio.mix import DuckPlan, mix_audio, source_window
+
+    music = _tone(tmp_path / "m.wav", 2.0, 80.0, 0.9)
+    voice = _tone(tmp_path / "v.wav", 0.6, 440.0, 0.8)
+    plan = MixPlan(
+        str(music),
+        edits=(EditOp("cut", 0.4, 0.7),),
+        clips=(Placed("voice", str(voice), 0, 0.0, None, 0.3, 0.0, 0.0),),
+        duck=DuckPlan(("voice",), -12.0, 0.02, 0.2),
+    )
+    mixed, stats = mix_audio(plan)
+    assert stats.clipped  # the ceiling scale is exercised
+    cache: dict = {}
+    music_w = source_window(plan, "music", 0, len(mixed), cache=cache)
+    voice_w = source_window(plan, "voice", 0, len(mixed), cache=cache)
+    assert np.allclose(music_w + voice_w, mixed, atol=1e-6)
+    under = slice(round(0.4 * SR), round(0.8 * SR))  # voice speaking, duck fully down
+    assert np.abs(music_w[under]).max() < 0.35 * np.abs(music_w[: round(0.2 * SR)]).max()
+
+
+@needs_ffmpeg
+def test_bars_follow_the_audio_fade_out(tmp_path: Path) -> None:
+    def rows(fade: str, name: str):
+        d = tmp_path / name
+        d.mkdir()
+        p = _wave(d, amp=0.8)
+        text = p.read_text().replace("from: 0f, to: 6f", "from: 9f, to: 15f")
+        p.write_text(text.replace("  track: music.wav\n", f"  track: music.wav\n  fade_out: {fade}\n"))
+        return resolve(load_spec(p), d).overlays[0].levels
+
+    plain, faded = rows("0s", "plain"), rows("6f", "faded")  # the fade covers frames 9..15
+    assert len(plain) == len(faded) == 6
+    assert all(max(f) <= max(q) for f, q in zip(faded, plain))
+    assert max(faded[-1]) < 0.25 * max(plain[-1])  # the last frame is near silent
+    assert max(faded[1]) > 0.7 * max(plain[1])  # early in the fade, mostly intact
 
 
 # --- raster -------------------------------------------------------------------
