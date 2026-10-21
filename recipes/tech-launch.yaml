@@ -1,0 +1,120 @@
+# 16:9 tech/product launch film, ~14 s, 120 BPM (1 beat = 0.5 s, 28 beats). Integration recipe for text, looks,
+# clip camera/speed/freeze, transitions, HUD overlays, audio clips/duck/edit and check.expect.
+#   Boot   0b-4b    dark ground, HUD ring + brackets, typewriter boot line, voice 1
+#   Build  4b-16b   four 3b feature shots (screen recordings), punch-in + chip caption, whoosh + tick on each cut
+#   Drop   16b-21b  riser then boom; 2b/2b/1b glitch + zoom cuts, one speed punch and one freeze
+#   Logo   21b-28b  boom, wordmark + tagline, voice 2, fade to black
+# Demo assets (no private footage): montaj new <project> --recipe tech-launch. Retargeting: recipes/tech-launch.md.
+video: {size: 1920x1080, fps: 60, bpm: 120, look: cool-tech, background: "#05080f", outro: {type: fade, dur: 30f}}
+assets: assets
+markers: {drop: 16b, logo: 21b}
+shots:
+  # Boot: events in the clip are not needed; the ground is a dark blank.
+  - {blank: true, hold: 4b}
+  # Build: slot A..D. clip, at_event (or clip_in), camera box and the chip text are the only edits for new footage.
+  - clip: ui1
+    at_event: {kind: click, target: voice}
+    pre: 0.3s
+    hold: 3b
+    camera: [{t: 0f, zoom: 1}, {t: 0.9s, zoom: 1.35, focus: [1330, 330], ease: cubic}]
+    in: {type: dip, dur: 8f}
+  - clip: ui2
+    at_event: {kind: click, target: themes}
+    pre: 0.3s
+    hold: 3b
+    camera: [{t: 0f, zoom: 1}, {t: 0.9s, zoom: 1.4, focus: [560, 620], ease: cubic}]
+    in: {type: push, dur: 8f}
+  - clip: ui3
+    at_event: {kind: click, target: search}
+    pre: 0.3s
+    hold: 3b
+    crop: [0, 0, 1920, 1080]
+    camera: [{t: 0f, zoom: 1.1, focus: [960, 300]}, {t: 1.0s, zoom: 1.5, focus: [960, 260], ease: cubic}]
+    in: {type: push, dur: 8f, axis: y}
+  - clip: ui4
+    at_event: {kind: click, target: sync}
+    pre: 0.3s
+    hold: 3b
+    camera: [{t: 0f, zoom: 1}, {t: 0.9s, zoom: 1.3, focus: [1450, 760], ease: cubic}]
+    in: {type: push, dur: 8f}
+  # Drop: fast cuts on the beat.
+  - clip: ui1
+    clip_in: 5s
+    hold: 2b
+    speed: 1.5
+    in: {type: glitch, dur: 8f, strength: 1.5, seed: 3}
+  - clip: ui2
+    clip_in: 5s
+    hold: 2b
+    freeze: 0.5s
+    camera: [{t: 0f, zoom: 1.5, focus: [560, 620]}]
+    in: {type: zoom, dur: 8f, strength: 1.5}
+  - clip: ui3
+    clip_in: 5s
+    hold: 1b
+    in: {type: glitch, dur: 6f, strength: 2, seed: 7}
+  # Logo
+  - {blank: true, hold: 7b, in: {type: dip, dur: 6f, color: "#ffffff"}}
+overlays:
+  # Boot HUD: ring draws on, brackets close in, then fade as the first feature arrives.
+  - {shape: ring, from: 0s, to: 2s, center: [540, 220], radius: [30, 120], sweep: [0, 360], width: 3, color: "#5de0ff", glow: 0.6, ease: cubic}
+  - {shape: brackets, from: 0.3s, to: 2s, box: [300, 120, 780, 380], arm: 30, draw: 0.7s, width: 3, color: "#5de0ff", opacity: 0.8}
+  - {shape: line, from: 0.5s, to: 2s, points: [[300, 420], [780, 420]], draw: 0.8s, width: 2, color: "#5de0ff", opacity: 0.6}
+  # Build: tracking brackets over the punched-in UI region of each feature shot.
+  - {shape: brackets, from: 2.3s, to: 3.5s, box: [380, 120, 700, 300], arm: 22, draw: 0.3s, width: 3, color: "#5de0ff", glow: 0.4}
+  - {shape: brackets, from: 3.8s, to: 5s, box: [250, 200, 560, 420], arm: 22, draw: 0.3s, width: 3, color: "#5de0ff", glow: 0.4}
+  - {shape: brackets, from: 5.3s, to: 6.5s, box: [330, 70, 750, 210], arm: 22, draw: 0.3s, width: 3, color: "#5de0ff", glow: 0.4}
+  - {shape: brackets, from: 6.8s, to: 8s, box: [560, 330, 900, 530], arm: 22, draw: 0.3s, width: 3, color: "#5de0ff", glow: 0.4}
+  # Logo: ring around the mark and an underline.
+  - {shape: ring, from: logo, to: 14s, center: [540, 300], radius: [100, 290], sweep: [0, 360], width: 2, color: "#5de0ff", glow: 0.5, ease: outc}
+  - {shape: line, from: logo+0.4s, to: 14s, points: [[380, 370], [700, 370]], draw: 0.6s, width: 2, color: "#5de0ff"}
+text:
+  - from: 0s
+    to: 2s
+    fade_out: 0.3s
+    lines:
+      - {text: "> booting lumen core ... ok", style: mono, size: 34, color: "#5de0ff", y: 440, at: 0.4s, reveal: type, stagger: 0.04s, cursor: true}
+  - from: 2s
+    to: 3.5s
+    fade_in: 0.15s
+    fade_out: 0.2s
+    lines: [{text: Voice, style: sans, weight: 600, size: 40, y: 500, at: 2.1s, box: chip, dot: "#5de0ff", align: left, reveal: rise, dur: 0.3s}]
+  - from: 3.5s
+    to: 5s
+    fade_in: 0.15s
+    fade_out: 0.2s
+    lines: [{text: Themes, style: sans, weight: 600, size: 40, y: 500, at: 3.6s, box: chip, dot: "#5de0ff", align: left, reveal: rise, dur: 0.3s}]
+  - from: 5s
+    to: 6.5s
+    fade_in: 0.15s
+    fade_out: 0.2s
+    lines: [{text: Search, style: sans, weight: 600, size: 40, y: 500, at: 5.1s, box: chip, dot: "#5de0ff", align: left, reveal: rise, dur: 0.3s}]
+  - from: 6.5s
+    to: 8s
+    fade_in: 0.15s
+    fade_out: 0.2s
+    lines: [{text: Sync, style: sans, weight: 600, size: 40, y: 500, at: 6.6s, box: chip, dot: "#5de0ff", align: left, reveal: rise, dur: 0.3s}]
+  - from: logo
+    to: 14s
+    fade_out: 0.4s
+    lines:
+      - {text: LUMEN, style: sans, weight: 700, size: 110, tracking: 0.12, y: 235, at: logo+0.1s, by: char, stagger: 0.05s, dur: 0.35s}
+      - {text: "Everything, in one flow.", style: sans, weight: 400, size: 40, y: 400, at: logo+0.9s}
+audio:
+  track: music/song.wav
+  fade_out: 0.5s
+  edit:
+    - {loop: [16b, 20b], times: 2}
+  clips:
+    - {src: assets/voice1, at: 0.9s, id: voice, gain: -6dB}
+    - {src: assets/voice2, at: logo+0.9s, id: voice, gain: -6dB}
+    - {src: "synth:whoosh", at: [4b, 7b, 10b, 13b], offset: -0.16s, gain: -14dB}
+    - {src: "synth:tick", at: [4b, 7b, 10b, 13b], gain: -16dB}
+    - {src: "synth:riser", at: 12b, gain: -14dB}
+    - {src: "synth:glitch", at: [drop, 18b, 20b], gain: -16dB}
+    - {src: "synth:boom", at: [drop, logo], gain: -10dB}
+  duck: {under: [voice], depth: -8dB}
+check:
+  expect:
+    - {frozen: [9.5s, 10s], why: "freeze on the drop shot"}
+    - {black: [13.7s, 14s], why: "fade to black"}
