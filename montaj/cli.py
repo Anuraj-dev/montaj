@@ -8,7 +8,9 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
 import shutil
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -65,7 +67,7 @@ def _parser() -> argparse.ArgumentParser:
     new = sub.add_parser("new")
     new.add_argument("dir")
     new.add_argument("--recipe", required=True)
-    new.add_argument("--photos", required=True)
+    new.add_argument("--photos", default=None)
 
     ing = sub.add_parser("ingest")
     ing.add_argument("--photos", required=True)
@@ -256,14 +258,34 @@ def _cmd_new(ns: argparse.Namespace, root: Path) -> list[str]:
     spec_out = dest / "montaj.yaml"
     if spec_out.exists():
         raise FileExistsError(f"{spec_out.as_posix()} exists: refusing to overwrite")
-    photos = _at(root, ns.photos)
     src = _recipe(ns.recipe)
+    demo = src.with_name(f"{src.stem}-demo.sh")
+    if ns.photos is None and not demo.is_file():
+        return [f"ERR new: recipe {src.stem!r} ships no demo assets: pass --photos <folder>"]
     dest.mkdir(parents=True, exist_ok=True)
     shutil.copyfile(src, dest / "montaj.yaml")
+    if ns.photos is None:
+        return _recipe_demo(demo, dest)
     assets = _assets_dir(dest, _assets_rel(src))
-    ingest(photos, assets, sheet_path=dest / "build" / "ingest-sheet.jpg")
+    ingest(_at(root, ns.photos), assets, sheet_path=dest / "build" / "ingest-sheet.jpg")
     shown = dest.as_posix()
     return [f"OK {shown}/montaj.yaml sheet={shown}/build/ingest-sheet.jpg"]
+
+
+def _recipe_demo(demo: Path, dest: Path) -> list[str]:
+    """Run ``recipes/<recipe>-demo.sh <dest>``: a recipe's generated stand-in assets, so it renders as-is."""
+    log = dest / "build" / "new-demo.log"
+    log.parent.mkdir(parents=True, exist_ok=True)
+    env = dict(os.environ)
+    exe = Path(sys.executable).with_name("montaj")
+    if exe.is_file():
+        env.setdefault("MONTAJ", str(exe))
+    with log.open("w") as fh:
+        rc = subprocess.run(["bash", str(demo), str(dest)], stdout=fh, stderr=subprocess.STDOUT, env=env).returncode
+    shown = dest.as_posix()
+    if rc:
+        return [f"ERR new: {demo.name} exited {rc}: see {log.as_posix()}"]
+    return [f"OK {shown}/montaj.yaml demo={demo.name} log={log.as_posix()}"]
 
 
 def _cmd_ingest_rec(ns: argparse.Namespace, root: Path) -> list[str]:
