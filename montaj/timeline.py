@@ -626,6 +626,19 @@ def waveform_frames(from_: float, to: float) -> range:
     return range(start, end)
 
 
+def mux_fade(n_frames: int, fps: int, fade_frames: float) -> tuple[int, int]:
+    """`(first sample, samples)` of the `afade` `encode.mux` writes for `audio.fade_out`.
+
+    mux prints `st` and `d` with 6 decimals; FFmpeg rescales microseconds to samples, rounding half up.
+    """
+    from montaj.audio.mix import SR
+
+    dur, fade = n_frames / fps, fade_frames / fps
+    st, d = max(0.0, dur - fade), min(fade, dur)
+    a, n = ((round(float(f"{v:.6f}") * 1_000_000) * SR + 500_000) // 1_000_000 for v in (st, d))
+    return a, n
+
+
 def waveform_index(from_: float, f: float) -> int:
     """Row of `levels` for frame `f`. Negative when `f` is before the window."""
     return int(math.floor(f + 1e-6)) - math.ceil(from_ - 1e-9)
@@ -646,7 +659,7 @@ def _waveform_levels(
     """
     import numpy as np
 
-    from montaj.audio.mix import SR, band_levels, frame_sample, plan_audio, source_window
+    from montaj.audio.mix import band_levels, frame_sample, plan_audio, source_window
     from montaj.encode import EncodeError
     from montaj.spec import _dur_frames
 
@@ -656,11 +669,11 @@ def _waveform_levels(
         raise SpecError(errors or [_line("audio", "no audio block", "add audio: with a track or clips")])
     fps = spec.video.fps
     # mux fades the film's last `audio.fade_out` linearly to zero (afade after loudnorm); so do the bars.
-    end = frame_sample(n_frames, fps) if fps > 0 else 0
-    fade_n = 0
+    fade_a, fade_n = 0, 0
     if spec.audio is not None and spec.audio.fade_out and fps > 0:
         ff = _dur_frames(spec.audio.fade_out, fps, bpm, "audio.fade_out", [])
-        fade_n = 0 if ff is None else min(end, round(ff / fps * SR))
+        if ff:
+            fade_a, fade_n = mux_fade(n_frames, fps, ff)
     cache: dict = {}
     out: list[tuple[tuple[float, ...], ...] | None] = []
     for i, ov in enumerate(spec.overlays):
@@ -679,8 +692,8 @@ def _waveform_levels(
             audio = source_window(plan, ov.source, s0, s1, cache=cache)
         except EncodeError as exc:
             raise SpecError([_line(f"{p}.source", str(exc).splitlines()[0], "check the audio file")]) from exc
-        if fade_n > 0 and s1 > end - fade_n:
-            gain = np.clip((end - np.arange(s0, s1)) / fade_n, 0.0, 1.0).astype(np.float32)
+        if fade_n > 0 and s1 > fade_a:
+            gain = np.clip((fade_a + fade_n - np.arange(s0, s1)) / fade_n, 0.0, 1.0).astype(np.float32)
             audio = audio * gain[:, None]
         rows = []
         for f in frames:

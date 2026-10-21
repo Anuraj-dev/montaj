@@ -377,6 +377,27 @@ def test_bars_follow_the_audio_fade_out(tmp_path: Path) -> None:
     assert max(faded[1]) > 0.7 * max(plain[1])  # early in the fade, mostly intact
 
 
+@needs_ffmpeg
+@pytest.mark.parametrize("n_frames,fps,bpm,fade", [(12, 29, 153.0, "1b"), (450, 30, None, "1.5s"), (10, 30, None, "2s")])
+def test_bar_fade_matches_ffmpeg_afade_per_sample(tmp_path: Path, n_frames, fps, bpm, fade) -> None:
+    """The bars' fade gain is the one mux's `afade` applies, sample for sample (the last case outlasts the film)."""
+    from montaj.spec import _dur_frames
+    from montaj.timeline import mux_fade
+
+    fade_s = _dur_frames(fade, fps, bpm, "audio.fade_out", []) / fps
+    dur = n_frames / fps
+    n = round(dur * SR) + 200
+    ones = tmp_path / "ones.wav"
+    write_wav(ones, np.full((n, 2), 0.5, np.float32))
+    # The same filter string encode.mux builds.
+    af = f"afade=t=out:st={max(0.0, dur - fade_s):.6f}:d={min(fade_s, dur):.6f}"
+    raw = subprocess.check_output(["ffmpeg", "-v", "error", "-i", str(ones), "-af", af, "-f", "f32le", "-"])
+    want = np.frombuffer(raw, "<f4")[::2][:n] / 0.5
+    a, m = mux_fade(n_frames, fps, fade_s * fps)
+    got = np.clip((a + m - np.arange(n)) / m, 0.0, 1.0)
+    assert np.allclose(got, want, atol=1e-6)
+
+
 # --- raster -------------------------------------------------------------------
 
 
