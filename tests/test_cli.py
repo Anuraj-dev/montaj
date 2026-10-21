@@ -807,3 +807,27 @@ def test_check_overrides_reads_expect_and_loudness(tmp_path: Path) -> None:
     expects, i, tol = _check_overrides(proj)
     assert [(e.kind, e.span, e.why) for e in expects] == [("black", (0.0, 2.0), "intro")]
     assert (i, tol) == (-16.0, 2.0)
+
+
+def test_new_without_photos_runs_recipe_demo(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    recipes = tmp_path / "recipes"
+    recipes.mkdir()
+    (recipes / "demo.yaml").write_text("assets: assets\n")
+    (recipes / "demo-demo.sh").write_text('mkdir -p "$1/assets" && echo made > "$1/assets/x.txt"\n')
+    (recipes / "plain.yaml").write_text("assets: assets\n")
+    (recipes / "bad.yaml").write_text("assets: assets\n")
+    (recipes / "bad-demo.sh").write_text("exit 3\n")
+    monkeypatch.setattr("montaj.cli.RECIPES", recipes)
+    monkeypatch.chdir(tmp_path)
+
+    code, out, err = _run(["new", "a", "--recipe", "demo"], capsys)
+    assert code == 0 and err == "", out
+    assert "demo=demo-demo.sh" in out and (tmp_path / "a" / "assets" / "x.txt").read_text() == "made\n"
+
+    code, out, _ = _run(["new", "b", "--recipe", "plain"], capsys)
+    assert code == 1 and "--photos" in out and not (tmp_path / "b").exists()
+
+    code, out, _ = _run(["new", "c", "--recipe", "bad"], capsys)
+    assert code == 1 and "exited 3" in out and "new-demo.log" in out
