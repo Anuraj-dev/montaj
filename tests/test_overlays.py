@@ -60,7 +60,6 @@ def test_ring_brackets_line_validate_and_resolve(tmp_path: Path) -> None:
 
 @pytest.mark.parametrize("ov, needle", [
     ("{shape: star, from: 0f, to: 9f}", "unknown 'star'"),
-    ("{shape: waveform, from: 0f, to: 9f}", "not implemented"),
     ("{shape: ring, from: 0f, to: 9f, radius: 5}", "center: required for ring"),
     ("{shape: ring, from: 0f, to: 9f, center: [1, 1]}", "radius: required for ring"),
     ("{shape: ring, from: 0f, to: 9f, center: [1, 1], radius: 5, box: [0, 0, 9, 9]}", "box: not used by ring"),

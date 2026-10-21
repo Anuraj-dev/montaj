@@ -4,6 +4,9 @@
 `render_mix` turns the plan into one stereo 48 kHz float wav in `build/audio/`, keyed by a hash of
 the plan and the input bytes; `encode.mux` then treats that wav exactly as it treats `audio.track`.
 A spec without any of the three never reaches this module at render time (`MixPlan.active`).
+
+`source_window` slices one source's stem, built the way `mix_audio` builds it, for waveform levels.
+Resolve stores those levels; the renderer does not call into here.
 """
 from __future__ import annotations
 
@@ -467,12 +470,8 @@ def _slice(x: np.ndarray, lo: int, hi: int) -> np.ndarray:
     return out
 
 
-def apply_edits(music: np.ndarray, ops: tuple[EditOp, ...] | list[EditOp]) -> np.ndarray:
-    """Splice `music` per `ops`. Joins get an equal-power crossfade that keeps the length exact."""
-    n = len(music)
-    bad = edit_range_error(ops, n / SR)
-    if bad is not None:
-        raise EncodeError(f"mix: audio.edit[{bad[0]}] {bad[1]}", "keep edit points inside the track")
+def _edit_parts(ops: tuple[EditOp, ...] | list[EditOp], n: int) -> list[tuple[int, int]]:
+    """Source sample ranges that concatenate to the edited music. Adjacent pieces merge."""
     parts: list[list[int]] = []
     for s, length in _pieces(list(ops), n / SR):
         s0 = round(s * SR)
@@ -483,9 +482,19 @@ def apply_edits(music: np.ndarray, ops: tuple[EditOp, ...] | list[EditOp]) -> np
             parts[-1][1] = s1
         else:
             parts.append([s0, s1])
+    return [(a, b) for a, b in parts]
+
+
+def apply_edits(music: np.ndarray, ops: tuple[EditOp, ...] | list[EditOp]) -> np.ndarray:
+    """Splice `music` per `ops`. Joins get an equal-power crossfade that keeps the length exact."""
+    n = len(music)
+    bad = edit_range_error(ops, n / SR)
+    if bad is not None:
+        raise EncodeError(f"mix: audio.edit[{bad[0]}] {bad[1]}", "keep edit points inside the track")
+    parts = _edit_parts(ops, n)
     if not parts:
         raise EncodeError("mix: audio.edit leaves no music", "check the cut/loop ranges against the track length")
-    out = np.concatenate([music[s0:s1] for s0, s1 in parts])
+    out = np.concatenate([music[a:b] for a, b in parts])
     half = round(XFADE_S * SR / 2)
     pos = 0
     for k in range(len(parts) - 1):
@@ -500,31 +509,105 @@ def apply_edits(music: np.ndarray, ops: tuple[EditOp, ...] | list[EditOp]) -> np
     return out
 
 
+def _placed_span(c: Placed, n_src: int) -> tuple[int, int, int]:
+    """`(film start, source start, length)` after `in`/`out` and a negative `at` trim."""
+    lo = round(c.in_s * SR)
+    hi = n_src if c.out_s is None else min(n_src, round(c.out_s * SR))
+    at = round(c.at_s * SR)
+    if at < 0:  # drop the head that would play before the film starts
+        lo -= at
+        at = 0
+    return at, lo, max(0, hi - lo)
+
+
+def _shape_placement(x: np.ndarray, p0: int, length: int, gain_db: float, pan: float) -> None:
+    """Fade, gain and pan `x` in place. `x` holds placement indices `[p0, p0+len(x))` of `length`."""
+    fade_n = min(round(CLIP_FADE_S * SR), length // 2)
+    if fade_n > 0 and len(x):
+        ramp = np.sin(np.linspace(0.0, np.pi / 2, fade_n, dtype=np.float32)) ** 2
+        idx = np.arange(p0, p0 + len(x))
+        head = idx < fade_n
+        tail = idx >= length - fade_n
+        if head.any():
+            x[head] *= ramp[idx[head], None]
+        if tail.any():
+            x[tail] *= ramp[length - 1 - idx[tail], None]
+    x *= np.float32(10 ** (gain_db / 20))
+    if pan:
+        ang = (pan + 1) * np.pi / 4
+        x *= np.array([math.sqrt(2) * math.cos(ang), math.sqrt(2) * math.sin(ang)], dtype=np.float32)
+
+
 def _render_clip(c: Placed, cache: dict, log: Path | None) -> tuple[int, np.ndarray]:
     """`(start sample, stereo samples)` for one placement, trimmed, faded, gained and panned."""
     key = (c.src, c.stream)
     if key not in cache:
         cache[key] = decode(c.src, c.stream, log=log)
     x = cache[key]
-    lo = round(c.in_s * SR)
-    hi = len(x) if c.out_s is None else min(len(x), round(c.out_s * SR))
-    x = x[lo:hi].copy()
-    start = round(c.at_s * SR)
-    if start < 0:  # an offset can reach before the film start: drop the head
-        x = x[-start:]
-        start = 0
-    if len(x) == 0:
-        return start, x
-    f = min(round(CLIP_FADE_S * SR), len(x) // 2)
-    if f > 0:
-        ramp = np.sin(np.linspace(0.0, np.pi / 2, f, dtype=np.float32)) ** 2
-        x[:f] *= ramp[:, None]
-        x[-f:] *= ramp[::-1, None]
-    x *= np.float32(10 ** (c.gain_db / 20))
-    if c.pan:
-        ang = (c.pan + 1) * np.pi / 4
-        x *= np.array([math.sqrt(2) * math.cos(ang), math.sqrt(2) * math.sin(ang)], dtype=np.float32)
-    return start, x
+    at, src, length = _placed_span(c, len(x))
+    if length <= 0:
+        return at, np.zeros((0, 2), np.float32)
+    piece = np.array(x[src:src + length], dtype=np.float32, copy=True)
+    _shape_placement(piece, 0, length, c.gain_db, c.pan)
+    return at, piece
+
+
+def frame_sample(frame: int, fps: int) -> int:
+    """First 48 kHz sample of integer film frame `frame`."""
+    return int(round(int(frame) * SR / float(fps)))
+
+
+def _q_level(peak: float) -> float:
+    """Clamp to 0..1 and quantise to 1/255. The same samples always land on the same step."""
+    if not math.isfinite(peak) or peak <= 0.0:
+        return 0.0
+    q = int(math.floor(min(1.0, peak) * 255.0 + 0.5))
+    return min(q, 255) / 255.0
+
+
+def band_levels(samples: np.ndarray, bars: int) -> tuple[float, ...]:
+    """Peak of each equal slice of one frame, mono mean of the channels, quantised to 1/255."""
+    bars = int(bars)
+    if bars <= 0:
+        return ()
+    n = int(samples.shape[0]) if getattr(samples, "ndim", 0) else 0
+    if n <= 0:
+        return (0.0,) * bars
+    mono = samples.mean(axis=1) if samples.ndim == 2 else samples
+    edges = (np.arange(bars + 1) * n) // bars
+    row: list[float] = []
+    for i in range(bars):
+        a, b = int(edges[i]), int(edges[i + 1])
+        peak = float(np.max(np.abs(mono[a:b]))) if b > a else 0.0
+        row.append(_q_level(peak))
+    return tuple(row)
+
+
+def source_window(plan: MixPlan, source: str, s0: int, s1: int, *, cache: dict | None = None) -> np.ndarray:
+    """Stereo film-timeline samples `[s0, s1)` of one waveform source, zero outside it.
+
+    `music` is the track after `audio.edit`; any other name is every placement with that id,
+    summed. Both are built by the same `decode`/`apply_edits`/`_render_clip` calls `mix_audio`
+    makes, so the bars follow the soundtrack exactly. Only the named files are decoded, each
+    once per `cache` (the caller's dict, not module state).
+    """
+    if s1 < s0:
+        raise ValueError(f"source window {s0}:{s1} is backwards")
+    cache = {} if cache is None else cache
+    key = ("stem", source)
+    if key not in cache:
+        if source == "music":
+            if (plan.track, 0) not in cache:
+                cache[(plan.track, 0)] = decode(plan.track, 0)
+            music = cache[(plan.track, 0)]
+            cache[key] = apply_edits(music, plan.edits) if plan.edits else music
+        else:
+            placed = [_render_clip(c, cache, None) for c in plan.clips if c.id == source]
+            stem = np.zeros((max((at + len(x) for at, x in placed), default=0), 2), np.float32)
+            for at, x in placed:
+                stem[at:at + len(x)] += x
+            cache[key] = stem
+    return _slice(cache[key], s0, s1)
 
 
 def duck_gain(source: np.ndarray, plan: DuckPlan, n: int) -> np.ndarray:
@@ -621,5 +704,6 @@ def check_lines(stats: dict) -> list[str]:
     return lines
 
 
-__all__ = ["DuckPlan", "EditOp", "MixPlan", "MixStats", "Placed", "apply_edits", "check_lines",
-           "duck_gain", "edit_ops", "edit_range_error", "plan_audio", "plan_hash", "render_mix", "shift_words", "synth"]
+__all__ = ["DuckPlan", "EditOp", "MixPlan", "MixStats", "Placed", "apply_edits", "band_levels",
+           "check_lines", "decode", "duck_gain", "edit_ops", "edit_range_error", "frame_sample",
+           "plan_audio", "plan_hash", "render_mix", "shift_words", "source_window", "synth"]

@@ -197,6 +197,19 @@ def _shot_payload(shot) -> dict:
     return raw
 
 
+def _overlay_payload(ov) -> dict:
+    """Overlay JSON for the segment hash.
+
+    `levels` is None unless the shape is a waveform. Dropping that key keeps every
+    film that never draws one on the hash it had before the field existed. A waveform's
+    levels are the audio the renderer paints, so a source change shows up here.
+    """
+    raw = asdict(ov)
+    if raw.get("levels") is None:
+        raw.pop("levels", None)
+    return raw
+
+
 def segment_hash(
     tl: Timeline,
     seg: Segment,
@@ -250,8 +263,9 @@ def segment_hash(
         }
     if overlay_ids:
         # Resolved values (frames, defaults), not the spec text: a marker edit that moves
-        # the window, or a default changing, must reach the hash.
-        payload["overlays"] = {str(i): asdict(tl.overlays[i]) for i in sorted(overlay_ids)}
+        # the window, or a default changing, must reach the hash. `levels` is None on every
+        # shape except waveform; leaving that key out keeps a ring film's hash identical.
+        payload["overlays"] = {str(i): _overlay_payload(tl.overlays[i]) for i in sorted(overlay_ids)}
     captions = any(
         tl.shots[i].spec.frame is not None and tl.shots[i].spec.frame.caption
         for i in referenced
