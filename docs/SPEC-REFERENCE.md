@@ -118,7 +118,7 @@ Photo fields (`crop`, `focus`, swirl `center`, wall `at`) are source-image pixel
 - `audio.edit[].loop` — `[start, end]`, one of cut or loop — repeats that span.
 - `audio.edit[].times` — whole number ≥ 2, default `2` — loop only: total plays of the span.
 - `audio.clips` — list, default none — voice and SFX placed on the film's clock, mixed with the music into one stereo 48 kHz wav in `build/audio/` (cached by input bytes). Without `clips`, `edit` and `duck`, `audio.track` is muxed untouched. A mix over -0.2 dBFS is scaled down and `check` warns.
-- `audio.clips[].src` — string, required — file relative to the spec (extension optional; wav/flac/mp3/ogg/m4a, or a video file's audio) or `synth:whoosh`, `synth:riser`, `synth:boom`, `synth:tick`, `synth:glitch` (seeded, deterministic).
+- `audio.clips[].src` — string, required — file relative to the spec, or the same name in the `assets` folder (extension optional; wav/flac/mp3/ogg/m4a, or a video file's audio). A spec-relative file wins when both exist. Or `synth:whoosh`, `synth:riser`, `synth:boom`, `synth:tick`, `synth:glitch` (seeded, deterministic).
 - `audio.clips[].at` — time expression or list of them, required — start time(s) from film start (`0.8s`, `2b`, `logo`). A list places the clip once per time.
 - `audio.clips[].offset` — signed duration (`ms`, `s`, `f`, `b`), default `0s` — added to every `at`, e.g. `-0.16s` to land a whoosh before the cut. Anything before the film start is dropped.
 - `audio.clips[].id` — string, default none — name `duck.under` refers to. Several clips may share an id.
