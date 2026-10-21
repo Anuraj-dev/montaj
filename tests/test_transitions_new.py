@@ -306,3 +306,11 @@ def test_glitch_accepts_any_valid_seed(cv, ab):
 def test_params_checked_on_wrong_transition(tmp_path, inline, needle):
     errs = _errors(tmp_path, f"  - {{photo: b, hold: 30f, in: {inline}}}\n")
     assert any(needle in e for e in errs), errs
+
+
+def test_renderer_draws_a_glitch_window(tmp_path):
+    from montaj.render.frame import Renderer
+
+    spec = load_spec(_write(tmp_path, "  - {photo: b, hold: 30f, in: {type: glitch, dur: 6f, seed: 3}}\n"))
+    r = Renderer(resolve(spec, tmp_path), tmp_path, Canvas(54, 96, device="cpu"))
+    assert r.frame(32).shape == (3, 96, 54)

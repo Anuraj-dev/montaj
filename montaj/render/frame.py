@@ -10,6 +10,7 @@ on the first frame that needs them, one batch per kind, under ``<project>/build/
 """
 from __future__ import annotations
 
+import math
 from collections import OrderedDict
 from dataclasses import dataclass
 from pathlib import Path
