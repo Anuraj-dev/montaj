@@ -189,7 +189,7 @@ Photo fields (`crop`, `focus`, swirl `center`, wall `at`) are source-image pixel
 - `overlays[].radius` — number or `[from, to]`, required with ring — ring radius; a pair animates over the window with `ease`.
 - `overlays[].sweep` — number or `[from, to]` degrees, 0–360, default `360` — arc extent, clockwise from 12 o'clock; a pair draws the arc on over the window. Ring only.
 - `overlays[].box` — `[x0, y0, x1, y1]`, required with brackets and waveform — brackets: four corner marks, no edges. waveform: vertical bars fill the region, mirrored about its horizontal centre.
-- `overlays[].source` — clip id or `music`, required with waveform — an `audio.clips[].id` (every clip with that id, summed after gain and placement) or `music` (the track after `audio.edit`, before duck and loudnorm). Unknown source, or no `audio` block, is an error. `music` is the track even if a clip uses that id.
+- `overlays[].source` — clip id or `music`, required with waveform — an `audio.clips[].id` (every clip with that id, summed after gain and placement) or `music` (the track after `audio.edit` and the duck). Bars follow what is heard: the mix's peak ceiling and `audio.fade_out` apply; loudnorm, one constant gain, does not. Unknown source, or no `audio` block, is an error. `music` is the track even if a clip uses that id.
 - `overlays[].bars` — integer 1–128, default `32`, waveform only — how many vertical bars. Each bar is the peak of its slice of that frame, quantised to 1/255.
 - `overlays[].arm` — number, default `28` — bracket arm length. Brackets only; capped at half the box side.
 - `overlays[].points` — list of `[x, y]`, at least 2, required with line — a polyline.
