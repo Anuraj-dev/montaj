@@ -110,7 +110,8 @@ end: {wall: [34, 9, 10, 16, 38, 32], hero: 10}
 ---
 
 ## Milestones (each ends with `/checkpoint`)
-- **M0 Scaffold** (this session): repo, plan, context, token audit.
+Status: M0–M4 done, plus M4.5 hardening and the GitHub issue batch (#1–19); M5 not started. Detail in STATE.md.
+- **M0 Scaffold**: repo, plan, context, token audit.
 - **M1 Engine + montage**:
   - spec/timeline/render/encode/cache, plus `new`, `ingest`, `validate`, `render`, `sheet`, `check`, `export`, `doctor`;
   - port Vidyut `film2.py` to `recipes/birthday-short.yaml`.
@@ -125,14 +126,14 @@ end: {wall: [34, 9, 10, 16, 38, 32], hero: 10}
 - **M5 Motion-graphics** (later): `custom:` layer API; port `reel/reel.html` as a recipe.
 
 ## Targets (measured by `tools/token-report.py`)
-| Metric | Today | Target |
-|---|---|---|
-| New 30s montage, input-equivalent tokens | 1.0M (Vidyut), 2.7M (Arshiya) | ≤ 0.3M |
-| Agent turns per new video | 24–97 | ≤ 20 |
-| Starting context | 110k with pasted photos | ≤ 55k |
-| Human re-render / review round | 1 agent session | 0 tokens |
-| Feedback round via review.json | multi-turn prose | ≤ 3 turns |
-| Final render, 30s 1080×1920 on RTX 5050 | unmeasured | ≤ 3 min; preview ≤ 60s |
+| Metric | Before Montaj | Measured (M4/M4.5, BENCHMARK.md) | Target |
+|---|---|---|---|
+| New 30s montage, input-equivalent tokens | 1.0M (Vidyut), 2.7M (Arshiya) | 0.12–0.24M silent; 0.27–0.31M with composed music | ≤ 0.3M |
+| Agent turns per new video | 24–97 | 11–16 silent (skill v2); 19–23 composed | ≤ 20 |
+| Starting context | 110k with pasted photos | 25–29k | ≤ 55k |
+| Human re-render / review round | 1 agent session | 0 tokens (`review` page, `watch`) | 0 tokens |
+| Feedback round via review.json | multi-turn prose | 1 user message, 7 agent turns | ≤ 3 turns |
+| Final render, 30s 1080×1920 on RTX 5050 | unmeasured | final ~40 s, preview ~30 s (golden-film) | ≤ 3 min; preview ≤ 60s |
 
 ## Risks
 - torch must support sm_120: pin to the ACE-Step venv's working version.

@@ -4,10 +4,10 @@
 ## 🚧 In progress / next
 - GitHub issues #1–19 all merged into `main` and pushed (2026-10-21); issues closed with their merge sha.
 - Open worktrees with uncommitted, unmerged work (keep): `montaj-wt/launch-film` (`feat/engine-launch-film`),
-  `montaj-wt/export-wa-audio` (`fix/export-whatsapp-audio-copy`). `montaj-wt/w10-grok47` is merged and clean;
-  remove it with `git worktree remove` + `git branch -d wip/w10-grok47`. 13 unmerged `wip/w*` branches stay local.
+  `montaj-wt/export-wa-audio` (`fix/export-whatsapp-audio-copy`). Both branch from `6b1caaf`, 82 commits behind
+  `main` (which since changed encode/pipeline/project/render): expect conflicts. 13 unmerged `wip/w*` branches stay local.
 - Backlog: lower-thirds are a title chip + subtitle (no bar/slide yet); wall prints at full res (downsample at build);
-  hold edit re-renders later segments; M5 `custom` shot; BENCHMARK.md entry for the issue batch.
+  hold edit re-renders later segments; M5 `custom` shot (evidence: BENCHMARK.md § Code-drawn visuals).
 
 ## Status
 - M1–M4.5 and the issue batch pushed to origin/main. `wip/*` branches stay local only.
