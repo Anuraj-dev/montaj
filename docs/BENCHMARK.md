@@ -176,3 +176,27 @@ Skill v3 (compose your own track), fresh headless `claude -p`, one prompt: a 30 
 - Both finished the full loop with music they wrote, inside the PLAN targets (≤ 0.3M, ≤ 20 turns for Sonnet; Opus
   at the edge, including the two wasted renders). Roughly 20k output tokens each is the score itself: creative work.
 - Films: `~/Anuraj-dev/montaj-projects/arshiya/{sonnet,opus}-5.5-composed/out/final.mp4`.
+
+## Code-drawn visuals: run 9 (M4.5, 2026-10-02)
+Sonnet 5.5, skill v3, fresh headless `claude -p`: a 30 s 9:16 black-hole explainer with no photos or footage; the
+agent draws every visual and composes the music. Prompt: `montaj-projects/_scratch/bench/run9-sonnet-blackhole/prompt.txt`.
+
+- **Tokens, turns, cost: not recorded.** The run's `out.json` is empty and no session transcript survives.
+- **Result:** `blackhole/sonnet-5.5/out/final.mp4`, 30.0 s 1080×1920 with audio. 13 shots (8 clips, 5 stills) on a
+  96 BPM grid, golden-film look, 297-line `music/compose.py`. Re-running `montaj check` on 2026-11-03 gives 2 WARNs
+  (`disk_b` and `grid_b` hold 0.17 s and 0.40 s past their clip ends). Issue #19 added that warning after the run.
+- **M5 evidence:** the agent ray-traced its visuals with CPU numpy (`gen/render_assets.py`, `Pool(8)`) and piped
+  frames to libx264. That took 7 min 14 s wall time before Montaj rendered anything. A code-drawn GPU shot (`custom:`)
+  would remove that step.
+
+## GitHub issue batch #1–19 (merged 2026-10-20 → 10-21)
+One worktree per issue (`montaj-wt/g47-i<N>`): grok-4.7 implemented, gpt-6.1-sol medium reviewed (diff inlined),
+Sonnet fixed the findings, and the driver resolved conflicts and merged with `--no-ff`. #10 was a tracker closed by #8.
+Merged in order: #17, #19, #15, #9, #2, #14, #11, #13, #12, #18, #7, #3, #5 shapes, #4, #6, #1, #16, #8, #5 waveform.
+
+- **Per-issue wall time, cost and finding counts: not recorded.** Worker JSON went to a session scratch dir that
+  has since been wiped; the transcripts hold only a smoke test's cost.
+- **Outcome:** main `1deaf74`: CPU 641 passed, GPU 48 passed. The driver fixed one escape (a glitch-transition
+  `NameError` in `render/frame.py`) after merge. Sol's reviews on the #5 waveform led to removing its windowed decode
+  and fixing a fade start that was off by one sample.
+- **Process gap:** a batch this size needs one results file per dispatch, kept outside `/tmp`, so this table can be filled.
