@@ -576,11 +576,12 @@ class LayerKey(Frozen):
     number, or `[x, y]` for `pos`. `ease` shapes the move that arrives at this key; the first key's is unused."""
 
     t: DurationStr | int
-    v: RealNum | tuple[RealNum, RealNum]
+    v: RealNum | tuple[RealNum, RealNum] | tuple[RealNum, RealNum, RealNum, RealNum]
     ease: str = "smooth"
 
 
-LAYER_KEYED = ("pos", "scale", "rotate", "opacity")
+LAYER_KEYED = ("pos", "scale", "rotate", "opacity", "box", "radius", "shadow")
+_KEY_ARITY = {"pos": 2, "box": 4}  # every other keyed property is a number
 
 
 class Layer(Frozen):
@@ -588,7 +589,7 @@ class Layer(Frozen):
 
     Unset fields stay out of the dump, so only what a film sets reaches its segment hash. Placement is a
     `box` (design px) or a `pos` (centre, natural size: one source px per design px); neither is the full frame.
-    `pos`, `scale`, `rotate` and `opacity` are a value or a list of `LayerKey`s; the renderer evaluates them
+    `LAYER_KEYED` properties are a value or a list of `LayerKey`s; the renderer evaluates them
     per frame (`render.layers.layer_state`).
     """
 
@@ -599,15 +600,15 @@ class Layer(Frozen):
     # Shot clock: frames from the shot start. Ints after resolve.
     from_: DurationStr | int | None = Field(default=None, alias="from", exclude_if=_none)
     to: DurationStr | int | None = Field(default=None, exclude_if=_none)
-    box: tuple[RealNum, RealNum, RealNum, RealNum] | None = Field(default=None, exclude_if=_none)
+    box: tuple[RealNum, RealNum, RealNum, RealNum] | list[LayerKey] | None = Field(default=None, exclude_if=_none)
     fit: str | None = Field(default=None, exclude_if=_none)
     pos: tuple[RealNum, RealNum] | list[LayerKey] | None = Field(default=None, exclude_if=_none)
     scale: RealNum | list[LayerKey] | None = Field(default=None, exclude_if=_none)
     rotate: RealNum | list[LayerKey] | None = Field(default=None, exclude_if=_none)
     opacity: RealNum | list[LayerKey] | None = Field(default=None, exclude_if=_none)
     blend: str | None = Field(default=None, exclude_if=_none)
-    radius: RealNum | None = Field(default=None, exclude_if=_none)
-    shadow: RealNum | None = Field(default=None, exclude_if=_none)
+    radius: RealNum | list[LayerKey] | None = Field(default=None, exclude_if=_none)
+    shadow: RealNum | list[LayerKey] | None = Field(default=None, exclude_if=_none)
     in_: LayerAnim | None = Field(default=None, alias="in", exclude_if=_none)
     out: LayerAnim | None = Field(default=None, exclude_if=_none)
     # Built-in effects on this layer (#38): shake moves it, trails echo it, the rest filter its pixels.
@@ -2231,8 +2232,7 @@ def _check_clip_shot(
         last: int | None = None
         for k, ck in enumerate(sh.camera):
             path = f"{at}.camera[{k}]"
-            if ck.ease not in EASE:
-                errors.append(_line(f"{path}.ease", f"unknown {ck.ease!r}", EASE_HINT))
+            _check_ease(f"{path}.ease", ck.ease, errors)
             if ck.zoom is not None and (not math.isfinite(ck.zoom) or ck.zoom < 1):
                 errors.append(_line(f"{path}.zoom", f"zoom is a multiple of cover, got {_fmt_num(ck.zoom)}", "use >= 1"))
             if ck.focus is not None:
@@ -2440,8 +2440,8 @@ def _validate_effects(sh: Shot, i: int, markers: dict[str, float], fps: int,
 
 
 def _check_ease(path: str, ease: str, errors: list[str]) -> None:
-    if ease not in EASE:
-        errors.append(_line(path, f"unknown {ease!r}", EASE_HINT))
+    if parse_ease(ease) is None:
+        errors.append(_line(path, f"unknown {ease!r}", f"{EASE_HINT}; or {', '.join(NEW_EASES)}"))
 
 
 def _validate_sequence(
@@ -2690,14 +2690,7 @@ def validate_spec(
                         )
                     )
             for k, key in enumerate(sh.wall.camera.pos):
-                if key.ease not in EASE:
-                    errors.append(
-                        _line(
-                            f"shots[{i}].wall.camera.pos[{k}].ease",
-                            f"unknown {key.ease!r}",
-                            EASE_HINT,
-                        )
-                    )
+                _check_ease(f"shots[{i}].wall.camera.pos[{k}].ease", key.ease, errors)
                 if key.print is not None and key.print not in print_ids:
                     errors.append(
                         _line(
@@ -2707,14 +2700,7 @@ def validate_spec(
                         )
                     )
             for k, key in enumerate(sh.wall.camera.zoom):
-                if key.ease not in EASE:
-                    errors.append(
-                        _line(
-                            f"shots[{i}].wall.camera.zoom[{k}].ease",
-                            f"unknown {key.ease!r}",
-                            EASE_HINT,
-                        )
-                    )
+                _check_ease(f"shots[{i}].wall.camera.zoom[{k}].ease", key.ease, errors)
                 if key.print is not None and key.print not in print_ids:
                     errors.append(
                         _line(
@@ -3289,7 +3275,8 @@ def _layer_extent(spec: Spec, spec_dir: Path | None, layer: Layer) -> tuple[floa
     if frame is None:
         return None
     if layer.box is not None:
-        x0, y0, x1, y1 = (float(v) for v in layer.box)
+        bx = layer.box[-1].v if isinstance(layer.box, list) else layer.box
+        x0, y0, x1, y1 = (float(v) for v in bx)
     elif layer.pos is not None:
         size = _layer_source_size(spec, spec_dir, layer)
         if size is None:
@@ -3310,7 +3297,7 @@ def _layer_extent(spec: Spec, spec_dir: Path | None, layer: Layer) -> tuple[floa
 def _layer_values(path: str, raw, parsed: dict[str, int], errors: list[str], hold: int | None):
     """Yield (path, value) for a layer property that is a value or a key list, checking the keys' shape,
     order, easing and shot-clock range. Scalars (`scale`) yield floats, `pos` yields pairs."""
-    pair = path.endswith(".pos")
+    arity = _KEY_ARITY.get(path.rsplit(".", 1)[-1], 0)
     if raw is None:
         return
     if not isinstance(raw, list):
@@ -3322,9 +3309,9 @@ def _layer_values(path: str, raw, parsed: dict[str, int], errors: list[str], hol
     prev = None
     for j, key in enumerate(raw):
         q = f"{path}[{j}]"
-        if isinstance(key.v, tuple) != pair:
-            errors.append(_line(f"{q}.v", "needs [x, y]" if pair else "needs a number",
-                                "pos keys are [x, y]; other properties are numbers"))
+        if (len(key.v) if isinstance(key.v, tuple) else 0) != arity:
+            errors.append(_line(f"{q}.v", {2: "needs [x, y]", 4: "needs [x0, y0, x1, y1]"}.get(arity, "needs a number"),
+                                "pos keys are [x, y], box keys [x0, y0, x1, y1]; other properties are numbers"))
         else:
             yield f"{q}.v", key.v
         if parse_ease(key.ease) is None:
@@ -3413,22 +3400,21 @@ def _validate_layers(
             errors.append(_line(f"{p}.fit", "fit is for a box or the full frame", "remove fit or use box"))
         if layer.blend is not None and layer.blend not in LAYER_BLENDS:
             errors.append(_line(f"{p}.blend", f"unknown {layer.blend!r}", f"use {_choices(LAYER_BLENDS)}"))
-        v = layer.shadow
-        if v is not None and (not math.isfinite(v) or not 0.0 <= v <= 1.0):
-            errors.append(_line(f"{p}.shadow", f"must be 0 to 1, got {_fmt_num(v)}", "use a value like 0.8"))
         for name, lo, hi, hint in (("opacity", 0.0, 1.0, "use a value like 0.8"), ("scale", 1e-9, None, "use 0.5 for half size"),
-                                   ("rotate", None, None, "use degrees, clockwise")):
+                                   ("rotate", None, None, "use degrees, clockwise"),
+                                   ("shadow", 0.0, 1.0, "use a value like 0.8"), ("radius", 0.0, None, "use design px")):
             raw = getattr(layer, name)
             for q, val in _layer_values(f"{p}.{name}", raw, parsed, errors, hold):
                 if not math.isfinite(val) or (lo is not None and val < lo) or (hi is not None and val > hi):
-                    want = {"opacity": "0 to 1", "scale": "finite and > 0", "rotate": "finite"}[name]
+                    want = {"opacity": "0 to 1", "scale": "finite and > 0", "rotate": "finite", "shadow": "0 to 1",
+                            "radius": "finite and >= 0"}[name]
                     errors.append(_line(q, f"must be {want}, got {_fmt_num(val)}", hint))
-        if layer.radius is not None and (not math.isfinite(layer.radius) or layer.radius < 0):
-            errors.append(_line(f"{p}.radius", f"must be finite and >= 0, got {_fmt_num(layer.radius)}", "use design px"))
-        if layer.box is not None:
-            x0, y0, x1, y1 = layer.box
-            if not _finite_all(layer.box) or x1 <= x0 or y1 <= y0:
-                errors.append(_line(f"{p}.box", f"{[_fmt_num(v) for v in layer.box]} is not a box",
+        if isinstance(layer.box, list) and layer.fit == "contain":
+            errors.append(_line(f"{p}.fit", "contain letterboxes inside a fixed box", "use a fixed box, or fit: cover"))
+        for q, bx in _layer_values(f"{p}.box", layer.box, parsed, errors, hold):
+            x0, y0, x1, y1 = bx
+            if not _finite_all(bx) or x1 <= x0 or y1 <= y0:
+                errors.append(_line(q.removesuffix(".v"), f"{[_fmt_num(v) for v in bx]} is not a box",
                                     "use [x0, y0, x1, y1] in design px with x0 < x1, y0 < y1"))
         for q, pt in _layer_values(f"{p}.pos", layer.pos, parsed, errors, hold):
             if not _finite_all(pt):

@@ -31,7 +31,9 @@ from montaj.render.core import Photo, fit_s, sine, still
 from montaj.render.custom import CustomRunner
 from montaj.render import effects as fxlib
 from montaj.render.finish import LOOKS, finish, lut_texture
-from montaj.render.layers import LayerState, base_pos, peak_scale, LayerTexture, composite, layer_state, load_rgba
+from montaj.render.layers import (
+    LayerState, LayerTexture, base_box, base_pos, box_growth, composite, layer_state, load_rgba, peak_scale, sample,
+)
 from montaj.render.shots import (
     card_frame,
     css_blur,
@@ -137,6 +139,10 @@ class _LayerPlan:
 _IDENTITY = LayerState(1.0, 0.0, 1.0)
 
 
+def _radius(layer, local: float) -> float:
+    return max(0.0, float(sample(layer.radius, local, 0.0)))
+
+
 def _cover_crop(sw: float, sh: float, aspect: float, focus) -> tuple[float, float, float, float]:
     """The largest `aspect` (w/h) window of a sw x sh source, centred on `focus` and kept inside it."""
     if sw / sh > aspect:
@@ -152,7 +158,7 @@ def _cover_crop(sw: float, sh: float, aspect: float, focus) -> tuple[float, floa
 def _place(layer, sw: int, sh: int, W: int, H: int, k: float):
     """(dest rect device px, source rect source px) for a layer over a sw x sh source."""
     if layer.box is not None:
-        x0, y0, x1, y1 = (float(v) * k for v in layer.box)
+        x0, y0, x1, y1 = (v * k for v in base_box(layer))
     elif layer.pos is not None:
         bx, by = base_pos(layer)
         cx, cy = bx * k, by * k
@@ -706,7 +712,7 @@ class Renderer:
                 dest, crop = _place(layer, sw, sh, W, H, k)
                 crop = tuple(int(round(v)) for v in crop)
                 cw, ch = max(1, crop[2] - crop[0]), max(1, crop[3] - crop[1])
-                grow = max(1.0, peak_scale(layer)) * (1.1 if "pop" in (
+                grow = max(1.0, peak_scale(layer)) * box_growth(layer) * (1.1 if "pop" in (
                     getattr(layer.in_, "type", None), getattr(layer.out, "type", None)) else 1.0)
                 # Decode no finer than the layer is drawn (pop overshoot included); never upscale.
                 d = min(1.0, max((dest[2] - dest[0]) / cw, (dest[3] - dest[1]) / ch) * grow)
@@ -772,9 +778,10 @@ class Renderer:
             if out is None:
                 out = torch.zeros(3, self.cv.H, self.cv.W, device=self.cv.device)
             m = self._layer_matte(plan, t)
+            local = t - scene.t0
             # Opacity and blend shape how the cutout looks, not where the subject is.
-            composite(self.cv, out, LayerTexture(m.expand(4, -1, -1)), plan.src, plan.dest,
-                      LayerState(state.scale, state.rotate, 1.0), "normal", float(layer.radius or 0.0) * self.cv.k)
+            composite(self.cv, out, LayerTexture(m.expand(4, -1, -1)), plan.src, self._dest_at(layer, plan, local),
+                      LayerState(state.scale, state.rotate, 1.0), "normal", _radius(layer, local) * self.cv.k)
         return None if out is None else out[:1]
 
     def _subject(self, scene: Scene, t: float) -> torch.Tensor | None:
@@ -807,8 +814,9 @@ class Renderer:
             if state is None:
                 continue
             mode = layer.blend or "normal"
-            radius = float(layer.radius or 0.0) * k
-            shadow = float(layer.shadow or 0.0)
+            local = t - scene.t0
+            radius = _radius(layer, local) * k
+            shadow = min(1.0, max(0.0, float(sample(layer.shadow, local, 0.0))))
             if (out is None and plan.full and state == _IDENTITY and mode == "normal"
                     and radius == 0 and shadow == 0 and not layer.effects and layer.mask is None):
                 out = self._layer_clip(plan, t)
@@ -816,7 +824,6 @@ class Renderer:
             if out is None:
                 out = self._background()
             fxs = layer.effects or ()
-            local = t - scene.t0
             # Trails: older copies first, fainter with age, each re-drawn at its own time (no frame memory).
             for fx in fxs:
                 if fx.type != "trails":
@@ -830,14 +837,21 @@ class Renderer:
                     ghost = layer_state(layer, local - i, hold)
                     if ghost is not None:
                         ghost = LayerState(ghost.scale, ghost.rotate, ghost.opacity * v * decay ** i)
-                        self._draw_layer(out, layer, plan, ghost, t - i, local - i, mode, radius, shadow)
+                        self._draw_layer(out, layer, plan, ghost, t - i, local - i, mode,
+                                         _radius(layer, local - i) * k, shadow)
             self._draw_layer(out, layer, plan, state, t, local, mode, radius, shadow)
         return out if out is not None else self._background()
+
+    def _dest_at(self, layer, plan, local: float) -> tuple[float, float, float, float]:
+        """The layer's rect on the shot clock: fixed, or a keyed `box` stretching the first key's source window."""
+        if not isinstance(layer.box, list):
+            return plan.dest
+        return tuple(v * self.cv.k for v in sample(layer.box, local, None))
 
     def _draw_layer(self, out, layer, plan, state, t, local, mode, radius, shadow) -> None:
         """One layer at film time `t` (`local` on the shot clock), with its shake and pixel effects."""
         fxs = layer.effects or ()
-        dest = plan.dest
+        dest = self._dest_at(layer, plan, local)
         post = pad = None
         if fxs:
             x0, y0, x1, y1 = dest

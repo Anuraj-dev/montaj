@@ -94,6 +94,25 @@ def base_pos(layer) -> tuple[float, float] | None:
     return float(p[0]), float(p[1])
 
 
+def base_box(layer) -> tuple[float, float, float, float] | None:
+    """A box layer's rect (design px): its value, or its first key's. `src` and `fit` resolve against it."""
+    box = layer.box
+    if box is None:
+        return None
+    b = box[0].v if isinstance(box, list) else box
+    return float(b[0]), float(b[1]), float(b[2]), float(b[3])
+
+
+def box_growth(layer) -> float:
+    """How much larger than its first-key box a keyed `box` ever gets (>= 1), for decode sizing."""
+    if not isinstance(layer.box, list):
+        return 1.0
+    b = base_box(layer)
+    w, h = max(1e-6, b[2] - b[0]), max(1e-6, b[3] - b[1])
+    return max(1.0, *((float(k.v[2]) - float(k.v[0])) / w for k in layer.box),
+               *((float(k.v[3]) - float(k.v[1])) / h for k in layer.box))
+
+
 def peak_scale(layer) -> float:
     """The largest scale the layer reaches from its keys (a plain scale is itself), for decode sizing."""
     sc = layer.scale

@@ -57,8 +57,20 @@ def sine(x: float) -> float:
     return 0.5 - 0.5 * math.cos(math.pi * x)
 
 
-EASE = {"linear": linear, "smooth": smooth, "cubic": cubic, "outc": outc,
-        "inc": inc, "expo": expo, "ramp": ramp, "sine": sine}
+class _Ease(dict):
+    """The core easings by name; any other name `easing.parse_ease` knows (spring, back-out, cubic-bezier(...),
+    ...) is built on lookup (#35), so every keyed property shares one set. Never stores, so it stays read-only."""
+
+    def __missing__(self, name):
+        from montaj.easing import parse_ease
+
+        fn = parse_ease(name) if isinstance(name, str) else None
+        if fn is None:
+            raise KeyError(name)
+        return fn
+
+
+EASE = _Ease(linear=linear, smooth=smooth, cubic=cubic, outc=outc, inc=inc, expo=expo, ramp=ramp, sine=sine)
 
 
 def lerp(a: float, b: float, e: float) -> float:
