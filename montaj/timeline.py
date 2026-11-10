@@ -27,6 +27,7 @@ from montaj.spec import (
     _line,
     parse_wh,
     round_frame,
+    resolve_sugar,
     validate_spec,
 )
 
@@ -914,6 +915,7 @@ def _resolve_tracks(spec: Spec, times: dict[str, float]) -> dict[str, list]:
 
 def resolve(spec: Spec, spec_dir: Path) -> Timeline:
     errors: list[str] = []
+    spec = resolve_sugar(spec, spec_dir, errors)  # analysis sugar -> numbers, so the hash sees them
     parsed, times, markers, bpm, beat0, clip_ins = validate_spec(spec, errors, spec_dir=spec_dir)
     size = parse_wh(spec.video.size, "video.size", errors, even=True)
     if errors:
