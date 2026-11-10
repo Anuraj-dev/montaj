@@ -39,7 +39,7 @@ LINK_XFADE_S = 0.020  # equal-power crossfade centred on the cut between two lin
 DUCK_THRESHOLD_DB = -45.0  # a duck source counts as "speaking" above this RMS
 DUCK_WINDOW_S = 0.120
 PEAK_CEILING = 0.98  # a hotter mix is scaled down (and reported) before it is written
-SYNTH = ("whoosh", "riser", "boom", "tick", "glitch")
+SYNTH = ("whoosh", "riser", "boom", "tick", "glitch", "pop", "click", "swish", "hit", "bass-drop", "shutter", "ding")
 SRC_EXTS = (".wav", ".flac", ".mp3", ".ogg", ".m4a", ".aac", ".mp4", ".mov", ".mkv", ".webm")
 _INF = 1e12
 
@@ -523,8 +523,11 @@ def _track_seconds(path: Path) -> float | None:
 
 def _clip_src(raw: str, root: Path, assets: Path | None, path: str, errors: list[str]) -> str | None:
     if raw.startswith("synth:"):
+        mine = _find_src(root / "sfx", raw[6:])  # a project sfx/ file overrides the built-in of that name
+        if mine is not None:
+            return str(mine.resolve())
         if raw[6:] not in SYNTH:
-            errors.append(_line(path, f"unknown synth {raw[6:]!r}", f"have: {', '.join(SYNTH)}"))
+            errors.append(_line(path, f"unknown synth {raw[6:]!r}", f"have: {', '.join(SYNTH)}, or a file in sfx/"))
             return None
         return raw
     found = _find_src(root, raw)  # a spec-relative file wins over the same name in assets
@@ -583,6 +586,8 @@ def synth(name: str) -> np.ndarray:
         n = int(0.05 * SR)
         t = np.arange(n) / SR
         return _norm(np.sin(2 * np.pi * 2400.0 * t) * np.exp(-t * 120.0))
+    if name in _SYNTH2:
+        return _synth2(name, rng)
     n = int(0.25 * SR)  # glitch: sample-and-hold stutter with random segment lengths
     out = np.zeros(n)
     i = 0
@@ -591,6 +596,58 @@ def synth(name: str) -> np.ndarray:
         out[i : i + seg] = rng.standard_normal() if rng.random() < 0.5 else np.sin(np.arange(min(seg, n - i)) * rng.uniform(0.02, 0.4))
         i += seg
     return _norm(out * np.exp(-np.arange(n) / SR * 8.0))
+
+
+_SYNTH2 = ("pop", "click", "swish", "hit", "bass-drop", "shutter", "ding")
+
+
+def _synth2(name: str, rng: np.random.Generator) -> np.ndarray:
+    """The #41 one-shots: short, dry, and level-normalised like the others."""
+    def tt(sec: float) -> np.ndarray:
+        return np.arange(int(sec * SR)) / SR
+
+    if name == "pop":  # a bubble: falling sine with a fast decay
+        t = tt(0.12)
+        return _norm(np.sin(2 * np.pi * np.cumsum(900.0 * np.exp(-t * 18.0) + 180.0) / SR) * np.exp(-t * 28.0))
+    if name == "click":  # a dry key click: two-tone burst
+        t = tt(0.03)
+        return _norm((np.sin(2 * np.pi * 3200.0 * t) + 0.6 * rng.standard_normal(len(t))) * np.exp(-t * 220.0))
+    if name == "swish":  # a short airy sweep, quieter and faster than whoosh
+        n = int(0.32 * SR)
+        t = np.linspace(0, 1, n)
+        body = _lowpass_sweep(rng.standard_normal(n), 800.0 * (9.0 ** t))
+        return _norm(body * np.sin(np.pi * t) ** 1.5)
+    if name == "hit":  # an impact: low thump plus a noise crack
+        t = tt(0.5)
+        thump = np.sin(2 * np.pi * np.cumsum(60.0 + 140.0 * np.exp(-t * 40.0)) / SR) * np.exp(-t * 9.0)
+        crack = _lowpass_sweep(rng.standard_normal(len(t)), np.full(len(t), 3500.0)) * np.exp(-t * 60.0)
+        return _norm(thump + 0.7 * crack)
+    if name == "bass-drop":  # a long sub that falls an octave and a half
+        t = tt(1.4)
+        return _norm(np.sin(2 * np.pi * np.cumsum(30.0 + 110.0 * np.exp(-t * 3.5)) / SR) * np.exp(-t * 1.6))
+    if name == "shutter":  # camera shutter: two clicks 55 ms apart
+        out = np.zeros(int(0.16 * SR))
+        for at in (0.0, 0.055):
+            t = tt(0.045)
+            k = int(at * SR)
+            out[k:k + len(t)] += (rng.standard_normal(len(t)) + np.sin(2 * np.pi * 1800.0 * t)) * np.exp(-t * 110.0)
+        return _norm(out)
+    t = tt(1.1)  # ding: a bell, two inharmonic partials
+    return _norm((np.sin(2 * np.pi * 1318.5 * t) + 0.4 * np.sin(2 * np.pi * 1318.5 * 2.76 * t)) * np.exp(-t * 4.5))
+
+
+def peak_lead(src: str, stream: int = 0) -> float:
+    """Seconds from the start of `src` to its loudest moment (4 ms RMS envelope): where a hit lands on a cut."""
+    if src.startswith("synth:"):
+        x = synth(src[6:])
+    else:
+        x = decode(src, stream)
+        x = np.sqrt((x ** 2).mean(axis=1)) if x.ndim == 2 else x
+    if len(x) == 0:
+        return 0.0
+    w = max(1, int(0.004 * SR))
+    env = np.convolve(x.astype(np.float64) ** 2, np.ones(w) / w, mode="same")
+    return float(np.argmax(env)) / SR
 
 
 # --- IO ----------------------------------------------------------------------------------------

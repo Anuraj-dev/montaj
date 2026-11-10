@@ -53,7 +53,7 @@ class _Usage(Exception):
 
 _COMMANDS = (
     "doctor", "new", "ingest", "ingest-rec", "validate", "render", "sheet", "check", "export", "music",
-    "review", "watch", "taste", "capture", "inspect", "captions", "transcribe", "ref", "custom", "cut",
+    "review", "watch", "taste", "capture", "inspect", "captions", "transcribe", "ref", "custom", "cut", "words",
 )
 
 
@@ -184,6 +184,9 @@ def _parser() -> argparse.ArgumentParser:
     ins.add_argument("--fast", action="store_true")
     ins.add_argument("--problems", action="store_true")
     ins.add_argument("--track", default=None, metavar="SHOT.LAYER.PROP")
+
+    wd = sub.add_parser("words")
+    wd.add_argument("--grep", default=None, metavar="TEXT")
     return p
 
 
@@ -832,6 +835,19 @@ def _join_lines(tl, root: Path, video: Path) -> list[str]:
     return join_lines(video, joins, log=root / "build" / "qa.log")
 
 
+def _sfx_lines(tl, root: Path) -> list[str]:
+    """`INFO sfx=…` and a WARN when two emphasis / auto sounds peak within 80 ms."""
+    from montaj.audio.mix import plan_audio
+    from montaj.emphasis import sfx_lines
+    from montaj.spec import _parse_beat0
+
+    if tl.spec.audio is None or not tl.spec.audio.clips:
+        return []
+    plan = plan_audio(tl.spec, root, tl.markers, tl.fps, tl.spec.video.bpm,
+                      _parse_beat0(tl.spec.video.beat0, tl.fps, []) or 0.0, [], shots=tl.shots)
+    return sfx_lines(plan) if plan else []
+
+
 def _clip_overruns(root: Path) -> list[str]:
     """Clip shots whose timeline read runs past the source. No spec means no new lines."""
     spec_file = root / "montaj.yaml"
@@ -839,6 +855,35 @@ def _clip_overruns(root: Path) -> list[str]:
         return []
     tl = resolve(load_spec(spec_file), root)
     return clip_overruns(tl, _assets_dir(root, tl.spec.assets), spec_dir=root, log=root / "build" / "qa.log")
+
+
+def _cmd_words(ns: argparse.Namespace, root: Path) -> list[str]:
+    """`i  start  word` for the spec's words (audio.markers, else captions.source): the numbers `emphasis:` takes."""
+    from montaj.emphasis import load_words
+    from montaj.spec import Spec
+
+    data = yaml.safe_load((root / "montaj.yaml").read_text(encoding="utf-8")) or {}
+    data.pop("emphasis", None)  # the words are listed before emphasis is written
+    errors: list[str] = []
+    spec = Spec.model_validate(data)
+    words = load_words(spec, root, errors)
+    if errors:
+        return [f"ERR {e}" for e in errors]
+    if ns.grep is not None:
+        n = len(ns.grep.split())
+        keep = {words[j].i for k in range(len(words)) if _grep_hit(words, k, ns.grep) for j in range(k, min(k + n, len(words)))}
+        if not keep:
+            return [f"ERR words: no word matches {ns.grep!r}: try a shorter text"]
+        words = [w for w in words if w.i in keep]
+    return [f"{w.i:>4}  {w.s:6.2f}  {w.w}" for w in words] + [f"OK words: {len(words)}"]
+
+
+def _grep_hit(words, k: int, text: str) -> bool:
+    """Whether the words run starting at position `k` equals `text` (every occurrence, not just the first)."""
+    from montaj.emphasis import _norm
+
+    want = [t for t in (_norm(x) for x in text.split()) if t]
+    return [_norm(w.w) for w in words[k:k + len(want)]] == want
 
 
 def _cmd_check(ns: argparse.Namespace, root: Path, numbers: dict | None = None) -> list[str]:
@@ -868,6 +913,7 @@ def _cmd_check(ns: argparse.Namespace, root: Path, numbers: dict | None = None) 
     if spec is not None:
         tl = resolve(spec, root)
         lines += _join_lines(tl, root, _video(root, ns.video))
+        lines += _sfx_lines(tl, root)
         nums = pacing.metrics(tl, root, _video(root, ns.video), log=root / "build" / "qa.log")
         if numbers is not None:
             numbers.update(nums)
@@ -1166,6 +1212,8 @@ def _dispatch(ns: argparse.Namespace, root: Path) -> list[str]:
         return _cmd_transcribe(ns, root)
     if ns.cmd == "cut":
         return _cmd_cut(ns, root)
+    if ns.cmd == "words":
+        return _cmd_words(ns, root)
     if ns.cmd == "review":
         return review_summary(root)[0]
     if ns.cmd == "taste":

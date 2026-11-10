@@ -793,6 +793,9 @@ class Audio(Frozen):
     edit: list[AudioEdit] = Field(default_factory=list)
     clips: list[AudioClip] = Field(default_factory=list)
     duck: AudioDuck | None = None
+    # #41: `auto` adds transition sounds at layout (`emphasis.expand_emphasis`); both are consumed there, so only clips are hashed.
+    sfx: Literal["auto"] | None = Field(default=None, exclude_if=lambda v: v is None)
+    sfx_gain: str | None = Field(default=None, exclude_if=lambda v: v is None)
 
 
 class Fx(Frozen):
@@ -918,6 +921,19 @@ class Captions(Frozen):
     overrides: list[CaptionOverride] = Field(default_factory=list)
 
 
+class Emphasis(Frozen):
+    """One word-anchored beat (#41): exactly one of `word` / `match` / `on`, then any of the actions."""
+
+    word: StrictInt | None = Field(default=None, exclude_if=_none)
+    match: str | None = Field(default=None, exclude_if=_none)
+    on: str | None = Field(default=None, exclude_if=_none)
+    zoom: RealNum | None = Field(default=None, exclude_if=_none)
+    shake: RealNum | None = Field(default=None, exclude_if=_none)
+    flash: RealNum | None = Field(default=None, exclude_if=_none)
+    sfx: str | None = Field(default=None, exclude_if=_none)
+    caption: Literal["accent"] | None = Field(default=None, exclude_if=_none)
+
+
 class Spec(Frozen):
     video: Video
     assets: str = "assets"
@@ -933,6 +949,8 @@ class Spec(Frozen):
     # Set by `expand_captions`: index of the first `text` block it made. Never dumped, so never hashed.
     caption_from: int | None = Field(default=None, exclude=True)
     captions: Captions | None = Field(default=None, exclude_if=_none_value)
+    # Authoring-only (#41): `expand_emphasis` turns it into effects, camera keys, fx, clips and caption overrides.
+    emphasis: list[Emphasis] | None = Field(default=None, exclude_if=_none)
 
 
 def _yaml_path(loc: tuple) -> str:
@@ -3907,6 +3925,10 @@ def load_spec(path: Path | str, *, expand: bool = True) -> Spec:
         from montaj.cuts import expand_cuts
 
         spec = expand_cuts(spec, path.parent, errors)
+    if spec is not None and not errors and (spec.emphasis or (spec.audio and spec.audio.sfx)):
+        from montaj.emphasis import expand_emphasis
+
+        spec = expand_emphasis(spec, path.parent, errors)
     if spec is not None and expand and spec.captions is not None and not errors:
         from montaj.captions import expand_captions
 
