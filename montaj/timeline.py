@@ -1066,6 +1066,10 @@ def resolve(spec: Spec, spec_dir: Path) -> Timeline:
         from montaj.cuts import expand_cuts
 
         spec = expand_cuts(spec, spec_dir, errors)
+    if spec.emphasis or (spec.audio and spec.audio.sfx):  # likewise
+        from montaj.emphasis import expand_emphasis
+
+        spec = expand_emphasis(spec, spec_dir, errors)
     if spec.captions is not None:  # a spec built in code; load_spec has already expanded a file's
         from montaj.captions import expand_captions
 

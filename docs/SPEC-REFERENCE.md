@@ -185,7 +185,7 @@ Photo fields (`crop`, `focus`, swirl `center`, wall `at`) are source-image pixel
 - `audio.edit[].loop` — `[start, end]`, one of cut or loop — repeats that span.
 - `audio.edit[].times` — whole number ≥ 2, default `2` — loop only: total plays of the span.
 - `audio.clips` — list, default none — voice and SFX placed on the film's clock, mixed with the music into one stereo 48 kHz wav in `build/audio/` (cached by input bytes). Without `clips`, `edit` and `duck`, `audio.track` is muxed untouched. A mix over -0.2 dBFS is scaled down and `check` warns.
-- `audio.clips[].src` — string, required — file relative to the spec, or the same name in the `assets` folder (extension optional; wav/flac/mp3/ogg/m4a, or a video file's audio). A spec-relative file wins when both exist. Or `synth:whoosh`, `synth:riser`, `synth:boom`, `synth:tick`, `synth:glitch` (seeded, deterministic).
+- `audio.clips[].src` — string, required — file relative to the spec, or the same name in the `assets` folder (extension optional; wav/flac/mp3/ogg/m4a, or a video file's audio). A spec-relative file wins when both exist. Or `synth:whoosh`, `synth:riser`, `synth:boom`, `synth:tick`, `synth:glitch`, `synth:pop`, `synth:click`, `synth:swish`, `synth:hit`, `synth:bass-drop`, `synth:shutter`, `synth:ding` (seeded, deterministic). A file `sfx/<name>.*` beside the spec replaces the built-in `synth:<name>`.
 - `audio.clips[].at` — time expression or list of them, required — start time(s) from film start (`0.8s`, `2b`, `logo`). A list places the clip once per time.
 - `audio.clips[].offset` — signed duration (`ms`, `s`, `f`, `b`), default `0s` — added to every `at`, e.g. `-0.16s` to land a whoosh before the cut. Anything before the film start is dropped.
 - `audio.clips[].id` — string, default none — name `duck.under` refers to. Several clips may share an id.
@@ -194,6 +194,8 @@ Photo fields (`crop`, `focus`, swirl `center`, wall `at`) are source-image pixel
 - `audio.clips[].out` — duration, default end of source — end inside the source; must be after `in`.
 - `audio.clips[].gain` — dB string, default `0dB` — level, e.g. `-10dB`; within ±120 dB.
 - `audio.clips[].pan` — number in `[-1, 1]`, default `0` — constant-power pan, `-1` left.
+- `audio.sfx` — `auto`, default none — adds sound design from the layout: `whoosh` on `whip` / `push` / `zoom` transitions (peak on the cut for whip, mid-window for push/zoom), `riser` peaking at marker `drop` if defined, `tick` at each `reveal: type` line. Each sound starts early by its own peak lead so the peak lands on the event. Expands to ordinary `audio.clips` (id `sfx`).
+- `audio.sfx_gain` — dB string, default `-8dB` — gain of every `emphasis` and `sfx: auto` sound.
 - `audio.duck` — mapping, default none — dips the music (not other clips) while the named clips speak: RMS over 120 ms above -45 dB, eased by attack and release.
 - `audio.duck.under` — list of clip ids (or linked shot ids), required — which clips trigger the duck.
 - `audio.duck.depth` — dB string below 0, default `-6dB` — how far the music drops.
@@ -278,6 +280,20 @@ Photo fields (`crop`, `focus`, swirl `center`, wall `at`) are source-image pixel
 - `captions.offset` — duration, default none — shifts every word time (a trimmed clip).
 - `captions.punctuation` — `drop` or `keep`, default `drop` — `drop` removes a trailing `.` `,` `।` from every chunk (`?` `!` `…` stay).
 - `captions.overrides` — list, default none — per-word fixes: `{word, text?, emphasis?}` rewrites a word or forces/clears its accent; `{chunk_break_before}` starts a chunk at that word. An index not in the source is an error. Trailing `.` and `,` are dropped from every word; `?` `!` stay.
+
+## Emphasis (word-anchored edits)
+
+`emphasis` expands at load into shot `effects`, clip `camera` keys, `fx`, `audio.clips` and `captions.overrides`; the expansion is what is hashed. Word numbers: `montaj words [--grep text]`.
+
+- `emphasis` — list, default none — each entry names one moment (`word`, `match` or `on`) and any actions below. Every action lands on that word's start, so it survives `audio.edit`.
+- `emphasis[].word` — integer, one of `word`/`match`/`on` — word index `i` in `audio.markers`, else in the `captions.source` words file.
+- `emphasis[].match` — string, one of `word`/`match`/`on` — words to find (case and punctuation ignored); `text#2` picks the second occurrence. No match is an error.
+- `emphasis[].on` — `every <N>b|s|f`, one of `word`/`match`/`on` — repeats the actions on a grid from film start (beats need `video.bpm`). No `caption`.
+- `emphasis[].zoom` — number ≥ 1, default none — camera push peaking exactly on the word (ramps from 4f before, back after 12f). Clip shots without `camera` only; replaces the shot's `zoom`/`focus` with keys.
+- `emphasis[].shake` — amount (max 200), default none — an 8f `shake` effect at the word.
+- `emphasis[].flash` — number 0–1, default none — a top-level `fx` flash at the word.
+- `emphasis[].sfx` — synth name or file, default none — a sound whose peak (not its first sample) lands on the word.
+- `emphasis[].caption` — `accent`, default none — forces the word's caption emphasis. Needs `captions`.
 - `subs` — list, default none — lyric subtitles, one fixed style.
 - `subs[].from` — time expression, required — subtitle window start.
 - `subs[].to` — time expression, required — subtitle window end.
