@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from montaj.render.core import EASE as EASE_FN, key as eval_key
-from montaj.render.glyphs import STYLE_ENGINE, FontBook, GlyphRun, layout_line
+from montaj.render.glyphs import STYLE_ENGINE, FontBook, GlyphRun, layout_line, plan_text
 from montaj.spec import (
     INCOMING_TRANS,
     WALL_PULLBACK_ZOOM,
@@ -573,43 +573,61 @@ def _resolve_texts(spec: Spec, times: dict[str, float], fps: int) -> list[Resolv
                 sweep = (times[f"text[{i}].lines[{j}].sweep[0]"], times[f"text[{i}].lines[{j}].sweep[1]"])
             else:
                 sweep = (frm, to)
-            run = None
-            if _line_engine(line) == "gpu":
+            by = "char" if typed else line.by
+            at = times[f"text[{i}].lines[{j}].at"]
+            # `fit` / `wrap: balance` become a size and one entry per broken line here, so the hash and the
+            # renderer see plain sizes, texts and ys. A broken line's reveal continues where the last stopped.
+            pieces = [(line.text, line.size, line.y, at)]
+            if line.fit or line.wrap is not None:
                 book = book or FontBook()
-                run = layout_line(
-                    book, line.text, style=line.style, y=line.y, size=line.size, weight=line.weight,
-                    italic=line.italic, tracking=line.tracking, line_height=line.line_height,
-                    align=line.align, indent=line.indent, by="char" if typed else line.by,
+                plan = plan_text(
+                    book, line.text, style=line.style, size=line.size, weight=line.weight, italic=line.italic,
+                    tracking=line.tracking, line_height=line.line_height, fit=line.fit,
+                    balance=line.wrap == "balance", max_width=line.max_width, max_lines=line.max_lines or 2,
                 )
-            lines.append(
-                ResolvedLine(
-                    text=line.text,
-                    style=line.style,
-                    italic=line.italic,
-                    gold=line.gold,
-                    color=line.color,
-                    size=line.size,
-                    weight=line.weight,
-                    tracking=line.tracking,
-                    line_height=line.line_height,
-                    y=line.y,
-                    at=times[f"text[{i}].lines[{j}].at"],
-                    by="char" if typed else line.by,
-                    stagger=stagger,
-                    dur=dur,
-                    rise=0.0 if typed else line.rise,
-                    reveal=line.reveal,
-                    sweep=sweep,
-                    shadow=line.shadow,
-                    indent=line.indent,
-                    align=line.align,
-                    box=line.box,
-                    box_color=line.box_color,
-                    dot=line.dot,
-                    cursor=line.cursor,
-                    glyphs=run,
+                size = plan.size if line.fit else line.size
+                pieces, seen = [], 0
+                for k, piece in enumerate(plan.lines):
+                    pieces.append((piece, size, line.y + k * plan.pitch, at + seen * stagger))
+                    seen += len(piece.split(" ")) if by == "word" else len(piece) + 1
+            for text, size, y, piece_at in pieces:
+                run = None
+                if _line_engine(line) == "gpu":
+                    book = book or FontBook()
+                    run = layout_line(
+                        book, text, style=line.style, y=y, size=size, weight=line.weight,
+                        italic=line.italic, tracking=line.tracking, line_height=line.line_height,
+                        align=line.align, indent=line.indent, by=by,
+                    )
+                lines.append(
+                    ResolvedLine(
+                        text=text,
+                        style=line.style,
+                        italic=line.italic,
+                        gold=line.gold,
+                        color=line.color,
+                        size=size,
+                        weight=line.weight,
+                        tracking=line.tracking,
+                        line_height=line.line_height,
+                        y=y,
+                        at=piece_at,
+                        by=by,
+                        stagger=stagger,
+                        dur=dur,
+                        rise=0.0 if typed else line.rise,
+                        reveal=line.reveal,
+                        sweep=sweep,
+                        shadow=line.shadow,
+                        indent=line.indent,
+                        align=line.align,
+                        box=line.box,
+                        box_color=line.box_color,
+                        dot=line.dot,
+                        cursor=line.cursor,
+                        glyphs=run,
+                    )
                 )
-            )
         out.append(
             ResolvedText(
                 from_=frm,
