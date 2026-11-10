@@ -7,8 +7,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from montaj.render.core import EASE as EASE_FN, key as eval_key
-from montaj.render.glyphs import STYLE_ENGINE, FontBook, GlyphRun, layout_line
+from montaj.render.glyphs import FontBook, GlyphRun, layout_line
 from montaj.spec import (
+    TextEmphasis,
+    TextShadow,
+    TextStroke,
+    line_engine,
     INCOMING_TRANS,
     WALL_PULLBACK_ZOOM,
     WAVEFORM_BARS,
@@ -147,13 +151,17 @@ class ResolvedLine:
     rise: float
     reveal: str
     sweep: tuple[float, float]
-    shadow: bool
+    shadow: bool | TextShadow
     indent: float = 0.0
     align: str = "center"
     box: str = "none"
     box_color: str | None = None
     dot: str | None = None
     cursor: bool = False
+    # gpu-engine paint (#21); layout-side fields (font, case, pos, rotate, emphasis scale) live in `glyphs`.
+    stroke: TextStroke | None = None
+    glow: float | None = None
+    emphasis: TextEmphasis | None = None
     # `engine: gpu` lines only: the HarfBuzz layout, fixed here so the renderer never shapes and the
     # segment hash sees every glyph id, position and font identity (project.segment_hash).
     glyphs: GlyphRun | None = None
@@ -549,10 +557,6 @@ def _visible_span(resolved: list[ResolvedShot], i: int, parsed: dict[str, int]) 
     return (round_frame(v0), round_frame(v1))
 
 
-def _line_engine(line) -> str:
-    return line.engine or STYLE_ENGINE.get(line.style, "chromium")
-
-
 def _resolve_texts(spec: Spec, times: dict[str, float], fps: int) -> list[ResolvedText]:
     out: list[ResolvedText] = []
     book: FontBook | None = None  # loaded on the first gpu line; one per resolve
@@ -574,13 +578,18 @@ def _resolve_texts(spec: Spec, times: dict[str, float], fps: int) -> list[Resolv
             else:
                 sweep = (frm, to)
             run = None
-            if _line_engine(line) == "gpu":
+            y = line.y
+            if line_engine(line) == "gpu":
                 book = book or FontBook()
                 run = layout_line(
                     book, line.text, style=line.style, y=line.y, size=line.size, weight=line.weight,
                     italic=line.italic, tracking=line.tracking, line_height=line.line_height,
                     align=line.align, indent=line.indent, by="char" if typed else line.by,
+                    font=line.font, case=line.case,
+                    emphasis_scale=line.emphasis.scale if line.emphasis is not None else 1.0,
+                    pos=line.pos, rotate=line.rotate or 0.0,
                 )
+                y = run.box[1]  # `pos` lines: the laid-out top
             lines.append(
                 ResolvedLine(
                     text=line.text,
@@ -592,7 +601,7 @@ def _resolve_texts(spec: Spec, times: dict[str, float], fps: int) -> list[Resolv
                     weight=line.weight,
                     tracking=line.tracking,
                     line_height=line.line_height,
-                    y=line.y,
+                    y=y,
                     at=times[f"text[{i}].lines[{j}].at"],
                     by="char" if typed else line.by,
                     stagger=stagger,
@@ -608,6 +617,10 @@ def _resolve_texts(spec: Spec, times: dict[str, float], fps: int) -> list[Resolv
                     dot=line.dot,
                     cursor=line.cursor,
                     glyphs=run,
+                    stroke=line.stroke,
+                    glow=line.glow,
+                    # Marked words without an `emphasis:` mapping take its defaults.
+                    emphasis=line.emphasis if line.emphasis is not None or run is None or not run.spans else TextEmphasis(),
                 )
             )
         out.append(

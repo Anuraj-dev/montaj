@@ -143,7 +143,7 @@ Photo fields (`crop`, `focus`, swirl `center`, wall `at`) are source-image pixel
 - `text[].backdrop.strength` — number, default `0.8` — opacity of the darkest part, from 0 to 1.
 - `text[].backdrop.place` — `bottom`, `top` or `band`, default `band` — `band` covers the lines (full strength on the line box, cosine fade across a pad of 48 design px or 0.45× the line size); `bottom` and `top` keep the outer 28% of the frame fully dark, then fade across the next 22%.
 - `text[].lines` — list, required — the lines in this block.
-- `text[].lines[].text` — string, required — the line.
+- `text[].lines[].text` — string, required — the line. `*words*` mark emphasis (gpu engine); `\*` is a literal asterisk; an unclosed `*` is an error.
 - `text[].lines[].style` — `serif`, `script`, `caps`, `deva`, `sans` (Inter) or `mono` (JetBrains Mono), default `serif`. `sans` size `48`, weights 400/600/700; `mono` size `32`, weights 400/700; both cream, tracking 0.
 - `text[].lines[].italic` — boolean, default false — serif only.
 - `text[].lines[].gold` — boolean, default false — gold gradient fill with a travelling sweep.
@@ -152,7 +152,7 @@ Photo fields (`crop`, `focus`, swirl `center`, wall `at`) are source-image pixel
 - `text[].lines[].weight` — number, default serif `300`, script/deva `400`, caps `600`.
 - `text[].lines[].tracking` — number, default serif `0.01`, caps `0.42`, script/deva `0` — letter-spacing in em.
 - `text[].lines[].line_height` — number, default serif `1.1`, deva `1.5`; script and caps leave it unset.
-- `text[].lines[].y` — number, required — design-px top of the line box.
+- `text[].lines[].y` — number, required unless `pos` is set — design-px top of the line box.
 - `text[].lines[].at` — time expression, required — when this line starts revealing.
 - `text[].lines[].by` — `word` or `char`, default `word` — reveal unit.
 - `text[].lines[].stagger` — duration, default `0.16s` word / `0.07s` char — delay between units.
@@ -160,14 +160,21 @@ Photo fields (`crop`, `focus`, swirl `center`, wall `at`) are source-image pixel
 - `text[].lines[].rise` — number, default `26` — design-px rise of each unit.
 - `text[].lines[].reveal` — `rise`, `pop` or `type`, default `rise`. `type` is a typewriter: one char per `stagger` (default `0.05s`), no rise or blur, each char instant (`dur` is rejected); forces `by: char`.
 - `text[].lines[].sweep` — `[from, to]` time expressions, default the block window — gold gradient travels 100%→0% across it.
-- `text[].lines[].shadow` — boolean, default true — false drops the text shadow (ink lines).
+- `text[].lines[].shadow` — boolean or `{x, y, blur, color, opacity}`, default true — false drops the text shadow (ink lines). The mapping (gpu engine; defaults `0`, `6`, `12` design px, `#000000`, `0.6`) replaces the style's shadow with one drop shadow.
 - `text[].lines[].indent` — number, default `0` — extra `margin-left` in em, on top of the centred line.
 - `text[].lines[].align` — `center`, `left` or `right`, default `center` — `left`/`right` inset the line 72 design px from that edge.
 - `text[].lines[].cursor` — boolean, default false — `reveal: type` only; a bar after the last typed char, solid while typing, then blinking every `0.53s`.
 - `text[].lines[].box` — `none` or `chip`, default `none` — `chip` draws a rounded translucent pill behind the line, revealed with its first unit.
 - `text[].lines[].box_color` — `cream`, `gold`, `ink` or `#rrggbb`, default dark translucent — chip fill; needs `box: chip`.
 - `text[].lines[].dot` — `cream`, `gold`, `ink` or `#rrggbb`, default none — status dot before the text inside the chip; needs `box: chip`.
-- `text[].lines[].engine` — `chromium` or `gpu`, default the style's engine (`montaj doctor` lists it; all `chromium` today) — `gpu` shapes with HarfBuzz and draws distance-field glyphs on the GPU, no browser; rejects `gold`, `box`, `cursor`, card lines and characters the style's fonts lack.
+- `text[].lines[].engine` — `chromium` or `gpu`, default `gpu` when the line sets any styling field below (`font`, `case`, `emphasis`, `stroke`, `glow`, `pos`, `rotate`, a `shadow` mapping) or marks `*words*`, else the style's engine (`montaj doctor` lists it; all `chromium` today) — `gpu` shapes with HarfBuzz and draws distance-field glyphs on the GPU, no browser; rejects `gold`, `box`, `cursor`, card lines and characters the fonts lack. `engine: chromium` with a styling field is an error.
+- `text[].lines[].font` — `montserrat-black`, `anton`, `bebas`, `poppins-extrabold`, `bangers`, `archivo-black` or `mukta-extrabold` (Latin + Devanagari), default the style's font — bundled display face (OFL); excludes `weight` and `italic`. An unknown name lists the fonts.
+- `text[].lines[].case` — `upper`, `lower` or `as-is`, default the style's (`caps` upper, others as-is).
+- `text[].lines[].emphasis` — `{color, scale}`, default `{color: "#ffe600", scale: 1}` when the text marks `*words*` — fill and size multiplier (0–3) of the marked words; needs marked words.
+- `text[].lines[].stroke` — `{width, color}`, default none — outline `width` design px (≤ 37.5% of `size`; `validate` warns over 20%), `color` default `#000000`.
+- `text[].lines[].glow` — number 0–1, default none — halo in the fill colour, blur 0.25× `size`, at this opacity.
+- `text[].lines[].pos` — `[x, y]` design px, default none — centre of the line box; replaces `y` and `align`.
+- `text[].lines[].rotate` — degrees, default `0` — turns the whole line about its box centre (positive is clockwise).
 - `text[].lower_third` — `{title, subtitle?, at?, side?, y?}`, replaces `lines` — sugar for a bold sans title chip with a gold dot and a sans subtitle 110 design px below. `at` default the block `from`, `side` `left` or `right` default `left`, `y` default `1500` (design px, title top). `fade_in`/`fade_out` default `0.4s`. No bar or slide yet.
 - `subs` — list, default none — lyric subtitles, one fixed style.
 - `subs[].from` — time expression, required — subtitle window start.

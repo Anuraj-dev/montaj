@@ -298,9 +298,38 @@ class SpeedKey(Frozen):
     ease: str = "smooth"
 
 
+class TextStroke(Frozen):
+    """An outline outside the fill. `width` design px."""
+
+    width: RealNum
+    color: str = "#000000"
+
+
+class TextShadow(Frozen):
+    """One drop shadow; replaces the style's own. Offsets and blur radius in design px."""
+
+    x: RealNum = 0.0
+    y: RealNum = 6.0
+    blur: RealNum = 12.0
+    color: str = "#000000"
+    opacity: RealNum = 0.6
+
+
+class TextEmphasis(Frozen):
+    """How `*marked*` words differ from the rest of the line."""
+
+    color: str = "#ffe600"
+    scale: RealNum = 1.0
+
+
+def _none(v: object) -> bool:
+    return v is None
+
+
 class TextLine(Frozen):
     text: str
-    y: float
+    # Required unless `pos` is set (checked in `_check_text_line`).
+    y: float | None = None
     at: TimeExpr
     style: str = "serif"
     italic: bool = False
@@ -316,7 +345,8 @@ class TextLine(Frozen):
     rise: float = 26.0
     reveal: str = "rise"
     sweep: tuple[TimeExpr, TimeExpr] | None = None
-    shadow: bool = True
+    # A mapping is a custom shadow (gpu engine); a bool switches the style's own.
+    shadow: bool | TextShadow = True
     indent: float = 0.0
     # Added after the first release: left out of the dump at their default so older films keep their hashes.
     align: str = Field(default="center", exclude_if=lambda v: v == "center")
@@ -326,6 +356,35 @@ class TextLine(Frozen):
     cursor: bool = Field(default=False, exclude_if=lambda v: v is False)
     # None = the style's engine (render/glyphs.STYLE_ENGINE). "gpu" shapes with HarfBuzz at resolve time.
     engine: str | None = Field(default=None, exclude_if=lambda v: v is None)
+    # Text styling (#21). Each one is drawn by the gpu engine and selects it when `engine` is unset.
+    font: str | None = Field(default=None, exclude_if=_none)
+    case: str | None = Field(default=None, exclude_if=_none)
+    emphasis: TextEmphasis | None = Field(default=None, exclude_if=_none)
+    stroke: TextStroke | None = Field(default=None, exclude_if=_none)
+    glow: RealNum | None = Field(default=None, exclude_if=_none)
+    pos: tuple[RealNum, RealNum] | None = Field(default=None, exclude_if=_none)
+    rotate: RealNum | None = Field(default=None, exclude_if=_none)
+
+
+def gpu_fields(line: TextLine) -> list[str]:
+    """The fields of `line` only the gpu engine draws. Any of them makes the line a gpu line."""
+    out = [n for n in ("font", "case", "emphasis", "stroke", "glow", "pos", "rotate") if getattr(line, n) is not None]
+    if isinstance(line.shadow, TextShadow):
+        out.append("shadow")
+    if "*" in line.text:  # `*emphasis*` markup (or an escaped `\*`)
+        out.append("text")
+    return out
+
+
+def line_engine(line: TextLine) -> str:
+    """`engine` when set; else gpu when a gpu-only field is used; else the style's engine."""
+    from montaj.render.glyphs import STYLE_ENGINE
+
+    if line.engine is not None:
+        return line.engine
+    if gpu_fields(line):
+        return "gpu"
+    return STYLE_ENGINE.get(line.style, "chromium")
 
 
 class LowerThird(Frozen):
@@ -2236,7 +2295,9 @@ def _check_text_line(path: str, line: TextLine, errors: list[str]) -> None:
         errors.append(_line(f"{path}.dur", "typewriter characters appear instantly", "remove dur, or use reveal: rise"))
     if line.cursor and line.reveal != "type":
         errors.append(_line(f"{path}.cursor", "cursor needs the typewriter reveal", "set reveal: type"))
-    if line.engine is not None:
+    if line.y is None and line.pos is None:
+        errors.append(_line(f"{path}.y", "missing", "set y (top of the line, design px) or pos: [x, y]"))
+    if line.engine is not None or gpu_fields(line):
         _check_text_engine(path, line, errors)
     allowed = TEXT_WEIGHTS.get(line.style)
     if allowed and line.weight is not None and line.weight not in allowed:
@@ -2260,20 +2321,105 @@ def _check_text_line(path: str, line: TextLine, errors: list[str]) -> None:
 def _check_text_engine(path: str, line: TextLine, errors: list[str]) -> None:
     from montaj.render import glyphs
 
-    if line.engine not in glyphs.ENGINES:
+    if line.engine is not None and line.engine not in glyphs.ENGINES:
         errors.append(_line(f"{path}.engine", f"unknown {line.engine!r}", "use chromium or gpu"))
         return
-    if line.engine != "gpu":
+    styled = gpu_fields(line)
+    if line.engine == "chromium":
+        for name in styled:
+            what = "*emphasis* markup" if name == "text" else name
+            errors.append(_line(f"{path}.{name}", f"{what} is drawn by the gpu engine",
+                                "remove engine: chromium" if name != "text" else "remove engine: chromium, or escape * as \\*"))
+        return
+    if line_engine(line) != "gpu":
         return
     # The gpu engine draws fill, shadow and the rise/pop/type reveals; these still need Chromium.
+    hint = "remove it, or drop engine: gpu" if not styled else f"remove it, or drop {', '.join(styled)}"
     for name, unset in (("gold", False), ("box", "none"), ("cursor", False)):
         if getattr(line, name) != unset:
-            errors.append(_line(f"{path}.{name}", f"{name} is not drawn by the gpu engine yet", "remove it, or drop engine: gpu"))
-    if line.style in TEXT_STYLES:
-        missing = glyphs.FontBook().missing(line.style, line.weight, line.italic, line.text)
+            errors.append(_line(f"{path}.{name}", f"{name} is not drawn by the gpu engine yet", hint))
+    _check_text_styling(path, line, errors)
+    if line.font is not None and line.font not in glyphs.FONTS:
+        errors.append(_line(f"{path}.font", f"unknown {line.font!r}", f"use {', '.join(glyphs.FONTS)}"))
+        return
+    if line.font is not None and line.weight is not None:
+        errors.append(_line(f"{path}.weight", f"{line.font} ships one weight", "remove weight, or pick another font"))
+    if line.font is not None and line.italic:
+        errors.append(_line(f"{path}.italic", f"{line.font} has no italic", "remove italic"))
+    if line.style in TEXT_STYLES and (line.case is None or line.case in glyphs.CASES):
+        try:
+            plain, _ = glyphs.parse_emphasis(line.text)
+        except ValueError:
+            return  # reported by _check_text_styling
+        missing = glyphs.FontBook().missing(line.style, line.weight, line.italic, plain, font=line.font, case=line.case)
         if missing:
-            errors.append(_line(f"{path}.text", f"{line.style} fonts have no glyph for {''.join(missing)!r}",
-                                "use another style, or drop engine: gpu"))
+            errors.append(_line(f"{path}.text", f"{line.font or line.style} fonts have no glyph for {''.join(missing)!r}",
+                                "use another font or style" if styled else "use another style, or drop engine: gpu"))
+
+
+def _check_text_styling(path: str, line: TextLine, errors: list[str]) -> None:
+    """Field-level checks for the gpu-engine styling fields (#21)."""
+    from montaj.render import glyphs
+
+    if line.case is not None and line.case not in glyphs.CASES:
+        errors.append(_line(f"{path}.case", f"unknown {line.case!r}", "use upper, lower or as-is"))
+    try:
+        _plain, spans = glyphs.parse_emphasis(line.text)
+    except ValueError:
+        errors.append(_line(f"{path}.text", "unclosed *", "close the *emphasis*, or escape a literal asterisk as \\*"))
+        spans = []
+    if line.emphasis is not None:
+        if not any(spans):
+            errors.append(_line(f"{path}.emphasis", "no *marked* words in text", "wrap the words in *…*, or remove emphasis"))
+        _check_color(f"{path}.emphasis.color", line.emphasis.color, errors)
+        sc = line.emphasis.scale
+        if not math.isfinite(sc) or sc <= 0 or sc > 3:
+            errors.append(_line(f"{path}.emphasis.scale", f"must be > 0 and <= 3, got {_fmt_num(sc)}", "use 1.0-1.3"))
+    if line.stroke is not None:
+        _check_color(f"{path}.stroke.color", line.stroke.color, errors)
+        w = line.stroke.width
+        size = line.size if line.size is not None else glyphs.STYLE_METRICS.get(line.style, glyphs.STYLE_METRICS["serif"]).size
+        cap = glyphs.SPREAD / glyphs.SDF_EM  # em of distance the glyph cells hold
+        if not math.isfinite(w) or w < 0:
+            errors.append(_line(f"{path}.stroke.width", f"must be >= 0, got {_fmt_num(w)}", "use design px, e.g. 8"))
+        elif size and math.isfinite(size) and size > 0 and w > cap * size:
+            errors.append(_line(f"{path}.stroke.width", f"{_fmt_num(w)} px is over {cap:.0%} of size {_fmt_num(size)}",
+                                f"use at most {_fmt_num(round(cap * size, 1))}"))
+    if isinstance(line.shadow, TextShadow):
+        sh = line.shadow
+        _check_color(f"{path}.shadow.color", sh.color, errors)
+        for name in ("x", "y", "blur", "opacity"):
+            v = getattr(sh, name)
+            if not math.isfinite(v) or (name == "blur" and v < 0) or (name == "opacity" and not 0 <= v <= 1):
+                need = "from 0 to 1" if name == "opacity" else ">= 0" if name == "blur" else "finite"
+                errors.append(_line(f"{path}.shadow.{name}", f"must be {need}, got {_fmt_num(v)}", "use design px" if name != "opacity" else "use a fraction"))
+    if line.glow is not None and (not math.isfinite(line.glow) or not 0 <= line.glow <= 1):
+        errors.append(_line(f"{path}.glow", f"must be from 0 to 1, got {_fmt_num(line.glow)}", "use a fraction, e.g. 0.4"))
+    if line.pos is not None:
+        if not all(math.isfinite(v) for v in line.pos):
+            errors.append(_line(f"{path}.pos", "must be finite", "use [x, y] in design px"))
+        if line.y is not None:
+            errors.append(_line(f"{path}.pos", "pos replaces y", "remove y"))
+        if line.align != "center":
+            errors.append(_line(f"{path}.pos", "pos replaces align", "remove align"))
+    if line.rotate is not None and not math.isfinite(line.rotate):
+        errors.append(_line(f"{path}.rotate", "must be finite", "use degrees, e.g. -3"))
+
+
+def text_warnings(spec: Spec) -> list[str]:
+    """`WARN` lines for text that validates but will likely look wrong."""
+    from montaj.render import glyphs
+
+    out: list[str] = []
+    for i, block in enumerate(spec.text):
+        for j, line in enumerate(block.lines):
+            if line.stroke is None:
+                continue
+            size = line.size if line.size is not None else glyphs.STYLE_METRICS.get(line.style, glyphs.STYLE_METRICS["serif"]).size
+            if size and line.stroke.width > 0.2 * size:
+                out.append(f"WARN text[{i}].lines[{j}].stroke.width: {line.stroke.width:g} px is over 20% of "
+                           f"size {size:g}; the outline will swallow the letters")
+    return out
 
 
 def _validate_card(
@@ -2289,6 +2435,9 @@ def _validate_card(
         _check_text_line(p, line, errors)
         if line.engine == "gpu":
             errors.append(_line(f"{p}.engine", "card lines are drawn by Chromium", "remove engine: gpu"))
+        for name in gpu_fields(line):
+            errors.append(_line(f"{p}.{name}", "card lines are drawn by Chromium, without styling",
+                                "use a text block over a blank shot"))
         _card_duration(line.at, fps, bpm, f"{p}.at", errors)
         if line.stagger is not None:
             _card_duration(line.stagger, fps, bpm, f"{p}.stagger", errors)

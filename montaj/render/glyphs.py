@@ -56,6 +56,19 @@ FACES = MappingProxyType({
     "mono": tuple((w, False, (f"jetbrains-mono-latin-{w}-normal.woff2",)) for w in (400, 700)),
 })
 
+# Display faces for `font:` (gpu engine only). One weight each; the first file covering a character
+# shapes it, as in FACES. Licences sit beside the files (fonts/README.md).
+FONTS = MappingProxyType({
+    "montserrat-black": ("montserrat-latin-900-normal.woff2",),
+    "anton": ("anton-latin-400-normal.woff2",),
+    "bebas": ("bebas-neue-latin-400-normal.woff2",),
+    "poppins-extrabold": ("poppins-latin-800-normal.woff2",),
+    "bangers": ("bangers-latin-400-normal.woff2",),
+    "archivo-black": ("archivo-black-latin-400-normal.woff2",),
+    "mukta-extrabold": ("mukta-devanagari-800-normal.woff2", "mukta-latin-800-normal.woff2"),
+})
+CASES = ("upper", "lower", "as-is")
+
 
 @dataclass(frozen=True)
 class StyleMetrics:
@@ -93,7 +106,8 @@ class PlacedGlyph:
 
     `x, y` is the pen origin on the baseline. `ink` is the outline's box (x0, y0, x1, y1); a space has
     an empty box at its origin. `cluster` is the code-point index the glyph came from; `unit` is the
-    reveal unit (word or code point) it belongs to.
+    reveal unit (word or code point) it belongs to. `emph` is 0 for plain text, else the 1-based index
+    of the `*emphasis*` span the glyph sits in; `scale` multiplies `GlyphRun.size` for this glyph.
     """
 
     font: int
@@ -104,11 +118,18 @@ class PlacedGlyph:
     ink: tuple[float, float, float, float]
     cluster: int
     unit: int
+    # Added with text styling (#21); project.segment_hash drops them at these defaults.
+    emph: int = 0
+    scale: float = 1.0
 
 
 @dataclass(frozen=True)
 class GlyphRun:
-    """A shaped line. `box` is the CSS line box (x, y, w, h) in design px; `units` counts reveal units."""
+    """A shaped line. `box` is the CSS line box (x, y, w, h) in design px; `units` counts reveal units.
+
+    `rotate` (degrees, clockwise) turns the whole painted line about the centre of `box`; positions
+    and ink boxes stay unrotated.
+    """
 
     text: str
     size: float
@@ -117,6 +138,17 @@ class GlyphRun:
     box: tuple[float, float, float, float]
     baseline: float
     units: int
+    rotate: float = 0.0  # project.segment_hash drops it at 0
+
+    @property
+    def pivot(self) -> tuple[float, float]:
+        x, y, w, h = self.box
+        return x + w / 2.0, y + h / 2.0
+
+    @property
+    def spans(self) -> int:
+        """How many `*emphasis*` spans the line has."""
+        return max((g.emph for g in self.glyphs), default=0)
 
 
 def atlas_key(sha: str) -> str:
@@ -174,8 +206,12 @@ class FontBook:
             self._faces[name] = Face(self.root / name)
         return self._faces[name]
 
-    def files(self, style: str, weight: float | None, italic: bool) -> tuple[str, ...]:
-        """Font files for a style: the nearest shipped weight in the requested slant."""
+    def files(self, style: str, weight: float | None, italic: bool, font: str | None = None) -> tuple[str, ...]:
+        """Font files for a line: `font` when set, else the style's nearest shipped weight in the slant."""
+        if font is not None:
+            if font not in FONTS:
+                raise ValueError(f"unknown font {font!r}; available: {', '.join(FONTS)}")
+            return FONTS[font]
         faces = FACES.get(style)
         if faces is None:
             raise ValueError(f"no gpu fonts for style {style!r}")
@@ -183,11 +219,12 @@ class FontBook:
         slanted = [f for f in faces if f[1] == bool(italic)] or list(faces)
         return min(slanted, key=lambda f: (abs(f[0] - want), -f[0]))[2]
 
-    def missing(self, style: str, weight: float | None, italic: bool, text: str) -> list[str]:
-        """Characters no file of the style covers (ignoring ZWJ/ZWNJ, which only steer shaping)."""
-        faces = [self.face(n) for n in self.files(style, weight, italic)]
+    def missing(self, style: str, weight: float | None, italic: bool, text: str, *,
+                font: str | None = None, case: str | None = None) -> list[str]:
+        """Characters no file of the line's face covers (ignoring ZWJ/ZWNJ, which only steer shaping)."""
+        faces = [self.face(n) for n in self.files(style, weight, italic, font)]
         out: list[str] = []
-        for ch in _cased(style, text):
+        for ch in apply_case(text, style, case):
             if ch in "‌‍" or ch in out:
                 continue
             if not any(ord(ch) in f.cmap for f in faces):
@@ -271,8 +308,57 @@ class _FlattenPen:
         self._pen.addComponent(name, transform)
 
 
-def _cased(style: str, text: str) -> str:
-    return text.upper() if STYLE_METRICS[style].upper else text
+def _case_of(style: str, case: str | None) -> str:
+    if case is not None:
+        return case
+    return "upper" if STYLE_METRICS[style].upper else "as-is"
+
+
+def apply_case(text: str, style: str, case: str | None = None, emph: list[int] | None = None):
+    """`text` in the line's case (`case`, else the style's). With `emph` (one entry per code point)
+    returns (text, emph) with the flags following the cased code points (ß -> SS keeps its span)."""
+    c = _case_of(style, case)
+    conv = str.upper if c == "upper" else str.lower if c == "lower" else None
+    if emph is None:
+        return conv(text) if conv else text
+    if conv is None:
+        return text, list(emph)
+    out, flags = [], []
+    for ch, e in zip(text, emph):
+        cc = conv(ch)
+        out.append(cc)
+        flags.extend([e] * len(cc))
+    return "".join(out), flags
+
+
+def parse_emphasis(text: str) -> tuple[str, list[int]]:
+    """`*marked*` spans to (plain text, per-code-point span index: 0 plain, 1.. in order).
+
+    `\\*` is a literal asterisk. An unclosed `*` raises ValueError.
+    """
+    out: list[str] = []
+    flags: list[int] = []
+    span, open_ = 0, False
+    i = 0
+    while i < len(text):
+        ch = text[i]
+        if ch == "\\" and i + 1 < len(text) and text[i + 1] == "*":
+            out.append("*")
+            flags.append(span if open_ else 0)
+            i += 2
+            continue
+        if ch == "*":
+            open_ = not open_
+            if open_:
+                span += 1
+            i += 1
+            continue
+        out.append(ch)
+        flags.append(span if open_ else 0)
+        i += 1
+    if open_:
+        raise ValueError("unclosed * (escape a literal asterisk as \\*)")
+    return "".join(out), flags
 
 
 def _units(text: str, by: str) -> tuple[list[int], int]:
@@ -310,7 +396,7 @@ def layout_line(
     text: str,
     *,
     style: str,
-    y: float,
+    y: float | None = None,
     size: float | None = None,
     weight: float | None = None,
     italic: bool = False,
@@ -319,28 +405,45 @@ def layout_line(
     align: str = "center",
     indent: float = 0.0,
     by: str = "word",
+    font: str | None = None,
+    case: str | None = None,
+    emphasis_scale: float = 1.0,
+    pos: tuple[float, float] | None = None,
+    rotate: float = 0.0,
 ) -> GlyphRun:
     """Shape one line and place it like text.css places a `.txt` line at `top: y`.
 
     The line box is `line_height × size` tall (the font's ascent + descent + gap when unset) with the
     baseline at half-leading + ascent. Letter-spacing follows every cluster, the last one included,
     and turns optional ligatures off, as Chromium does. Left-to-right scripts only.
+
+    `text` may mark emphasis spans with `*…*` (`\\*` is a literal asterisk); their glyphs carry the
+    span index in `emph` and are set `emphasis_scale` times larger on the shared baseline. `font`
+    replaces the style's face; `case` its casing. `pos` is the centre of the line box and replaces
+    `y` and `align`.
     """
     import uharfbuzz as hb
 
     m = STYLE_METRICS[style]
     size = float(size if size is not None else m.size)
     track = float(tracking if tracking is not None else m.tracking) * size
-    text = _cased(style, text)
-    faces = [book.face(n) for n in book.files(style, weight, italic)]
-    missing = book.missing(style, weight, italic, text)
+    text, emph = parse_emphasis(text)
+    text, emph = apply_case(text, style, case, emph)
+    faces = [book.face(n) for n in book.files(style, weight, italic, font)]
+    missing = book.missing(style, weight, italic, text, font=font, case="as-is")
     if missing:
-        raise ValueError(f"{style} fonts have no glyph for {''.join(missing)!r}")
+        raise ValueError(f"{font or style} fonts have no glyph for {''.join(missing)!r}")
     units, n_units = _units(text, by)
     codepoints = [ord(c) for c in text]
     features = {"liga": False, "clig": False} if track else {}
+    escale = float(emphasis_scale)
 
-    shaped: list[tuple[int, int, int, float, float, float]] = []  # face, gid, cluster, adv, dx, dy (px)
+    def gscale(cluster: int) -> float:
+        return escale if cluster < len(emph) and emph[cluster] else 1.0
+
+    # face, gid, cluster, adv, dx, dy (px). Shaping has no hinting, so a scaled glyph is the same
+    # glyph with its metrics times its scale.
+    shaped: list[tuple[int, int, int, float, float, float]] = []
     for fi, start, end in _font_runs(faces, text):
         face = faces[fi]
         s = size / face.upem
@@ -348,15 +451,15 @@ def layout_line(
         buf.add_codepoints(codepoints, start, end - start)
         buf.guess_segment_properties()
         hb.shape(face.font, buf, features)
-        for info, pos in zip(buf.glyph_infos, buf.glyph_positions):
-            shaped.append((fi, info.codepoint, info.cluster, pos.x_advance * s, pos.x_offset * s, -pos.y_offset * s))
+        for info, gp in zip(buf.glyph_infos, buf.glyph_positions):
+            g = s * gscale(info.cluster)
+            shaped.append((fi, info.codepoint, info.cluster, gp.x_advance * g, gp.x_offset * g, -gp.y_offset * g))
 
     head = faces[0]
     hs = size / head.upem
     asc, desc = head.ascent * hs, head.descent * hs
     lh = line_height if line_height is not None else m.line_height
     box_h = float(lh) * size if lh is not None else (head.ascent + head.descent + head.line_gap) * hs
-    baseline = y + (box_h - (asc + desc)) / 2.0 + asc
 
     pens: list[float] = []
     pen = 0.0
@@ -365,20 +468,27 @@ def layout_line(
         pen += adv
         last_of_cluster = i + 1 == len(shaped) or shaped[i + 1][2] != cluster
         if last_of_cluster:
-            pen += track
+            pen += track * gscale(cluster)
     width = pen
     shift = float(indent) * size
-    if align == "left":
+    if pos is not None:
+        x0 = float(pos[0]) - width / 2.0 + shift
+        y = float(pos[1]) - box_h / 2.0
+    elif align == "left":
         x0 = EDGE_INSET + shift
     elif align == "right":
         x0 = DESIGN_W - EDGE_INSET - width + shift
     else:
         x0 = (DESIGN_W - width) / 2.0 + shift
+    if y is None:
+        raise ValueError("layout_line needs y or pos")
+    baseline = y + (box_h - (asc + desc)) / 2.0 + asc
 
     glyphs: list[PlacedGlyph] = []
     for (fi, gid, cluster, adv, dx, dy), p in zip(shaped, pens):
         face = faces[fi]
-        s = size / face.upem
+        gs = gscale(cluster)
+        s = size / face.upem * gs
         gx, gy = x0 + p + dx, baseline + dy
         ext = face.font.get_glyph_extents(gid)
         if ext is None or ext.width == 0 or ext.height == 0:
@@ -390,6 +500,7 @@ def layout_line(
         glyphs.append(PlacedGlyph(
             font=fi, gid=int(gid), x=_r(gx), y=_r(gy), advance=_r(adv),
             ink=tuple(_r(v) for v in ink), cluster=int(cluster), unit=units[cluster] if cluster < len(units) else 0,
+            emph=emph[cluster] if cluster < len(emph) else 0, scale=_r(gs),
         ))
     return GlyphRun(
         text=text,
@@ -399,6 +510,7 @@ def layout_line(
         box=(_r(x0), _r(y), _r(width), _r(box_h)),
         baseline=_r(baseline),
         units=n_units,
+        rotate=_r(rotate),
     )
 
 
