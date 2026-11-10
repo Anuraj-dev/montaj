@@ -1,27 +1,23 @@
 # Montaj — State
 > Agent-native video harness: YAML spec in, finished video out, zero-token re-render/review · Last checkpoint: 2026-11-10
 
-## Issue status (source of truth; 2026-11-10)
-- **Closed** (merged to `main`, closed on GitHub with merge sha): #1–46 except #47/#48, #50, #52. Do not reopen or
-  re-implement these. Gaps each left are in its close comment.
-- **Open:** #47 (CLI `montaj spec` + skill rewrite merged 73bbc11; fresh-agent benchmark left), #48 (talking-short,
-  vlog-montage merged; explainer + gaming-highlight in worktrees `i48-explainer`/`i48-gaming`), #51 (`montaj cut`
-  pauses; merged, real 18.5 s clip not on this machine), #53 (cuts: auto word remap + layer audio; worktree `i53`).
-- Tracker #49 checkboxes match this list. `main` is 120 commits ahead of `origin/main` (not pushed).
-- Tests on main f31c988: CPU 1197, GPU 134 passed.
-- Follow-ups: #36 gaps (behind-text: layers above the subject don't hide it; only fade blends the matte; no mattes
-  on photo shots; DeepLab edges coarse). Stale hint: `mix.check_links` says "add audio: {track: ...}" but `track`
-  is optional. `montaj new --list` shows `-` length for recipes whose first comment line has no length.
-
 ## 🚧 In progress / next
-- Next: finish #48/#53, then the #47 fresh-agent benchmark; ROADMAP (M5–M11, tracker #49) is otherwise done. Caption design contract: `docs/CAPTIONS.md`.
-- GitHub issues #1–19 all merged into `main` and pushed (2026-10-21); issues closed with their merge sha.
-- Open worktrees with uncommitted, unmerged work (keep): `montaj-wt/launch-film` (`feat/engine-launch-film`),
-  `montaj-wt/export-wa-audio` (`fix/export-whatsapp-audio-copy`). Both branch from `6b1caaf`, 82 commits behind
-  `main` (which since changed encode/pipeline/project/render): expect conflicts. The 13 `wip/w*` benchmark-run
-  branches are deleted; restore any from `montaj-projects/_scratch/archive/montaj-wip-benchmark-runs.bundle`.
-- Backlog: lower-thirds are a title chip + subtitle (no bar/slide yet); wall prints at full res (downsample at build);
-  hold edit re-renders later segments; M5 `custom` shot (evidence: BENCHMARK.md § Code-drawn visuals).
+- **Next: #47 fresh-agent benchmark.** In a fresh session, an agent uses only the `make-video` skill to make a 20 s
+  fast-paced, MrBeast-style, motion-designed launch short for Auren from the screen recordings in
+  `~/Videos/auren-launch/raw/` (`take{A,B,B2,C3,H}.mp4` + `.events.json`; SFX `~/Videos/auren-launch-v2/sfx/`;
+  mascot frames `~/Videos/auren-launch-v2/mascots/auren/`). Copy, never modify, the originals; project under
+  `~/Projects/media/montaj-projects/auren-short/`. Record tokens, turns, cost and a human quality score in
+  `docs/BENCHMARK.md`; token targets are in `docs/ROADMAP.md`. Then close #47 and the tracker #49 item.
+- Open: #47 (above), #51 (`montaj cut` real pauses; merged, needs the real 18.5 s clip, not on this machine),
+  tracker #49. Everything else (#1–46, #48, #50, #52–55) is merged and closed with its merge sha.
+- `main` 91c6955 is 134 commits ahead of `origin/main`; **not pushed** (Raja hasn't asked). Tests on 91c6955:
+  CPU 1238, GPU 138 passed.
+- Leave alone: `montaj-wt/launch-film` (`feat/engine-launch-film`), `montaj-wt/export-wa-audio`
+  (`fix/export-whatsapp-audio-copy`): uncommitted, 6b1caaf base, far behind main; expect conflicts.
+- Follow-ups (not filed): #36 matte gaps (in its close comment); `mix.check_links` hint says `track` is required
+  (it isn't); `montaj new --list` length `-` for recipes without a length in line 1; components `$at+…` allows one
+  unit only (`expand.py`); a word heard twice is captioned only at its first appearance (#53).
+- Backlog: wall prints at full res (downsample at build); hold edit re-renders later segments.
 
 ## Status
 - M1–M4.5 and the issue batch pushed to origin/main. `wip/*` branches stay local only.
@@ -41,7 +37,8 @@
   - `check` no longer flags a morph's eased ends as frozen; `sheet --at 4s` accepts seconds.
 - Composed-music benchmark: Sonnet 5.5 0.27M input-eq / 19 turns / $0.65; Opus 5.5 0.31M / 23 turns / $1.27; both
   `OK check` with music they wrote. Films in `~/Projects/media/montaj-projects/arshiya/{sonnet,opus}-5.5-composed/`.
-- Tests (main at `1deaf74`): CPU 641 passed, GPU 48 passed (run GPU serially, 8 GB).
+- M5–M11 (#20–55): keyframes/expr, layers + mattes, effects, captions/emphasis, transcript cuts, grade +
+  secondaries + film look, scopes + `match`, `montaj spec` topics, 9 recipes (`montaj new --list`).
 
 ## Architecture map
 - Contracts -> `docs/specs/001-m1-engine.md`, `002-m2-text-music.md`, `003-m3-review-loop.md`
