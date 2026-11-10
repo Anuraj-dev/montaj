@@ -31,8 +31,10 @@ import torch.nn.functional as F
 from PIL import Image
 
 from montaj.easing import parse_ease
+from montaj.expr import evaluate
 from montaj.render.core import key as eval_key
 from montaj.render.shots import _erf_rect
+from montaj.spec import LayerExpr
 
 # Drop shadow in design px (scaled by Canvas.k and the layer's scale): offset down, gaussian sigma.
 SHADOW_OFFSET = 18.0
@@ -78,6 +80,9 @@ def sample(prop, t: float, default):
     after the last (`render.core.key`, with `easing.parse_ease` shaping each move)."""
     if prop is None:
         return default
+    if isinstance(prop, LayerExpr):  # bound by `resolve`: only `frame` is left to know
+        env = {"frame": float(t)}
+        return tuple(evaluate(x, env) for x in prop.expr) if isinstance(prop.expr, list) else evaluate(prop.expr, env)
     if not isinstance(prop, list):
         return prop
     keys = [(float(k.t), tuple(map(float, k.v)) if isinstance(k.v, (tuple, list)) else float(k.v),
@@ -85,12 +90,21 @@ def sample(prop, t: float, default):
     return eval_key(t, keys)
 
 
+def is_keyed(prop) -> bool:
+    """True when a property moves over the shot: a key list or an expression."""
+    return isinstance(prop, (list, LayerExpr))
+
+
+def _frames(hold: int, n: int = 24) -> list[int]:
+    return sorted({round(hold * i / (n - 1)) for i in range(n)})
+
+
 def base_pos(layer) -> tuple[float, float] | None:
     """Where a `pos` layer is placed (design px): its value, or its first key's. Animation moves it from here."""
     pos = layer.pos
     if pos is None:
         return None
-    p = pos[0].v if isinstance(pos, list) else pos
+    p = pos[0].v if isinstance(pos, list) else sample(pos, 0.0, None) if isinstance(pos, LayerExpr) else pos
     return float(p[0]), float(p[1])
 
 
@@ -99,25 +113,27 @@ def base_box(layer) -> tuple[float, float, float, float] | None:
     box = layer.box
     if box is None:
         return None
-    b = box[0].v if isinstance(box, list) else box
+    b = box[0].v if isinstance(box, list) else sample(box, 0.0, None) if isinstance(box, LayerExpr) else box
     return float(b[0]), float(b[1]), float(b[2]), float(b[3])
 
 
-def box_growth(layer) -> float:
-    """How much larger than its first-key box a keyed `box` ever gets (>= 1), for decode sizing."""
-    if not isinstance(layer.box, list):
-        return 1.0
-    b = base_box(layer)
-    w, h = max(1e-6, b[2] - b[0]), max(1e-6, b[3] - b[1])
-    return max(1.0, *((float(k.v[2]) - float(k.v[0])) / w for k in layer.box),
-               *((float(k.v[3]) - float(k.v[1])) / h for k in layer.box))
+def box_samples(layer, hold: int) -> list[tuple[float, float, float, float]]:
+    """Every box a keyed `box` reaches (its keys, or an expression at 24 frames of the hold), else its one box."""
+    box = layer.box
+    if isinstance(box, list):
+        return [tuple(float(x) for x in k.v) for k in box]
+    if isinstance(box, LayerExpr):
+        return [tuple(float(x) for x in sample(box, f, None)) for f in _frames(hold)]
+    return [base_box(layer)]
 
 
-def peak_scale(layer) -> float:
+def peak_scale(layer, hold: int = 0) -> float:
     """The largest scale the layer reaches from its keys (a plain scale is itself), for decode sizing."""
     sc = layer.scale
     if sc is None:
         return 1.0
+    if isinstance(sc, LayerExpr):
+        return max(float(sample(sc, f, 1.0)) for f in _frames(hold))
     return max(float(k.v) for k in sc) if isinstance(sc, list) else float(sc)
 
 
@@ -132,7 +148,7 @@ def _state(layer, t_local: float, hold: int, start: int | None) -> LayerState:
         float(sample(layer.rotate, t_local, 0.0)),
         min(1.0, max(0.0, float(sample(layer.opacity, t_local, 1.0)))),  # a spring may overshoot past 1
     )
-    if isinstance(layer.pos, list):
+    if is_keyed(layer.pos):
         x, y = sample(layer.pos, t_local, None)
         bx, by = base_pos(layer)
         state = replace(state, dx=x - bx, dy=y - by)
@@ -197,11 +213,11 @@ def world_state(layers, i: int, t_local: float, hold: int, centre) -> LayerState
     return state if state.opacity > 0 else None
 
 
-def peak_scale_world(layers, i: int) -> float:
+def peak_scale_world(layers, i: int, hold: int = 0) -> float:
     """`peak_scale` times the parents' (for decode sizing)."""
     out, layer = 1.0, layers[i]
     for _ in range(len(layers)):
-        out *= peak_scale(layer)
+        out *= peak_scale(layer, hold)
         if layer.parent is None:
             break
         layer = next((o for o in layers if o.id == layer.parent), None)

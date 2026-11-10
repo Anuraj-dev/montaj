@@ -184,6 +184,7 @@ def _parser() -> argparse.ArgumentParser:
     ins.add_argument("--fast", action="store_true")
     ins.add_argument("--problems", action="store_true")
     ins.add_argument("--track", default=None, metavar="SHOT.LAYER.PROP")
+    ins.add_argument("--samples", type=int, default=inspector.TRACK_SAMPLES)
 
     wd = sub.add_parser("words")
     wd.add_argument("--grep", default=None, metavar="TEXT")
@@ -424,7 +425,7 @@ def _cmd_matte(stems: list[str], root: Path, assets: Path) -> list[str]:
 def _cmd_inspect(ns: argparse.Namespace, root: Path, as_json: bool) -> list[str]:
     if ns.track is not None:
         try:
-            payload = inspector.track(root, ns.track)
+            payload = inspector.track(root, ns.track, ns.samples)
         except ValueError as exc:
             return [f"ERR inspect: {exc}"]
         return [json.dumps(payload, ensure_ascii=False)] if as_json else inspector.lines(payload)

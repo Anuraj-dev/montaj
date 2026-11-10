@@ -23,6 +23,7 @@ from montaj.spec import (
     WALL_PULLBACK_ZOOM,
     WAVEFORM_BARS,
     LAYER_KEYED,
+    bind_layer_exprs,
     Effect,
     Layer,
     Shot,
@@ -496,11 +497,14 @@ def _materialize_transition(sh: Shot) -> Shot:
     return sh.model_copy(update={"in_": tr.model_copy(update={"zoom": WALL_PULLBACK_ZOOM})})
 
 
-def _shot_with_frame_keys(sh: Shot, i: int, parsed: dict[str, int]) -> Shot:
-    """Camera, speed and freeze times become whole frames, so the renderer and the hash see frames."""
+def _shot_with_frame_keys(sh: Shot, i: int, parsed: dict[str, int], grid) -> Shot:
+    """Camera, speed and freeze times become whole frames, so the renderer and the hash see frames.
+    `grid` is `(markers, fps, bpm, beat0)`, for binding layer `expr`s."""
     if sh.layers is not None:
-        return sh.model_copy(update={"layers": [_layer_with_frames(layer, f"shots[{i}].layers[{k}]", parsed)
-                                                for k, layer in enumerate(sh.layers)]})
+        start = parsed[f"shots[{i}].start"]
+        return sh.model_copy(update={"layers": [
+            bind_layer_exprs(_layer_with_frames(layer, f"shots[{i}].layers[{k}]", parsed), start, grid)
+            for k, layer in enumerate(sh.layers)]})
     if sh.clip is not None:
         update: dict = {}
         if sh.camera is not None:
@@ -1104,7 +1108,8 @@ def resolve(spec: Spec, spec_dir: Path) -> Timeline:
                 end=end,
                 kind=_shot_kind(sh),
                 spec=_materialize_transition(_shot_effects_with_frames(
-                    _shot_with_frame_keys(_with_picked_clip_in(sh, clip_ins.get(i)), i, parsed), i, parsed
+                    _shot_with_frame_keys(_with_picked_clip_in(sh, clip_ins.get(i)), i, parsed,
+                                          (markers, spec.video.fps, bpm, beat0)), i, parsed
                 )),
             )
         )

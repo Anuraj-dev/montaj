@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+import contextlib
 import json
 import math
 import re
@@ -26,7 +27,9 @@ from pydantic import (
     model_validator,
 )
 
+from montaj import expr as xp
 from montaj.easing import NEW_EASES, parse_ease
+from montaj.expr import ExprError
 from montaj.grade import GRADE_TAGS, ColorSpec, Grade, GradeRef, check_grades
 from montaj.events import (
     Hit,
@@ -594,6 +597,14 @@ class LayerKey(Frozen):
         return data
 
 
+class LayerExpr(Frozen):
+    """A layer property computed per frame (#52): `expr` is one expression (a number), or a list of them for
+    `pos` (2) and `box` (4). See `montaj.expr`. `resolve` binds the film's constants into it, so the hash
+    sees the bound text."""
+
+    expr: str | list[str]
+
+
 LAYER_KEYED = ("pos", "scale", "rotate", "opacity", "box", "radius", "shadow")
 _KEY_ARITY = {"pos": 2, "box": 4}  # every other keyed property is a number
 
@@ -619,15 +630,15 @@ class Layer(Frozen):
     # Shot clock: frames from the shot start. Ints after resolve.
     from_: DurationStr | int | None = Field(default=None, alias="from", exclude_if=_none)
     to: DurationStr | int | None = Field(default=None, exclude_if=_none)
-    box: tuple[RealNum, RealNum, RealNum, RealNum] | list[LayerKey] | None = Field(default=None, exclude_if=_none)
+    box: tuple[RealNum, RealNum, RealNum, RealNum] | list[LayerKey] | LayerExpr | None = Field(default=None, exclude_if=_none)
     fit: str | None = Field(default=None, exclude_if=_none)
-    pos: tuple[RealNum, RealNum] | list[LayerKey] | None = Field(default=None, exclude_if=_none)
-    scale: RealNum | list[LayerKey] | None = Field(default=None, exclude_if=_none)
-    rotate: RealNum | list[LayerKey] | None = Field(default=None, exclude_if=_none)
-    opacity: RealNum | list[LayerKey] | None = Field(default=None, exclude_if=_none)
+    pos: tuple[RealNum, RealNum] | list[LayerKey] | LayerExpr | None = Field(default=None, exclude_if=_none)
+    scale: RealNum | list[LayerKey] | LayerExpr | None = Field(default=None, exclude_if=_none)
+    rotate: RealNum | list[LayerKey] | LayerExpr | None = Field(default=None, exclude_if=_none)
+    opacity: RealNum | list[LayerKey] | LayerExpr | None = Field(default=None, exclude_if=_none)
     blend: str | None = Field(default=None, exclude_if=_none)
-    radius: RealNum | list[LayerKey] | None = Field(default=None, exclude_if=_none)
-    shadow: RealNum | list[LayerKey] | None = Field(default=None, exclude_if=_none)
+    radius: RealNum | list[LayerKey] | LayerExpr | None = Field(default=None, exclude_if=_none)
+    shadow: RealNum | list[LayerKey] | LayerExpr | None = Field(default=None, exclude_if=_none)
     in_: LayerAnim | None = Field(default=None, alias="in", exclude_if=_none)
     out: LayerAnim | None = Field(default=None, exclude_if=_none)
     # Built-in effects on this layer (#38): shake moves it, trails echo it, the rest filter its pixels.
@@ -1279,6 +1290,10 @@ def _time_strings(spec: Spec) -> list[str]:
                         out.append(lkey.t if isinstance(lkey.t, str) else "0f")
                         if lkey.on == "beat":
                             out.append("1b")  # snapping to the grid needs a bpm
+                for text in _expr_texts(getattr(layer, prop)):
+                    with contextlib.suppress(ExprError):
+                        if xp.uses(text, "beat", "bpm"):
+                            out.append("1b")
         if sh.until is not None:
             out.append(sh.until)
         if sh.range is not None:
@@ -1999,6 +2014,9 @@ def _key_anchors(spec: Spec) -> list[tuple[str, str]]:
                 for j, lkey in enumerate(keys if isinstance(keys, list) else ()):
                     if lkey.on is not None:
                         out.append((f"shots[{i}].layers[{k}].{prop}[{j}].on", lkey.on))
+                for text in _expr_texts(getattr(layer, prop)):
+                    with contextlib.suppress(ExprError):
+                        out.extend((f"shots[{i}].layers[{k}].{prop}.expr", f"word:{n}") for n in xp.words(text))
     return out
 
 
@@ -3327,9 +3345,16 @@ def _layer_source_size(spec: Spec, spec_dir: Path | None, layer: Layer) -> tuple
         return None
 
 
+def _expr_texts(v) -> list[str]:
+    """The expression strings of a `LayerExpr` property (none for a value or key list)."""
+    if not isinstance(v, LayerExpr):
+        return []
+    return [x for x in (v.expr if isinstance(v.expr, list) else [v.expr]) if isinstance(x, str)]
+
+
 def layer_rest(v, default: float) -> float:
     """A scalar layer property's resting value: itself, or the last key's (where the animation ends)."""
-    if v is None:
+    if v is None or isinstance(v, LayerExpr):  # an expression has no rest value before it is bound
         return default
     return float(v[-1].v) if isinstance(v, list) else float(v)
 
@@ -3345,6 +3370,8 @@ def _layer_extent(spec: Spec, spec_dir: Path | None, layer: Layer) -> tuple[floa
     frame = _design_frame(spec)
     if frame is None:
         return None
+    if isinstance(layer.box, LayerExpr) or isinstance(layer.pos, LayerExpr):
+        return None  # computed per frame: no fixed extent to check
     if layer.box is not None:
         bx = layer.box[-1].v if isinstance(layer.box, list) else layer.box
         x0, y0, x1, y1 = (float(v) for v in bx)
@@ -3398,11 +3425,59 @@ def _anchor_keys(layer: Layer, p: str, start: int, parsed: dict[str, int],
                 parsed[f"{q}.t"] = frame
 
 
+def _bind_expr(text: str, start: int, grid: tuple[dict[str, float], int, float | None, float]) -> str:
+    """`text` with this film's fps, bpm, beat grid and word times folded in (`montaj.expr.bind`)."""
+    markers, fps, bpm, beat0 = grid
+    return xp.bind(text, fps=fps, bpm=bpm, start=start, beat0=beat0,
+                   word_frames={n: markers[f"word:{n}"] for n in xp.words(text) if f"word:{n}" in markers})
+
+
+def bind_layer_exprs(layer: Layer, start: int, grid: tuple[dict[str, float], int, float | None, float]) -> Layer:
+    """The layer with every `expr` bound (a no-op without one). Called by `resolve` after validation."""
+    update = {}
+    for prop in LAYER_KEYED:
+        v = getattr(layer, prop)
+        if isinstance(v, LayerExpr):
+            parts = [_bind_expr(x, start, grid) for x in (v.expr if isinstance(v.expr, list) else [v.expr])]
+            update[prop] = LayerExpr(expr=parts if isinstance(v.expr, list) else parts[0])
+    return layer.model_copy(update=update) if update else layer
+
+
+def _check_exprs(layer: Layer, p: str, start: int, hold: int | None,
+                 grid: tuple[dict[str, float], int, float | None, float], errors: list[str]) -> None:
+    """Syntax, arity, names and finiteness of every `expr`, with the token named. A word the audio lacks is
+    reported by `resolve_markers`; a bad bpm by the beats-need-bpm check."""
+    markers, fps, bpm, _ = grid
+    for prop in LAYER_KEYED:
+        v = getattr(layer, prop)
+        if not isinstance(v, LayerExpr):
+            continue
+        q = f"{p}.{prop}.expr"
+        arity = _KEY_ARITY.get(prop, 1)
+        parts = v.expr if isinstance(v.expr, list) else [v.expr]
+        if (len(parts) != arity) or (isinstance(v.expr, list) != (arity > 1)):
+            errors.append(_line(q, {2: "needs [x, y]", 4: "needs [x0, y0, x1, y1]"}.get(arity, "needs one expression"),
+                                "pos takes 2 expressions, box 4; other properties one string"))
+            continue
+        for j, text in enumerate(parts):
+            qj = q if arity == 1 else f"{q}[{j}]"
+            try:
+                xp.validate(text)
+                if (xp.uses(text, "beat", "bpm") and not bpm) or any(f"word:{n}" not in markers for n in xp.words(text)):
+                    continue
+                bound = _bind_expr(text, start, grid)
+                for f in sorted({0, (hold or 60) // 2, max(0, (hold or 60) - 1)}):
+                    xp.evaluate(bound, {"frame": float(f)})
+            except ExprError as e:
+                errors.append(_line(qj, f"{text!r}: {e}", xp.HINT))
+                break
+
+
 def _layer_values(path: str, raw, parsed: dict[str, int], errors: list[str], hold: int | None):
     """Yield (path, value) for a layer property that is a value or a key list, checking the keys' shape,
     order, easing and shot-clock range. Scalars (`scale`) yield floats, `pos` yields pairs."""
     arity = _KEY_ARITY.get(path.rsplit(".", 1)[-1], 0)
-    if raw is None:
+    if raw is None or isinstance(raw, LayerExpr):  # expressions are checked by `_check_exprs`
         return
     if not isinstance(raw, list):
         yield path, raw
@@ -3524,6 +3599,7 @@ def _validate_layers(
         if layer.blend is not None and layer.blend not in LAYER_BLENDS:
             errors.append(_line(f"{p}.blend", f"unknown {layer.blend!r}", f"use {_choices(LAYER_BLENDS)}"))
         _anchor_keys(layer, p, parsed.get(f"{at}.start", 0), parsed, grid, errors)
+        _check_exprs(layer, p, parsed.get(f"{at}.start", 0), hold, grid, errors)
         for name, lo, hi, hint in (("opacity", 0.0, 1.0, "use a value like 0.8"), ("scale", 1e-9, None, "use 0.5 for half size"),
                                    ("rotate", None, None, "use degrees, clockwise"),
                                    ("shadow", 0.0, 1.0, "use a value like 0.8"), ("radius", 0.0, None, "use design px")):
@@ -3533,7 +3609,7 @@ def _validate_layers(
                     want = {"opacity": "0 to 1", "scale": "finite and > 0", "rotate": "finite", "shadow": "0 to 1",
                             "radius": "finite and >= 0"}[name]
                     errors.append(_line(q, f"must be {want}, got {_fmt_num(val)}", hint))
-        if isinstance(layer.box, list) and layer.fit == "contain":
+        if isinstance(layer.box, (list, LayerExpr)) and layer.fit == "contain":
             errors.append(_line(f"{p}.fit", "contain letterboxes inside a fixed box", "use a fixed box, or fit: cover"))
         for q, bx in _layer_values(f"{p}.box", layer.box, parsed, errors, hold):
             x0, y0, x1, y1 = bx
