@@ -35,6 +35,7 @@ SR = 48000
 MIX_REV = "1"  # bump when the mixed samples change for the same plan
 CLIP_FADE_S = 0.015  # fade in/out on every placed clip
 XFADE_S = 0.012  # equal-power crossfade centred on an edit join
+LINK_XFADE_S = 0.020  # equal-power crossfade centred on the cut between two linked clip shots
 DUCK_THRESHOLD_DB = -45.0  # a duck source counts as "speaking" above this RMS
 DUCK_WINDOW_S = 0.120
 PEAK_CEILING = 0.98  # a hotter mix is scaled down (and reported) before it is written
@@ -93,6 +94,8 @@ class Linked:
     freeze: float | None  # shot frames
     gain_db: float
     lag: float = 0.0
+    xin: int = 0  # half-width (samples) of the crossfade with the linked shot before; 0: a plain fade-in
+    xout: int = 0  # the same, with the linked shot after
 
 
 @dataclass(frozen=True)
@@ -105,7 +108,7 @@ class DuckPlan:
 
 @dataclass(frozen=True)
 class MixPlan:
-    track: str
+    track: str | None  # None: no music, a silent bed
     edits: tuple[EditOp, ...] = ()
     clips: tuple[Placed, ...] = ()
     duck: DuckPlan | None = None
@@ -413,6 +416,7 @@ def _links(spec, spec_dir: Path | None, shots, fps: int, bpm: float | None) -> l
             s -= span(shots[i].spec.audio_lead)
         return s
 
+    half = round(LINK_XFADE_S * SR / 2)
     out: list[Linked] = []
     for i, r in enumerate(shots):
         if not linked[i]:
@@ -432,8 +436,11 @@ def _links(spec, spec_dir: Path | None, shots, fps: int, bpm: float | None) -> l
         elif speed is not None:
             speed = float(speed)
         gain = _db(sh.gain, "", []) if sh.gain is not None else 0.0
+        # Back-to-back linked shots join with a crossfade, so a cut never clicks or dips.
+        xin = half if i > 0 and linked[i - 1] and a > 0 else 0
+        xout = half if i + 1 < n and linked[i + 1] else 0
         out.append(Linked(sh.id, str(path), fps, r.start, a, b, float(clip_in or 0.0), speed,
-                          None if sh.freeze is None else float(sh.freeze), gain or 0.0, lag))
+                          None if sh.freeze is None else float(sh.freeze), gain or 0.0, lag, xin, xout))
     return out
 
 
@@ -449,7 +456,7 @@ def plan_audio(spec, spec_dir: Path | None, markers: dict[str, float], fps: int,
     root = spec_dir or Path(".")
     assets = _assets_dir(spec, spec_dir)
     ops = edit_ops(a.edit, fps, bpm, beat0, errors)
-    if ops and len(ops) == len(a.edit):
+    if ops and len(ops) == len(a.edit) and a.track:
         total = _track_seconds(root / a.track)
         bad = edit_range_error(ops, total) if total is not None else None
         if bad is not None:
@@ -497,7 +504,7 @@ def plan_audio(spec, spec_dir: Path | None, markers: dict[str, float], fps: int,
         if None not in (depth, att, rel):
             duck = DuckPlan(tuple(d.under), depth, att, rel)
     links = tuple(_links(spec, spec_dir, shots, fps, bpm)) if shots is not None else ()
-    return MixPlan(str((root / a.track).resolve()), tuple(ops), tuple(clips), duck, links)
+    return MixPlan(str((root / a.track).resolve()) if a.track else None, tuple(ops), tuple(clips), duck, links)
 
 
 def _track_seconds(path: Path) -> float | None:
@@ -697,14 +704,18 @@ def _placed_span(c: Placed, n_src: int) -> tuple[int, int, int]:
     return at, lo, max(0, hi - lo)
 
 
-def _shape_placement(x: np.ndarray, p0: int, length: int, gain_db: float, pan: float) -> None:
-    """Fade, gain and pan `x` in place. `x` holds placement indices `[p0, p0+len(x))` of `length`."""
+def _shape_placement(x: np.ndarray, p0: int, length: int, gain_db: float, pan: float,
+                     head_fade: bool = True, tail_fade: bool = True) -> None:
+    """Fade, gain and pan `x` in place. `x` holds placement indices `[p0, p0+len(x))` of `length`.
+
+    A side with its own crossfade (`head_fade` / `tail_fade` false) gets no plain fade.
+    """
     fade_n = min(round(CLIP_FADE_S * SR), length // 2)
     if fade_n > 0 and len(x):
         ramp = np.sin(np.linspace(0.0, np.pi / 2, fade_n, dtype=np.float32)) ** 2
         idx = np.arange(p0, p0 + len(x))
-        head = idx < fade_n
-        tail = idx >= length - fade_n
+        head = (idx < fade_n) & head_fade
+        tail = (idx >= length - fade_n) & tail_fade
         if head.any():
             x[head] *= ramp[idx[head], None]
         if tail.any():
@@ -771,18 +782,28 @@ def _render_link(link: Linked, cache: dict, log: Path | None) -> tuple[int, np.n
     a = max(0, link.a)  # nothing plays before the film starts
     if link.b <= a:
         return a, np.zeros((0, 2), np.float32)
+    lo, hi = max(0, a - link.xin), link.b + link.xout  # a crossfade reads past the cut on both sides
     fps = link.fps
     if link.speed in (None, 1.0) and link.freeze is None:
         # Integer-exact: film sample s plays source sample s - shot start + clip_in.
         off = round((link.clip_in / fps - link.lag) * SR) - frame_sample(link.start, fps)
-        piece = _slice(x, a + off, link.b + off).astype(np.float32, copy=True)
+        piece = _slice(x, lo + off, hi + off).astype(np.float32, copy=True)
     else:
-        s = np.arange(a, link.b, dtype=np.float64)
+        s = np.arange(lo, hi, dtype=np.float64)
         pos, live = _source_frames(link.speed, link.freeze, s * fps / SR - link.start)
         piece = _read_at(x, ((link.clip_in + pos) / fps - link.lag) * SR).astype(np.float32)
         piece[~live] = 0.0
-    _shape_placement(piece, 0, len(piece), link.gain_db, 0.0)
-    return a, piece
+    n = len(piece)
+    for width, head in ((link.xin, True), (link.xout, False)):  # equal-power: sin in, cos out
+        w = min(2 * width, n // 2)
+        if w > 0:
+            theta = np.linspace(0.0, np.pi / 2, w, dtype=np.float32)[:, None]
+            if head:
+                piece[:w] *= np.sin(theta)
+            else:
+                piece[n - w :] *= np.cos(theta)
+    _shape_placement(piece, 0, n, link.gain_db, 0.0, head_fade=not link.xin, tail_fade=not link.xout)
+    return lo, piece
 
 
 def frame_sample(frame: int, fps: int) -> int:
@@ -843,10 +864,13 @@ def duck_gain(source: np.ndarray, plan: DuckPlan, n: int) -> np.ndarray:
 
 def _mix_parts(plan: MixPlan, cache: dict, log: Path | None) -> tuple[np.ndarray, list, float]:
     """`(music bed after edits and duck, [(clip, start, samples)], duck dB)`: what `mix_audio` sums."""
-    key = (plan.track, 0)
-    if key not in cache:
-        cache[key] = decode(plan.track, 0, log=log)
-    music = apply_edits(cache[key], plan.edits) if plan.edits else cache[key]
+    if plan.track is None:
+        music = np.zeros((0, 2), np.float32)
+    else:
+        key = (plan.track, 0)
+        if key not in cache:
+            cache[key] = decode(plan.track, 0, log=log)
+        music = apply_edits(cache[key], plan.edits) if plan.edits else cache[key]
     placed = [(c, *_render_clip(c, cache, log)) for c in plan.clips]
     placed += [(link, *_render_link(link, cache, log)) for link in plan.links]
     total = max([len(music)] + [s + len(x) for _, s, x in placed])
@@ -916,7 +940,7 @@ def source_window(plan: MixPlan, source: str, s0: int, s1: int, *, cache: dict |
 def plan_hash(plan: MixPlan) -> str:
     """Digest of the plan and the bytes of every input file."""
     shas: dict[str, str] = {}
-    for p in [plan.track, *(c.src for c in plan.clips), *(link.src for link in plan.links)]:
+    for p in [*([plan.track] if plan.track else []), *(c.src for c in plan.clips), *(link.src for link in plan.links)]:
         if not p.startswith("synth:") and p not in shas:
             h = hashlib.sha256()
             with open(p, "rb") as fh:
@@ -926,6 +950,9 @@ def plan_hash(plan: MixPlan) -> str:
     body = asdict(plan)
     if not plan.links:
         del body["links"]  # a plan without linked shots keeps the wav it had before links existed
+    for link in body.get("links", ()):
+        if not link["xin"] and not link["xout"]:
+            del link["xin"], link["xout"]  # an uncrossfaded link keeps the wav it had before crossfades
     payload = json.dumps({"rev": MIX_REV, "plan": body, "shas": shas}, sort_keys=True)
     return hashlib.sha256(payload.encode()).hexdigest()[:16]
 

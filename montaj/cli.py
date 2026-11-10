@@ -53,7 +53,7 @@ class _Usage(Exception):
 
 _COMMANDS = (
     "doctor", "new", "ingest", "ingest-rec", "validate", "render", "sheet", "check", "export", "music",
-    "review", "watch", "taste", "capture", "inspect", "captions", "transcribe", "ref", "custom",
+    "review", "watch", "taste", "capture", "inspect", "captions", "transcribe", "ref", "custom", "cut",
 )
 
 
@@ -152,6 +152,12 @@ def _parser() -> argparse.ArgumentParser:
     tr.add_argument("--lang", default=analyze_audio.DEFAULT_LANG)
     tr.add_argument("--prompt", default=None)
     tr.add_argument("--out", default=None)
+
+    cu = sub.add_parser("cut")
+    cu.add_argument("clip")
+    cu.add_argument("--lang", default=analyze_audio.DEFAULT_LANG)
+    cu.add_argument("--silence", type=float, default=None, help="cut gaps longer than this many seconds (0.35)")
+    cu.add_argument("--print", dest="print_", action="store_true", help="list span, start, end, text")
 
     rv = sub.add_parser("review")
     rv.add_argument("--port", type=int, default=8765)
@@ -753,10 +759,25 @@ def _audio_mix_lines(root: Path) -> list[str]:
     spec_file = root / "montaj.yaml"
     if not stats_file.is_file() or not spec_file.is_file():
         return []
-    audio = load_spec(spec_file).audio
-    if audio is None or not (audio.clips or audio.edit or audio.duck):
+    spec = load_spec(spec_file)
+    audio = spec.audio
+    if audio is None or not (audio.clips or audio.edit or audio.duck or any(sh.audio for sh in spec.shots)):
         return []
     return check_lines(json.loads(stats_file.read_text()))
+
+
+def _join_lines(tl, root: Path, video: Path) -> list[str]:
+    """Click check at every cut between two linked clip shots (the joins `cuts:` makes)."""
+    from montaj.audio.mix import SR, plan_audio
+    from montaj.qa import join_lines
+    from montaj.spec import _parse_beat0
+
+    if not any(r.spec.audio for r in tl.shots) or tl.spec.audio is None:
+        return []
+    plan = plan_audio(tl.spec, root, tl.markers, tl.fps, tl.spec.video.bpm,
+                      _parse_beat0(tl.spec.video.beat0, tl.fps, []) or 0.0, [], shots=tl.shots)
+    joins = [link.a / SR for link in (plan.links if plan else ()) if link.xin]
+    return join_lines(video, joins, log=root / "build" / "qa.log")
 
 
 def _clip_overruns(root: Path) -> list[str]:
@@ -788,6 +809,7 @@ def _cmd_check(ns: argparse.Namespace, root: Path, numbers: dict | None = None) 
     lines.extend(_clip_overruns(root))
     if spec is not None:
         tl = resolve(spec, root)
+        lines += _join_lines(tl, root, _video(root, ns.video))
         nums = pacing.metrics(tl, root, _video(root, ns.video), log=root / "build" / "qa.log")
         if numbers is not None:
             numbers.update(nums)
@@ -954,6 +976,32 @@ def _cmd_custom_test(ns: argparse.Namespace, root: Path) -> list[str]:
     return [f"OK {rel} {ms:.1f}ms/frame peak {peak / 2**20:.0f}MB {device} strip {_rel(root, out)}"]
 
 
+def _cmd_cut(ns: argparse.Namespace, root: Path) -> list[str]:
+    from montaj import cuts
+    from montaj.captions import transcribe
+
+    assets = _assets_dir(root, _assets_rel(root / "montaj.yaml"))
+    clip = _at(root, ns.clip)
+    if not clip.is_file():  # an assets id
+        clip = resolve_clip(root, assets, ns.clip)
+    target = assets / f"{clip.stem}.cuts.json"
+    if ns.print_ and ns.silence is None and target.is_file():
+        return cuts.table(cuts.read_plan(target))
+    words = assets / f"{clip.stem}.words.json"
+    log = root / "build" / "cut.log"
+    if not words.is_file():
+        transcribe(clip, words, lang=ns.lang, log=log)
+    silence = cuts.SILENCE_S if ns.silence is None else ns.silence
+    if not silence > 0:
+        raise ValueError("--silence must be above 0 seconds")
+    plan = cuts.build(clip, words, lang=ns.lang, silence=silence, log=log)
+    target.write_text(json.dumps(plan, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
+    if ns.print_:
+        return cuts.table(plan)
+    return [f"OK {_rel(root, target)} {plan['duration']:.1f}s -> {plan['kept']:.1f}s  {len(plan['spans'])} spans  "
+            f"silence>{silence:g}s removed  fillers={plan['fillers']}"]
+
+
 def _cmd_music_compose(ns: argparse.Namespace, root: Path) -> list[str]:
     try:
         result = compose_audio.compose(
@@ -1038,6 +1086,8 @@ def _dispatch(ns: argparse.Namespace, root: Path) -> list[str]:
         return _cmd_ref(ns, root)
     if ns.cmd == "transcribe":
         return _cmd_transcribe(ns, root)
+    if ns.cmd == "cut":
+        return _cmd_cut(ns, root)
     if ns.cmd == "review":
         return review_summary(root)[0]
     if ns.cmd == "taste":

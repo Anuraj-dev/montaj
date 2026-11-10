@@ -981,6 +981,10 @@ def _resolve_tracks(spec: Spec, times: dict[str, float]) -> dict[str, list]:
 
 def resolve(spec: Spec, spec_dir: Path) -> Timeline:
     errors: list[str] = []
+    if any(sh.cuts for sh in spec.shots):  # a spec built in code; load_spec has already expanded a file's
+        from montaj.cuts import expand_cuts
+
+        spec = expand_cuts(spec, spec_dir, errors)
     if spec.captions is not None:  # a spec built in code; load_spec has already expanded a file's
         from montaj.captions import expand_captions
 

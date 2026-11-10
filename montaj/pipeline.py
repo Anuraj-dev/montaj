@@ -166,7 +166,7 @@ def render(spec_path: Path, mode: str = "preview", policy: GpuPolicy | None = No
     loudnorm = True
     track: Path | None = None
     if spec.audio is not None:
-        track = (spec_dir / spec.audio.track).resolve()
+        track = (spec_dir / spec.audio.track).resolve() if spec.audio.track else None
         loudnorm = spec.audio.loudnorm
         if spec.audio.fade_out:
             frames = _dur_frames(

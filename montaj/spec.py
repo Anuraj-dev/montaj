@@ -574,6 +574,12 @@ class Shot(Frozen):
     gain: str | None = Field(default=None, exclude_if=lambda v: v is None)
     audio_lead: str | None = Field(default=None, exclude_if=lambda v: v is None)
     audio_tail: str | None = Field(default=None, exclude_if=lambda v: v is None)
+    # Transcript cuts (#39): authoring-only. `expand_cuts` turns the shot into ordinary `range` shots at
+    # load, so these never reach layout, the renderer or the segment hash.
+    cuts: Literal["auto"] | None = Field(default=None, exclude_if=lambda v: v is None)
+    cuts_pad: tuple[DurationStr, DurationStr] | None = Field(default=None, exclude_if=lambda v: v is None)
+    cuts_punch: Literal["alternate"] | None = Field(default=None, exclude_if=lambda v: v is None)
+    drop: list[int] | None = Field(default=None, exclude_if=lambda v: v is None)
     id: str | None = Field(default=None, exclude_if=lambda v: v is None)
 
 
@@ -667,7 +673,8 @@ class AudioDuck(Frozen):
 
 
 class Audio(Frozen):
-    track: str
+    # Absent: no music bed. Linked clip audio (`audio: true` shots) still mixes over silence.
+    track: str | None = Field(default=None, exclude_if=lambda v: v is None)
     markers: str | None = None
     fade_out: DurationStr | None = None
     loudnorm: bool = True
@@ -3317,6 +3324,10 @@ def load_spec(path: Path | str, *, expand: bool = True) -> Spec:
     assets_dir = path.parent / str(assets_rel)
     _collect_photos(data, assets_dir, path.parent, errors)
 
+    if spec is not None and not errors and any(sh.cuts for sh in spec.shots):
+        from montaj.cuts import expand_cuts
+
+        spec = expand_cuts(spec, path.parent, errors)
     if spec is not None and expand and spec.captions is not None and not errors:
         from montaj.captions import expand_captions
 

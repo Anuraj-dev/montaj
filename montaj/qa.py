@@ -302,3 +302,47 @@ def clip_overruns(
 __all__ = [
     "Expect", "Span", "black_spans", "check", "clip_overruns", "frozen_spans", "loudness", "subtract", "union",
 ]
+
+
+CLICK_RATIO = 6.0  # a join's biggest sample-to-sample step vs the 99th percentile of its surroundings
+CLICK_FLOOR = 0.02  # ... and at least this much of full scale, so a quiet join is never a click
+
+
+def join_clicks(audio, joins: Sequence[float], sr: int = 48000) -> list[tuple[float, float, float]]:
+    """`(second, step, around)` for each join whose waveform jumps: a click.
+
+    `audio` is mono samples. The step is the largest sample-to-sample change within 3 ms of the
+    join; `around` is the 99th percentile of that change over the 10-60 ms either side.
+    """
+    import numpy as np
+
+    d = np.abs(np.diff(np.asarray(audio, dtype=np.float64)))
+    near, lo, hi = round(0.003 * sr), round(0.010 * sr), round(0.060 * sr)
+    bad = []
+    for t in joins:
+        c = round(t * sr)
+        if c - hi < 0 or c + hi >= len(d):
+            continue
+        ref = np.concatenate([d[c - hi : c - lo], d[c + lo : c + hi]])
+        around = float(np.percentile(ref, 99))
+        step = float(d[c - near : c + near].max())
+        if step > max(CLICK_RATIO * around, CLICK_FLOOR):
+            bad.append((t, step, around))
+    return bad
+
+
+def join_lines(video: Path | str, joins: Sequence[float], *, log: Path | str | None = None) -> list[str]:
+    """`OK joins N clean` or one `WARN click` per join, read from the rendered file's own audio."""
+    if not joins:
+        return []
+    from montaj.audio.mix import decode
+    from montaj.encode import EncodeError
+
+    try:
+        audio = decode(str(video), 0, log=Path(log) if log else None)
+    except EncodeError:
+        return ["INFO joins unchecked: no audio"]
+    bad = join_clicks(audio.mean(axis=1), joins)
+    lines = [f"WARN click {t:.2f}s step {step:.3f} vs {around:.3f} around" for t, step, around in bad]
+    clean = len(joins) - len(bad)
+    return [f"OK joins {clean}/{len(joins)} clean", *lines] if bad else [f"OK joins {len(joins)} clean"]
