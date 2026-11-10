@@ -4206,7 +4206,13 @@ def load_spec(path: Path | str, *, expand: bool = True) -> Spec:
 
         spec = normalise_subs(spec)
     if spec is not None:
+        n_before = len(errors)
         validate_spec(spec, errors, spec_dir=path.parent)
+        if smap is not None:
+            # #60: emphasis filled in from `styles`/`defaults` is inert on a line with no `*marked*` words.
+            # Only emphasis written on the line itself is an error there.
+            errors[n_before:] = [e for e in errors[n_before:] if not (
+                e.partition(": ")[2].startswith("no *marked* words in text") and e.partition(": ")[0] in smap.entries)]
     if errors:
         raise SpecError([smap.remap(e) for e in errors] if smap else errors)
     assert spec is not None

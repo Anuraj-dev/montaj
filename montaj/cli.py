@@ -240,6 +240,7 @@ def _status(lines: list[str]) -> str:
 
 
 def _emit(lines: list[str], as_json: bool) -> int:
+    lines = list(dict.fromkeys(lines))  # one mistake hit by many lines prints once; order kept
     status = _status(lines)
     if as_json:
         print(json.dumps({"status": status, "lines": lines}, ensure_ascii=False))
