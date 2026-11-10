@@ -23,7 +23,7 @@ from montaj.audio import music as music_gen
 from montaj.audio.mix import check_lines, has_links
 from montaj.audio.music import parse_duration
 from montaj.capture import run as run_capture
-from montaj.doctor import doctor
+from montaj.doctor import doctor, link_skill
 from montaj.encode import CODECS, TARGETS, MediaInfo, VideoSettings, export, probe
 from montaj.analysis import analyze_assets, describe_all
 from montaj.gpu_policy import GpuStrictError, load_policy
@@ -54,6 +54,7 @@ class _Usage(Exception):
 _COMMANDS = (
     "doctor", "new", "ingest", "ingest-rec", "validate", "render", "sheet", "check", "export", "music",
     "review", "watch", "taste", "capture", "inspect", "captions", "transcribe", "ref", "custom", "cut", "words", "spec",
+    "skill",
 )
 
 
@@ -69,6 +70,10 @@ def _parser() -> argparse.ArgumentParser:
     sub = p.add_subparsers(dest="cmd", required=True)
 
     sub.add_parser("doctor")
+
+    skill = sub.add_parser("skill")
+    skill_sub = skill.add_subparsers(dest="skill_cmd", required=True, metavar="link")
+    skill_sub.add_parser("link")
 
     new = sub.add_parser("new")
     new.add_argument("dir", nargs="?")
@@ -1234,6 +1239,8 @@ def _streaming(ns: argparse.Namespace, root: Path) -> bool:
 def _dispatch(ns: argparse.Namespace, root: Path) -> list[str]:
     if ns.cmd == "doctor":
         return _cmd_doctor()
+    if ns.cmd == "skill":
+        return link_skill()
     if ns.cmd == "new":
         return _cmd_new(ns, root)
     if ns.cmd == "ingest":

@@ -5,6 +5,7 @@ the command so an agent hits them before burning time rediscovering them.
 """
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 from pathlib import Path
@@ -114,8 +115,95 @@ def doctor() -> list[str]:
     lines.append(f"OK vram: {vram[0]} MiB free of {vram[1]} MiB" if vram else "WARN vram: nvidia-smi unavailable")
 
     lines.extend(config_lines())
+    lines.extend(skill_lines())
 
     lines.extend(TRAPS)
+    return lines
+
+
+# The agent skill is a symlink into the checkout, so a moved checkout leaves it dangling. Doctor
+# warns; `montaj skill link` (link_skill) repairs it. Dirs that do not exist are not ours to create.
+SKILL = "make-video"
+AGENT_SKILL_DIRS = (".claude/skills", ".codex/skills")
+
+
+def skill_source() -> Path:
+    """This checkout's skill. The repo root comes from the package location, never the cwd."""
+    return Path(__file__).resolve().parents[1] / "skills" / SKILL
+
+
+def skill_dirs() -> list[Path]:
+    """Existing agent skill dirs under $HOME (Path.home reads HOME, so tests can use a temp home)."""
+    home = Path.home()
+    return [d for d in (home / rel for rel in AGENT_SKILL_DIRS) if d.is_dir()]
+
+
+def _skill_state(link: Path) -> tuple[str, Path | None]:
+    """missing | real | dangling | other (with the target it reaches) | ok."""
+    if not os.path.lexists(link):
+        return "missing", None
+    if not link.is_symlink():
+        return "real", None
+    if not link.exists():
+        return "dangling", None
+    target = link.resolve()
+    return ("ok", None) if target == skill_source().resolve() else ("other", target)
+
+
+def skill_lines() -> list[str]:
+    """One line per existing agent skill dir: OK when make-video resolves to this checkout."""
+    source = skill_source()
+    if not (source / "SKILL.md").is_file():
+        return [f"WARN skill {SKILL}: {source} missing (this checkout has no skill to link)"]
+    lines: list[str] = []
+    for d in skill_dirs():
+        link = d / SKILL
+        state, target = _skill_state(link)
+        if state == "ok":
+            lines.append(f"OK skill {SKILL}: {link}")
+        elif state == "missing":
+            lines.append(f"WARN skill {SKILL}: no link in {d} (montaj skill link)")
+        elif state == "dangling":
+            lines.append(f"WARN skill {SKILL}: link is dangling (montaj skill link)")
+        elif state == "other":
+            lines.append(f"WARN skill {SKILL}: points at another checkout {target} (montaj skill link)")
+        else:
+            lines.append(f"WARN skill {SKILL}: {link} is not a symlink (remove it, then montaj skill link)")
+    return lines
+
+
+def link_skill() -> list[str]:
+    """Make `make-video` in each existing agent skill dir a symlink straight at this checkout.
+
+    Idempotent. A real directory or file at the link path is reported and left alone; the result
+    line is last, so its OK/ERR status is the command's status.
+    """
+    source = skill_source()
+    if not (source / "SKILL.md").is_file():
+        return [f"ERR skill link: {source} has no SKILL.md to link"]
+    dirs = skill_dirs()
+    if not dirs:
+        return ["ERR skill link: no ~/.claude/skills or ~/.codex/skills to link into (create one first)"]
+    lines: list[str] = []
+    linked: list[Path] = []
+    for d in dirs:
+        link = d / SKILL
+        if link.is_symlink() and os.readlink(link) == str(source):
+            linked.append(d)
+            continue
+        if os.path.lexists(link) and not link.is_symlink():
+            lines.append(f"ERR skill {SKILL}: {link} is a real directory: remove it first")
+            continue
+        if link.is_symlink():
+            link.unlink()
+        link.symlink_to(source, target_is_directory=True)
+        linked.append(d)
+    failed = len(dirs) - len(linked)
+    if failed:
+        lines.append(f"ERR skill link: {failed} of {len(dirs)} dirs not linked (see above)")
+    else:
+        names = ", ".join(str(d) for d in linked)
+        lines.append(f"OK skill {SKILL} linked in {len(linked)} dir{'s' if len(linked) != 1 else ''}: {names}")
     return lines
 
 
