@@ -11,7 +11,7 @@ from pathlib import Path
 
 from montaj.config import Config, ConfigError
 from montaj.config import load as load_config
-from montaj.encode import FFPROBE, FFMPEG, has_encoder, nvenc_usable, tool_version
+from montaj.encode import FFPROBE, FFMPEG, choose_route, has_encoder, nvenc_usable, prefer_encoder, tool_version
 
 CHROMIUM_CANDIDATES = ("google-chrome-stable", "google-chrome", "chromium", "chromium-browser")
 WHISPER_IMPORT_TIMEOUT = 20  # a plain import; the model load is the slow part and lives in the worker
@@ -71,9 +71,19 @@ def nvenc_line() -> str:
     return "WARN nvenc: h264_nvenc listed but cannot encode (no usable driver), libx264 fallback"
 
 
+def encode_route_line() -> str:
+    """The route a 1080x1920 GPU render encodes through. WARN means frames cross to the host."""
+    import torch
+
+    if not torch.cuda.is_available():
+        return "WARN encode route: ffmpeg-pipe: no CUDA device"
+    route = choose_route(prefer_encoder(), 1080, 1920, "cuda")
+    return f"{'OK' if route.zero_copy else 'WARN'} encode route: {route}"
+
+
 def doctor() -> list[str]:
     """Environment report for the CLI (or an agent) to print as-is."""
-    lines = [cuda_line(), nvenc_line()]
+    lines = [cuda_line(), nvenc_line(), encode_route_line()]
 
     lines.append(_version(FFMPEG, "ffmpeg"))
     lines.append(_version(FFPROBE, "ffprobe"))

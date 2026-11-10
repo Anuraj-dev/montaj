@@ -181,6 +181,7 @@ dependencies = [
     { name = "numpy" },
     { name = "pillow" },
     { name = "pydantic" },
+    { name = "pynvvideocodec" },
     { name = "pyyaml" },
     { name = "torch" },
     { name = "uharfbuzz" },
@@ -204,6 +205,7 @@ requires-dist = [
     { name = "opencv-python-headless", marker = "extra == 'guards'", specifier = ">=4.9" },
     { name = "pillow", specifier = ">=11" },
     { name = "pydantic", specifier = ">=2.12" },
+    { name = "pynvvideocodec", specifier = ">=2.2.4" },
     { name = "pyyaml", specifier = ">=6" },
     { name = "torch", specifier = "==2.9.1", index = "https://download.pytorch.org/whl/cu128" },
     { name = "uharfbuzz", specifier = ">=0.57.0" },
@@ -515,6 +517,17 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/49/2e/ced460408999b33da6b31b0021b0f37d329e202d4169aeb164493778f25b/pygments-2.21.0.tar.gz", hash = "sha256:610ca751c9bc2492b38eb9a38a7fbc93edbbb2d7182edaf34e66ae493dee5c8c", size = 5005329, upload-time = "2026-08-17T08:02:48.824Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/71/46/17f022dd3e953bf20a04a028a21ec746d942f8d2af30fa0f124fa0e6a684/pygments-2.21.0-py3-none-any.whl", hash = "sha256:2363c69b61c4a97c838da3b130dcd6468f4848992b21a82f2a63ec34377137d9", size = 1250147, upload-time = "2026-08-17T08:02:44.912Z" },
+]
+
+[[package]]
+name = "pynvvideocodec"
+version = "2.2.4"
+source = { registry = "https://pypi.org/simple" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/24/d3/54261cbc22744b1d471b99fb8b677974a55d468fcdd8f43fb13f34f61f69/pynvvideocodec-2.2.4-cp312-cp312-manylinux_2_28_aarch64.whl", hash = "sha256:62f0bc339d465997e9a78c85f7f396b5c45fc938ea8300fabfa44d437246c763", size = 26790652, upload-time = "2026-11-03T10:49:13.945Z" },
+    { url = "https://files.pythonhosted.org/packages/55/f6/0544f02e89f76459c08da68bda208d4432654e18a378afe34df0728888c9/pynvvideocodec-2.2.4-cp312-cp312-manylinux_2_28_x86_64.whl", hash = "sha256:41ad2b4d010ed22eb46c849d3e792789ae06281f6b41767c1b25f76f130aee98", size = 26872497, upload-time = "2026-11-03T10:49:43.618Z" },
+    { url = "https://files.pythonhosted.org/packages/8f/fb/6a13616e829169a3f1c5c88a6fadf15f4c69c7da0927ce81b10e9162e1a7/pynvvideocodec-2.2.4-cp312-cp312-win_amd64.whl", hash = "sha256:7bb8375be3987a3a9dfc2919894aa19784f4bffa2338bfe7686120ae50011446", size = 20604467, upload-time = "2026-11-03T10:50:17.848Z" },
+    { url = "https://files.pythonhosted.org/packages/8d/62/346ba6ec35605a5c9c2dc30f68a0214d939d5ba509ea0e5d0790a812b3fc/pynvvideocodec-2.2.4-cp312-cp312-win_arm64.whl", hash = "sha256:fdac7f9d0b4e8291ff174f4cc567fea6ae1f7bd33e9d1ce5b2ec3e8a06ed5808", size = 20376436, upload-time = "2026-11-03T10:50:45.021Z" },
 ]
 
 [[package]]

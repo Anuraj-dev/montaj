@@ -424,21 +424,9 @@ def _note(log: Path, line: str) -> None:
 
 
 def _close_encoder(enc: object, *, failed: bool) -> None:
-    proc = getattr(enc, "_proc", None)
-    if failed and proc is not None:
-        if proc.poll() is None:
-            if proc.stdin is not None:
-                try:
-                    proc.stdin.close()
-                except (BrokenPipeError, OSError):
-                    pass
-            proc.kill()
-            proc.wait(timeout=5)
-        fh = getattr(enc, "_fh", None)
-        if fh is not None and not getattr(fh, "closed", True):
-            fh.close()
-        if hasattr(enc, "_closed"):
-            enc._closed = True
+    abort = getattr(enc, "abort", None) if failed else None
+    if abort is not None:
+        abort()
         return
     close = getattr(enc, "close", None)
     if close is not None:

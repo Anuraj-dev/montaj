@@ -149,7 +149,7 @@ def test_encode_segment_temp_is_unique_per_attempt(tmp_path: Path, monkeypatch: 
     class FakeEnc:
         n = 0
 
-        def __init__(self, path, w, h, fps, log=None):
+        def __init__(self, path, w, h, fps, log=None, device=None):
             FakeEnc.n += 1
             self.payload = f"v{FakeEnc.n}".encode()
             self.path = Path(path)
@@ -167,7 +167,7 @@ def test_encode_segment_temp_is_unique_per_attempt(tmp_path: Path, monkeypatch: 
     monkeypatch.setattr("montaj.pipeline.Encoder", FakeEnc)
     dest = tmp_path / "abc123.mp4"
     seg = Segment(index=0, start=0, end=0)
-    renderer = SimpleNamespace(cv=SimpleNamespace(W=8, H=8))
+    renderer = SimpleNamespace(cv=SimpleNamespace(W=8, H=8, device="cpu"))
     log = tmp_path / "render.log"
     _encode_segment(renderer, seg, dest, 30, log)
     _encode_segment(renderer, seg, dest, 30, log)
@@ -276,7 +276,7 @@ def test_render_holds_the_gpu_and_muxes_the_track(tmp_path: Path, monkeypatch: p
             return torch.zeros(3, self.cv.H, self.cv.W)
 
     class FakeEnc:
-        def __init__(self, path, w, h, fps, log=None):
+        def __init__(self, path, w, h, fps, log=None, device=None):
             seen.append(("encoder", held["on"]))
             self.path = Path(path)
 
@@ -394,7 +394,7 @@ def test_render_tells_the_renderer_which_shots_a_segment_reads(tmp_path: Path, m
     class FakeCV:
         def __init__(self, W, H, device="cuda"):
             assert held["on"]
-            self.W, self.H = W, H
+            self.W, self.H, self.device = W, H, "cpu"
 
     class FakeRenderer:
         def __init__(self, tl, spec_dir, cv):
@@ -411,7 +411,7 @@ def test_render_tells_the_renderer_which_shots_a_segment_reads(tmp_path: Path, m
             return torch.zeros(3, self.cv.H, self.cv.W)
 
     class FakeEnc:
-        def __init__(self, path, w, h, fps, log=None):
+        def __init__(self, path, w, h, fps, log=None, device=None):
             self.path = Path(path)
 
         def __enter__(self):
