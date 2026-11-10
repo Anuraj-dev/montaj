@@ -26,7 +26,7 @@ from montaj.capture import run as run_capture
 from montaj.doctor import doctor
 from montaj.encode import MediaInfo, export, probe
 from montaj.ingest import IngestError, ingest, ingest_rec
-from montaj import inspector, taste
+from montaj import inspector, pacing, taste
 from montaj.guards import content_guards
 from montaj.qa import BLACK_PIX_TH, FREEZE_MIN_S, Expect, check, clip_overruns, subtract, union
 from montaj.review.server import serve as serve_review
@@ -711,7 +711,7 @@ def _clip_overruns(root: Path) -> list[str]:
     return clip_overruns(tl, _assets_dir(root, tl.spec.assets), spec_dir=root, log=root / "build" / "qa.log")
 
 
-def _cmd_check(ns: argparse.Namespace, root: Path) -> list[str]:
+def _cmd_check(ns: argparse.Namespace, root: Path, numbers: dict | None = None) -> list[str]:
     expects, loud_i, loud_tol = _check_overrides(root)
     black = union([*_intended_black(root), *(item.span for item in expects if item.kind == "black")])
     freeze = union([*_intended_freeze(root), *(item.span for item in expects if item.kind == "frozen")])
@@ -729,6 +729,13 @@ def _cmd_check(ns: argparse.Namespace, root: Path) -> list[str]:
                                 log=root / "build" / "qa.log")
     lines += _audio_mix_lines(root)
     lines.extend(_clip_overruns(root))
+    if spec is not None:
+        tl = resolve(spec, root)
+        nums = pacing.metrics(tl, root, _video(root, ns.video), log=root / "build" / "qa.log")
+        if numbers is not None:
+            numbers.update(nums)
+        lines += pacing.lines(nums, spec.check.pacing if spec.check else None,
+                              fps=tl.fps, bpm=tl.spec.video.bpm)
     errs = sum(line.startswith("ERR") for line in lines)
     warns = sum(line.startswith("WARN") for line in lines)
     if errs:
@@ -926,6 +933,11 @@ def main(argv: list[str] | None = None) -> int:
         if as_json and ns.cmd == "review":
             lines, digest = review_summary(root)
             print(json.dumps({"status": _status(lines), "lines": lines, "review": digest}, ensure_ascii=False))
+            return 0 if _status(lines) != "ERR" else 1
+        if as_json and ns.cmd == "check":
+            numbers: dict = {}
+            lines = _cmd_check(ns, root, numbers)
+            print(json.dumps({"status": _status(lines), "lines": lines, "pacing": numbers}, ensure_ascii=False))
             return 0 if _status(lines) != "ERR" else 1
         if ns.cmd == "inspect":
             lines = _cmd_inspect(ns, root, as_json)
