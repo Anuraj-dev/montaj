@@ -19,6 +19,8 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
+from montaj.gpu_policy import GpuPolicy
+
 FFMPEG = os.environ.get("MONTAJ_FFMPEG", "ffmpeg")
 FFPROBE = os.environ.get("MONTAJ_FFPROBE", "ffprobe")
 
@@ -153,6 +155,16 @@ def vcodec_args(encoder: str, *, cq: int = NVENC_CQ, crf: int = X264_CRF, preset
     if encoder == "libx264":
         return ["-c:v", "libx264", "-crf", str(crf), "-preset", preset]
     return ["-c:v", encoder]
+
+
+NVENC_MIN_SIDE = 160  # NVENC rejects frames under ~145 px a side (docs/STATE.md); round up
+
+
+def nvenc_hint() -> str:
+    """Why NVENC is not in use here, for a strict-mode error."""
+    if not has_encoder("h264_nvenc"):
+        return "this ffmpeg has no h264_nvenc; install an ffmpeg built with NVENC (`montaj doctor`)"
+    return "h264_nvenc is listed but cannot encode (check the NVIDIA driver; `montaj doctor`)"
 
 
 def prefer_encoder() -> str:
@@ -554,10 +566,16 @@ class Encoder:
         crf: int = X264_CRF,
         preset: str = X264_PRESET,
         device: str | torch.device | None = None,
+        policy: GpuPolicy | None = None,
     ) -> None:
         self.path = Path(path)
         self.W, self.H, self.fps = int(W), int(H), float(fps)
         self.codec = encoder or prefer_encoder()
+        if policy is not None:
+            if self.codec == "h264_nvenc":
+                policy.gpu("encode")
+            else:
+                policy.cpu("encode", f"{self.codec} encode of {self.path.name}", nvenc_hint())
         self.device = device
         self.log = log_file("encode", log)
         self.path.parent.mkdir(parents=True, exist_ok=True)

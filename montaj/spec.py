@@ -10,6 +10,7 @@ from typing import Annotated, Any, Literal
 
 import yaml
 from pydantic import (
+    AfterValidator,
     BaseModel,
     BeforeValidator,
     ConfigDict,
@@ -130,9 +131,42 @@ def _reject_bare_duration_or_bool(v: object) -> object:
 DurationStr = Annotated[str, BeforeValidator(_reject_bare_duration)]
 TimeExpr = DurationStr
 
+# Analysis sugar (`assets/analysis.json`): resolved to numbers before layout (`resolve_sugar`).
+_FOCUS_REF = re.compile(r"^(?:face(?::([1-9]\d*))?|subject)$")
+_SPEECH_REF = re.compile(r"^speech:([1-9]\d*)$")
+_SUGAR_TAGS = ("focus_xy", "focus_ref", "range_span", "range_ref")  # union tags, not spec keys
+
+
+def _focus_ref(v: str) -> str:
+    if not _FOCUS_REF.match(v):
+        raise ValueError(f"unknown focus {v!r}, want [x, y], face, face:N or subject")
+    return v
+
+
+def _speech_ref(v: str) -> str:
+    if not _SPEECH_REF.match(v):
+        raise ValueError(f"unknown range {v!r}, want [start, end] or speech:N")
+    return v
+
+
+# A string is sugar, anything else the number form, so a bad list keeps its plain error path.
+Focus = Annotated[
+    Annotated[tuple[float, float], Tag("focus_xy")] | Annotated[str, AfterValidator(_focus_ref), Tag("focus_ref")],
+    Discriminator(lambda v: "focus_ref" if isinstance(v, str) else "focus_xy"),
+]
+ClipRange = Annotated[
+    Annotated[tuple[DurationStr, DurationStr], Tag("range_span")]
+    | Annotated[str, AfterValidator(_speech_ref), Tag("range_ref")],
+    Discriminator(lambda v: "range_ref" if isinstance(v, str) else "range_span"),
+]
+
 
 class Frozen(BaseModel):
     model_config = ConfigDict(extra="forbid", populate_by_name=True)
+
+
+def _none_value(v: object) -> bool:
+    return v is None
 
 
 class SpecError(Exception):
@@ -288,7 +322,7 @@ class SequenceSpec(Frozen):
 class CameraKey(Frozen):
     t: DurationStr | int
     zoom: RealNum | None = None
-    focus: tuple[float, float] | None = None
+    focus: Focus | None = None
     ease: str = "smooth"
 
 
@@ -359,6 +393,15 @@ class TextIdle(Frozen):
     amount: RealNum | None = None
 
 
+class TextBar(Frozen):
+    """A rounded bar hugging one word of a gpu line (#23 `highlight`). `from` slides it from another word."""
+
+    word: StrictInt
+    from_: StrictInt | None = Field(default=None, alias="from", exclude_if=_none_value)
+    color: str = "#ffe600"
+    pad: RealNum = 14.0
+
+
 def _none(v: object) -> bool:
     return v is None
 
@@ -410,11 +453,13 @@ class TextLine(Frozen):
     in_: Annotated[TextIn | None, BeforeValidator(_as_typed)] = Field(default=None, alias="in", exclude_if=_none)
     out: Annotated[TextOut | None, BeforeValidator(_as_typed)] = Field(default=None, exclude_if=_none)
     idle: Annotated[TextIdle | None, BeforeValidator(_as_typed)] = Field(default=None, exclude_if=_none)
+    # A bar behind one word (#23); drawn by the gpu engine. Unset it stays out of the dump.
+    bar: TextBar | None = Field(default=None, exclude_if=_none)
 
 
 def gpu_fields(line: TextLine) -> list[str]:
     """The fields of `line` only the gpu engine draws. Any of them makes the line a gpu line."""
-    out = [n for n in ("font", "case", "emphasis", "stroke", "glow", "pos", "rotate", "in_", "out", "idle")
+    out = [n for n in ("font", "case", "emphasis", "stroke", "glow", "pos", "rotate", "in_", "out", "idle", "bar")
            if getattr(line, n) is not None]
     out = ["in" if n == "in_" else n for n in out]
     if isinstance(line.shadow, TextShadow):
@@ -486,9 +531,9 @@ class Shot(Frozen):
     # so an existing film keeps its segment hash.
     at_event: dict[str, Any] | None = Field(default=None, exclude_if=lambda v: v is None)
     pre: DurationStr | None = Field(default=None, exclude_if=lambda v: v is None)
-    range: tuple[DurationStr, DurationStr] | None = None
+    range: ClipRange | None = None
     crop: CropBox | None = None
-    focus: tuple[float, float] | None = None
+    focus: Focus | None = None
     zoom: float | None = None
     # Absent stays out of model_dump so films that never use these keep their segment hash.
     camera: list[CameraKey] | None = Field(default=None, exclude_if=lambda v: v is None)
@@ -689,6 +734,28 @@ class CheckSpec(Frozen):
     sample: StrictInt = 3  # strict: YAML `true` must not coerce to 1
 
 
+class CaptionOverride(Frozen):
+    """One sparse fix: `word` (index) with `text` / `emphasis`, or `chunk_break_before` (word index)."""
+
+    word: StrictInt | None = None
+    text: str | None = None
+    emphasis: bool | None = None
+    chunk_break_before: StrictInt | None = None
+
+
+class Captions(Frozen):
+    """Word timings in, styled caption chunks out. `captions.expand` turns this into `text` blocks."""
+
+    source: str
+    preset: str = "punch"
+    words_per_chunk: tuple[StrictInt, StrictInt] = (1, 3)
+    accent: str = "#ffe600"
+    emphasis: str | list[StrictInt] = "auto"
+    y: RealNum | None = None
+    offset: DurationStr | None = None
+    overrides: list[CaptionOverride] = Field(default_factory=list)
+
+
 class Spec(Frozen):
     video: Video
     assets: str = "assets"
@@ -701,6 +768,7 @@ class Spec(Frozen):
     tracks: Tracks | None = None
     overlays: list[Overlay] = Field(default_factory=list)
     check: CheckSpec | None = None
+    captions: Captions | None = Field(default=None, exclude_if=_none_value)
 
 
 def _yaml_path(loc: tuple) -> str:
@@ -708,7 +776,7 @@ def _yaml_path(loc: tuple) -> str:
     for x in loc:
         if x == "in_":
             x = "in"
-        if x in ("look_name", "look_lut"):  # discriminator tags, not spec keys
+        if x in ("look_name", "look_lut") or x in _SUGAR_TAGS:  # discriminator tags, not spec keys
             continue
         if isinstance(x, int):
             if parts:
@@ -1286,6 +1354,130 @@ def _snap_forward_to_grid(u: float, beat0: float, period: float) -> float:
     if _on_beat_grid(u, beat0, period):
         return u
     return beat0 + math.ceil((u - beat0) / period) * period
+
+
+def _has_sugar(sh: Shot) -> bool:
+    if isinstance(sh.focus, str) or isinstance(sh.range, str):
+        return True
+    return sh.camera is not None and any(isinstance(k.focus, str) for k in sh.camera)
+
+
+def resolve_sugar(spec: Spec, spec_dir: Path | None, errors: list[str]) -> Spec:
+    """`focus: face|face:N|subject` and `range: speech:N` become numbers from assets/analysis.json.
+
+    Runs before layout, so the shot the renderer and the segment hash see holds only numbers. A
+    failed lookup records one error and leaves a neutral value so later checks do not pile on.
+    """
+    if not any(_has_sugar(sh) for sh in spec.shots):
+        return spec
+    from montaj.analysis import AnalysisBook
+
+    book = AnalysisBook(_assets_dir(spec, spec_dir))
+    shots = [
+        _resolve_shot_sugar(spec, sh, i, spec_dir, book, errors) if _has_sugar(sh) else sh
+        for i, sh in enumerate(spec.shots)
+    ]
+    return spec.model_copy(update={"shots": shots})
+
+
+def _sugar_row(spec: Spec, sh: Shot, spec_dir: Path | None, book, path: str, errors: list[str]):
+    """(kind, stem, row) for the shot's photo or assets clip, or None after one error."""
+    from montaj.project import clip_is_file, find_clip, find_photo
+
+    if sh.photo is not None:
+        kind, stem, find = "photo", sh.photo, find_photo
+    elif sh.clip is not None:
+        if clip_is_file(sh.clip):
+            errors.append(_line(path, f"{sh.clip} is not analysed", "use a clip in assets/ and run montaj ingest"))
+            return None
+        kind, stem, find = "clip", sh.clip, find_clip
+    else:
+        errors.append(_line(path, "analysis sugar needs photo or clip", "use [x, y]"))
+        return None
+    assets = _assets_dir(spec, spec_dir)
+    if assets is None:
+        errors.append(_line(path, f"no analysis for {stem}", "load the spec from disk"))
+        return None
+    try:
+        file = find(assets, stem)
+    except FileNotFoundError:
+        return None  # the missing asset is already its own error
+    row, why = book.row(file)
+    if row is None:
+        errors.append(_line(path, why, "run montaj ingest"))
+        return None
+    return kind, stem, row
+
+
+def _clip_start_s(spec: Spec, raw: str | None) -> float:
+    """Source second a clip shot starts at, for picking its scene. Unparseable -> 0 (validate reports it)."""
+    fps = spec.video.fps
+    if raw is None or fps <= 0:
+        return 0.0
+    frames = _dur_frames(raw, fps, spec.video.bpm, "", [])
+    return frames / fps if frames is not None and frames > 0 else 0.0
+
+
+def _focus_point(ref: str, kind: str, stem: str, row: dict, t: float, path: str, errors: list[str]):
+    from montaj.analysis import face_point
+
+    if kind == "clip":
+        scenes = row.get("scenes") or []
+        scene = next((s for s in scenes if s["s"] <= t < s["e"]), scenes[-1] if scenes else {})
+        faces, subject, where = scene.get("faces") or [], scene.get("subject"), f"{stem} at {_fmt_num(t)}s"
+    else:
+        faces, subject, where = row.get("faces") or [], row.get("subject"), stem
+    if ref == "subject":
+        if not subject:
+            errors.append(_line(path, f"no subject in {where}", "use [x, y]"))
+            return None
+        return (float(subject[0]), float(subject[1]))
+    m = _FOCUS_REF.match(ref)
+    n = int(m.group(1) or 1) if m else 1
+    if not faces:
+        errors.append(_line(path, f"no face in {where}", "use subject or [x, y]"))
+        return None
+    if n > len(faces):
+        have = ", ".join(f"face:{k + 1}" for k in range(len(faces)))
+        errors.append(_line(path, f"no face {n} in {where}", f"have: {have}"))
+        return None
+    x, y = face_point(faces[n - 1])
+    return (x, y)
+
+
+def _resolve_shot_sugar(spec: Spec, sh: Shot, i: int, spec_dir: Path | None, book, errors: list[str]) -> Shot:
+    at = f"shots[{i}]"
+    update: dict[str, Any] = {}
+    rng = sh.range
+    if isinstance(rng, str):
+        got = _sugar_row(spec, sh, spec_dir, book, f"{at}.range", errors)
+        rng = ("0s", "1s")  # neutral stand-in after an error; the spec fails anyway
+        if got is not None and got[0] == "clip":
+            spans = got[2].get("speech") or []
+            n = int(_SPEECH_REF.match(sh.range).group(1))
+            if n > len(spans):
+                errors.append(_line(f"{at}.range", f"no speech span {n} in {got[1]}", f"have: {len(spans)}"))
+            else:
+                span = spans[n - 1]
+                rng = (format_seconds(span["s"]), format_seconds(span["e"]))
+        update["range"] = rng
+    focus_refs = isinstance(sh.focus, str) or (sh.camera is not None and any(isinstance(k.focus, str) for k in sh.camera))
+    if focus_refs:
+        got = _sugar_row(spec, sh, spec_dir, book, f"{at}.focus", errors)
+        t = _clip_start_s(spec, rng[0] if isinstance(rng, tuple) else sh.clip_in)
+
+        def point(ref: str, path: str):
+            return None if got is None else _focus_point(ref, got[0], got[1], got[2], t, path, errors)
+
+        if isinstance(sh.focus, str):
+            update["focus"] = point(sh.focus, f"{at}.focus")
+        if sh.camera is not None:
+            update["camera"] = [
+                key.model_copy(update={"focus": point(key.focus, f"{at}.camera[{k}].focus")})
+                if isinstance(key.focus, str) else key
+                for k, key in enumerate(sh.camera)
+            ]
+    return sh.model_copy(update=update)
 
 
 def _length_conflict(has_hold: bool, has_until: bool, has_range: bool) -> str:
@@ -1972,6 +2164,7 @@ def validate_spec(
     authoring spec keeps `at_event`; `resolve` copies this onto the shot the
     renderer seeks, so the segment hash sees the picked time.
     """
+    spec = resolve_sugar(spec, spec_dir, errors)
     fps = spec.video.fps
     specified_bpm = spec.video.bpm is not None
     if fps <= 0:
@@ -2564,6 +2757,14 @@ def _check_text_styling(path: str, line: TextLine, errors: list[str]) -> None:
         sc = line.emphasis.scale
         if not math.isfinite(sc) or sc <= 0 or sc > 3:
             errors.append(_line(f"{path}.emphasis.scale", f"must be > 0 and <= 3, got {_fmt_num(sc)}", "use 1.0-1.3"))
+    if line.bar is not None:
+        _check_color(f"{path}.bar.color", line.bar.color, errors)
+        n_words = len(glyphs.parse_emphasis(line.text)[0].split(" "))
+        for name, v in (("word", line.bar.word), ("from", line.bar.from_)):
+            if v is not None and not 0 <= v < n_words:
+                errors.append(_line(f"{path}.bar.{name}", f"{v} is not a word of the line", f"use 0 to {n_words - 1}"))
+        if not math.isfinite(line.bar.pad) or line.bar.pad < 0:
+            errors.append(_line(f"{path}.bar.pad", f"must be >= 0, got {_fmt_num(line.bar.pad)}", "use design px, e.g. 14"))
     if line.stroke is not None:
         _check_color(f"{path}.stroke.color", line.stroke.color, errors)
         w = line.stroke.width
@@ -2928,7 +3129,8 @@ def _reject_overlap_windows(
                 )
 
 
-def load_spec(path: Path | str) -> Spec:
+def load_spec(path: Path | str, *, expand: bool = True) -> Spec:
+    """Parse and validate. `expand=False` keeps a `captions` block unexpanded (for `montaj captions`)."""
     path = Path(path)
     try:
         text = path.read_text()
@@ -2959,6 +3161,10 @@ def load_spec(path: Path | str) -> Spec:
     assets_dir = path.parent / str(assets_rel)
     _collect_photos(data, assets_dir, path.parent, errors)
 
+    if spec is not None and expand and spec.captions is not None and not errors:
+        from montaj.captions import expand_captions
+
+        spec = expand_captions(spec, path.parent, errors)
     if spec is not None:
         validate_spec(spec, errors, spec_dir=path.parent)
     if errors:

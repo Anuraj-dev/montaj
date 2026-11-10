@@ -127,7 +127,7 @@ def test_new_and_ingest(tmp_path: Path, capsys: pytest.CaptureFixture[str], monk
 
     more = tmp_path / "more"
     _jpeg(more, "10", (7, 8, 9))
-    code, out, err = _run(["-C", str(dest), "ingest", "--photos", str(more)], capsys)
+    code, out, err = _run(["-C", str(dest), "ingest", "--photos", str(more), "--fast"], capsys)
     assert code == 0 and err == "", out
     assert out.strip() == "OK 1 photos sheet=build/ingest-sheet.jpg"
     assert (dest / "assets" / "10.jpg").is_file()

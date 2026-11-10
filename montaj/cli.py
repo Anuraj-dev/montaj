@@ -25,6 +25,8 @@ from montaj.audio.music import parse_duration
 from montaj.capture import run as run_capture
 from montaj.doctor import doctor
 from montaj.encode import MediaInfo, export, probe
+from montaj.analysis import analyze_assets, describe_all
+from montaj.gpu_policy import GpuStrictError, load_policy
 from montaj.ingest import IngestError, ingest, ingest_rec
 from montaj import inspector, pacing, taste
 from montaj.guards import content_guards
@@ -35,6 +37,7 @@ from montaj.sheet import (
     BASE_DIR, MAX_TILES, every_times, motion_sheet, pick_times, sheet, sheets, step_frames, strip_row,
     transition_rows,
 )
+from montaj.project import resolve_clip
 from montaj.spec import INCOMING_TRANS, SpecError, _dur_frames, load_spec, text_warnings
 from montaj.timeline import Blank, Card, Sequence, Still, Wall, resolve, sequence_index, wall_static_spans
 from montaj.watch import watch
@@ -50,7 +53,7 @@ class _Usage(Exception):
 
 _COMMANDS = (
     "doctor", "new", "ingest", "ingest-rec", "validate", "render", "sheet", "check", "export", "music",
-    "review", "watch", "taste", "capture", "inspect",
+    "review", "watch", "taste", "capture", "inspect", "captions", "transcribe", "ref",
 )
 
 
@@ -73,7 +76,9 @@ def _parser() -> argparse.ArgumentParser:
     new.add_argument("--photos", default=None)
 
     ing = sub.add_parser("ingest")
-    ing.add_argument("--photos", required=True)
+    ing.add_argument("--photos", default=None)
+    ing.add_argument("--fast", action="store_true")  # normalise only; no analysis
+    ing.add_argument("--list", action="store_true")  # one line per analysed asset; no work
 
     rec = sub.add_parser("ingest-rec")
     rec.add_argument("video")
@@ -125,6 +130,19 @@ def _parser() -> argparse.ArgumentParser:
     comp.add_argument("script")
     comp.add_argument("--out", default="music/song.wav")
     comp.add_argument("--timeout", type=float, default=600.0)
+
+    cp = sub.add_parser("captions")
+    mode = cp.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--print", dest="print_", action="store_true")
+    mode.add_argument("--gallery", action="store_true")
+    mode.add_argument("--strip", type=int, metavar="CHUNK", default=None)
+    rf = sub.add_parser("ref")
+    rf.add_argument("video")
+    tr = sub.add_parser("transcribe")
+    tr.add_argument("clip")
+    tr.add_argument("--lang", default=analyze_audio.DEFAULT_LANG)
+    tr.add_argument("--prompt", default=None)
+    tr.add_argument("--out", default=None)
 
     rv = sub.add_parser("review")
     rv.add_argument("--port", type=int, default=8765)
@@ -317,11 +335,30 @@ def _cmd_ingest_rec(ns: argparse.Namespace, root: Path) -> list[str]:
     return [f"OK {rec.stem} {rec.duration:.1f}s {rec.fps:g}fps{audio}{n_ev} -> {rec.path.name}"]
 
 
+def _make_analyzer():
+    """The GPU analyser; torch loads only here, and only when a row needs work."""
+    from montaj.vision import GpuAnalyzer
+
+    return GpuAnalyzer()
+
+
 def _cmd_ingest(ns: argparse.Namespace, root: Path) -> list[str]:
-    photos = _at(root, ns.photos)
     assets = _assets_dir(root, _assets_rel(root / "montaj.yaml"))
-    infos = ingest(photos, assets, sheet_path=root / "build" / "ingest-sheet.jpg")
-    return [f"OK {len(infos)} photos sheet=build/ingest-sheet.jpg"]
+    if ns.list:
+        lines = describe_all(assets)
+        if not lines:
+            return [f"ERR ingest: no photos or clips in {assets} (run montaj ingest --photos DIR)"]
+        return [*lines, f"OK {len(lines)} assets"]
+    if ns.photos is None and ns.fast:
+        return ["ERR ingest: --fast needs --photos DIR"]
+    out = []
+    if ns.photos is not None:
+        infos = ingest(_at(root, ns.photos), assets, sheet_path=root / "build" / "ingest-sheet.jpg")
+        out.append(f"{len(infos)} photos sheet=build/ingest-sheet.jpg")
+    if not ns.fast:
+        done = analyze_assets(assets, _make_analyzer, log=root / "build" / "ingest.log")
+        out.append(f"analyzed={done.analyzed} cached={done.cached} -> {assets.name}/analysis.json")
+    return ["OK " + " ".join(out)]
 
 
 def _cmd_inspect(ns: argparse.Namespace, root: Path, as_json: bool) -> list[str]:
@@ -374,7 +411,7 @@ def _cmd_render(ns: argparse.Namespace, root: Path) -> list[str]:
     audio = " audio" if result.audio else ""
     return [
         f"OK {rel} {result.seconds:.2f}s {w}x{h} {mb:.1f}MB "
-        f"rendered {result.rendered}/{n} cached {result.cached}/{n} in {dt:.1f}s{audio}"
+        f"rendered {result.rendered}/{n} cached {result.cached}/{n} in {dt:.1f}s gpu={result.gpu}{audio}"
     ]
 
 
@@ -836,6 +873,46 @@ def _cmd_music_analyze(ns: argparse.Namespace, root: Path) -> list[str]:
     return [*analysis.lines, result]
 
 
+def _cmd_captions(ns: argparse.Namespace, root: Path) -> list[str]:
+    if ns.gallery:
+        from montaj.capgallery import gallery
+
+        path, n = gallery(root)
+        return [f"OK {_rel(root, path)} {n} presets x 2 frames"]
+    if ns.strip is not None:
+        from montaj.capgallery import strip
+
+        path, n = strip(root, ns.strip)
+        return [f"OK {_rel(root, path)} chunk {ns.strip} {n} frames"]
+    from montaj.captions import format_chunks, plan
+
+    chunks, fps = plan(root / "montaj.yaml")
+    return [*format_chunks(chunks, fps).splitlines(), f"OK {len(chunks)} chunks"]
+
+
+def _cmd_ref(ns: argparse.Namespace, root: Path) -> list[str]:
+    from montaj.ref import study
+
+    video = _at(root, ns.video)
+    if not video.is_file():
+        return [f"ERR ref: {ns.video} not found: pass a video file"]
+    path, stats, shown = study(video, root / "build" / f"ref-{video.stem}.jpg", log=root / "build" / "ref.log")
+    return [f"OK {_rel(root, path)} {stats.duration:.1f}s {stats.shots} shots {len(stats.cuts)} cuts "
+            f"cut_rate={stats.per_10s:.1f}/10s median_shot={stats.median_shot:.2f}s {shown} frames"]
+
+
+def _cmd_transcribe(ns: argparse.Namespace, root: Path) -> list[str]:
+    from montaj.captions import transcribe
+
+    clip = _at(root, ns.clip)
+    if not clip.is_file():  # an assets id
+        clip = resolve_clip(root, _assets_dir(root, _assets_rel(root / "montaj.yaml")), ns.clip)
+    out = _at(root, ns.out) if ns.out else _assets_dir(root, _assets_rel(root / "montaj.yaml")) / f"{clip.stem}.words.json"
+    path = transcribe(clip, out, lang=ns.lang, prompt=ns.prompt, log=root / "build" / "transcribe.log")
+    n = len(json.loads(path.read_text(encoding="utf-8"))["words"])
+    return [f"OK {_rel(root, path)} {n} words"]
+
+
 def _cmd_music_compose(ns: argparse.Namespace, root: Path) -> list[str]:
     try:
         result = compose_audio.compose(
@@ -858,7 +935,7 @@ def _cmd_music_compose(ns: argparse.Namespace, root: Path) -> list[str]:
 
 
 def _cmd_capture(ns: argparse.Namespace, root: Path) -> list[str]:
-    result = run_capture(_at(root, ns.script), root, log=root / "build" / "capture.log")
+    result = run_capture(_at(root, ns.script), root, log=root / "build" / "capture.log", policy=load_policy())
     mb = result.path.stat().st_size / (1024 * 1024)
     w, h = result.size
     return [f"OK {_rel(root, result.path)} {result.seconds:.2f}s {w}x{h} {mb:.1f}MB"]
@@ -912,6 +989,12 @@ def _dispatch(ns: argparse.Namespace, root: Path) -> list[str]:
         if ns.music_cmd == "analyze":
             return _cmd_music_analyze(ns, root)
         return _cmd_music_compose(ns, root)
+    if ns.cmd == "captions":
+        return _cmd_captions(ns, root)
+    if ns.cmd == "ref":
+        return _cmd_ref(ns, root)
+    if ns.cmd == "transcribe":
+        return _cmd_transcribe(ns, root)
     if ns.cmd == "review":
         return review_summary(root)[0]
     if ns.cmd == "taste":
@@ -959,6 +1042,9 @@ def main(argv: list[str] | None = None) -> int:
             lines = _dispatch(ns, root)
     except SpecError as exc:
         lines = [f"ERR {err}" for err in exc.errors]
+    except GpuStrictError as exc:
+        _note_failure(root, ns.cmd, exc)
+        lines = [f"ERR {_one_line(str(exc))}"]  # `ERR gpu-strict: <what> would run on the CPU: <hint>`
     except (yaml.YAMLError, RuntimeError, OSError, ValueError) as exc:
         _note_failure(root, ns.cmd, exc)
         lines = [f"ERR {ns.cmd}: {_one_line(str(exc))}"]
