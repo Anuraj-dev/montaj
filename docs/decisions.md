@@ -59,3 +59,8 @@ token cost; other models finishing a video is enough. Skill guidance stays advis
 YouTube-grade captions (no boxes, no full stops), and no pixel work on the CPU or iGPU. Type goes first: it is the
 most visible gap and Chromium is the largest CPU pixel path. Caption taste ships as presets, normalisation and
 `WARN` lines, not skill bans. Sugar expands at layout time so the cache contract holds. Plan: `ROADMAP.md`.
+
+## 2026-11-10 — Claude-only workers, one review at the end
+**Why:** Raja's call: Opus and Sonnet workers verify their own work with tests and real renders, so per-issue and
+per-milestone reviews cost more than they catch. The driver re-runs each worker's checks before merging; one
+parallel review of the full M5–M11 diff and one fix round close the plan. Supersedes the 2026-10-01 wave routing.

@@ -123,55 +123,51 @@ Not a final phase: #47 and #48 advance at the end of every milestone.
 5. M8: #34 → #35, #38; #37 in parallel; #36 last.
 6. M9, then M10.
 
-Dispatch follows the existing model: one worktree per issue, independent review, `--no-ff` local merge, one
-results file per dispatch kept outside `/tmp` (the process gap recorded in BENCHMARK.md).
+Dispatch: one worktree per issue, `--no-ff` local merge, one results file per dispatch kept outside `/tmp`.
 
-## Routing (set 2026-11-10; re-check `climit` and model availability before each dispatch)
-Routes follow the repo's benchmark record: grok-4.7 for render work, grok-4.6 for tight-spec spec/timeline logic,
-gpt-6-luna (xhigh, fast tier, capped free plan) for bounded CLI/audio work. Opus takes the foundations and all
-review. One worktree per issue; the worker gets one shot plus one fix round on the review findings.
+## Routing (set 2026-11-10; Claude models only)
+No per-issue review. Each worker verifies its own work: new tests for the issue's contract, `uv run pytest -q`
+(GPU suite when it touches `render/` or encode), and a real render when the issue changes pixels. The driver
+re-runs those checks, holds the real-GPU gate (strict mode, NVDEC/NVENC, VRAM) and visual approval, then merges.
 
-| # | Issue | Implementer | Review |
-|---|---|---|---|
-| 20 | GPU text engine | opus-high | **gate**, opus-high |
-| 21 | Text styling | grok-4.7 | milestone |
-| 22 | Text animation | grok-4.7 | milestone |
-| 23 | `captions` block | grok-4.6 | milestone |
-| 24 | Caption hygiene lints | luna xhigh | milestone |
-| 25 | Text fit | grok-4.6 | milestone |
-| 26 | Caption gallery, `ref` | luna xhigh | milestone |
-| 28 | NVENC: step 1 NV12 / step 2 zero copy | grok-4.7 / opus-high | **gate**, opus-high |
-| 27 | NVDEC decode | grok-4.7 | milestone (opus-high) |
-| 29 | Strict dGPU mode | grok-4.6 | milestone |
-| 30 | `inspect` | grok-4.6 | milestone |
-| 31 | Motion strips | luna xhigh | milestone |
-| 32 | Semantic ingest | opus-medium | milestone |
-| 33 | Pacing metrics | luna xhigh | milestone |
-| 34 | Layers | opus-high | **gate**, opus-high |
-| 35 | Keyframes, easing, expressions | grok-4.6 | milestone |
-| 36 | Subject mattes | opus-medium | milestone |
-| 37 | `custom:` shots | opus-high | **gate**, opus-high |
-| 38 | Layer effects | grok-4.7 | milestone |
-| 39 | Transcript cuts | grok-4.6 | milestone |
-| 40 | Linked clip audio, J/L cuts | luna xhigh | milestone |
-| 41 | Word-anchored emphasis, auto SFX | grok-4.6 | milestone |
-| 42 | Styles, defaults, components | grok-4.6 | milestone |
-| 43 | Linear light + primary grade | opus-high | **gate**, opus-high |
-| 44 | Secondaries, film emulation | grok-4.7 | milestone |
-| 45 | Scopes, shot matching | grok-4.7 | milestone |
-| 46 | 10-bit HEVC / AV1 | grok-4.7 | milestone |
-| 47 | Skill v4 + `montaj spec` | driver (skill text), luna xhigh (CLI) | driver |
-| 48 | Recipes | opus-medium, one per recipe | driver watches the render |
+| # | Issue | Implementer |
+|---|---|---|
+| 20 | GPU text engine | opus-high |
+| 21 | Text styling | opus-medium |
+| 22 | Text animation | opus-medium |
+| 23 | `captions` block | sonnet-medium |
+| 24 | Caption hygiene lints | sonnet-medium |
+| 25 | Text fit | sonnet-medium |
+| 26 | Caption gallery, `ref` | sonnet-medium |
+| 28 | NVENC: step 1 NV12 / step 2 zero copy | opus-medium / opus-high |
+| 27 | NVDEC decode | opus-medium |
+| 29 | Strict dGPU mode | sonnet-medium |
+| 30 | `inspect` | sonnet-medium |
+| 31 | Motion strips | sonnet-medium |
+| 32 | Semantic ingest | opus-medium |
+| 33 | Pacing metrics | sonnet-medium |
+| 34 | Layers | opus-high |
+| 35 | Keyframes, easing, expressions | sonnet-medium |
+| 36 | Subject mattes | opus-medium |
+| 37 | `custom:` shots | opus-high |
+| 38 | Layer effects | opus-medium |
+| 39 | Transcript cuts | sonnet-medium |
+| 40 | Linked clip audio, J/L cuts | opus-medium |
+| 41 | Word-anchored emphasis, auto SFX | sonnet-medium |
+| 42 | Styles, defaults, components | sonnet-medium |
+| 43 | Linear light + primary grade | opus-high |
+| 44 | Secondaries, film emulation | opus-medium |
+| 45 | Scopes, shot matching | opus-medium |
+| 46 | 10-bit HEVC / AV1 | opus-medium |
+| 47 | Skill v4 + `montaj spec` | driver (skill text), sonnet-medium (CLI) |
+| 48 | Recipes | opus-medium, one per recipe; driver watches the render |
 
-Review plan (13 reviews instead of 29):
-- **Gate** (5): #20, #28, #34, #37, #43 are reviewed by a fresh opus-high, diff inlined, before any issue that
-  depends on them starts. A flaw there is rebuilt into everything above it.
-- **Milestone** (7): one fresh opus-medium review of the whole milestone diff (opus-high for M6 and M8), then
-  one fix round by the original workers.
-- **Final** (1): fresh opus-high over the full M5–M11 diff, plus the fresh-agent benchmark as the product test.
-- The driver keeps integration, the real-GPU gate (strict mode, NVDEC/NVENC, VRAM) and visual approval.
-- Escalation: a worker that misses after its fix round goes up one step (grok-4.6 → grok-4.7 → opus-medium →
-  opus-high); never a third patch by the same route.
+Review (once, at the end):
+- Fresh reviewers in parallel over the full M5–M11 diff, split by area: `fable-high` for the foundations
+  (#20, #28, #34, #37, #43), `opus-high` for the rest. Diffs inlined.
+- One fix round for all findings, then the fresh-agent benchmark as the product test.
+- Escalation: a worker whose result fails the driver's checks goes up one step (sonnet-medium → opus-medium →
+  opus-high → fable-high); never a third patch by the same route.
 
 ## Targets
 | Metric | Today | Target after M11 |
