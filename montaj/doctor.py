@@ -26,7 +26,7 @@ TRAPS: tuple[str, ...] = (
     "TRAP ace-step-vram: 8 GB VRAM - ACE-Step needs offload_to_cpu + offload_dit_to_cpu, and no render at the same time",
     "TRAP ace-step-path: ACE-Step lives at ~/.local/share/montaj/ACE-Step-1.5 (18 GB) - reference via config, don't move",
     "TRAP gpu-lock: music gen/analyze and render share the one GPU - montaj locks ~/.cache/montaj/gpu.lock, don't run them side by side",
-    "TRAP gpu-strict: [gpu] strict=true in config.toml turns every CPU pixel fallback (ffmpeg decode, Chromium text, PIL photo, libx264) into ERR gpu-strict; page raster in capture stays CPU",
+    "TRAP gpu-strict: [gpu] strict=true in config.toml turns every CPU pixel fallback (ffmpeg decode, Chromium text, PIL photo, libx264) into ERR gpu-strict; page raster in capture stays CPU; print/wall shadows are a bit-exact torch port of PIL GaussianBlur, so walls render strict",
     "TRAP p010-typestr: PyNvVideoCodec takes P010 planes only with __cuda_array_interface__ typestr '|u2'; torch's '<u2' fails 'Invalid typestr'",
     "TRAP hevc-tag: a stream copy of HEVC into MP4 writes 'hev1' unless -tag:v hvc1 - QuickTime/Safari refuse hev1; concat/mux/export pass it",
     "TRAP still-photos: no warp/drift/depth-parallax on stills - motion lives in transitions, cuts on a beat grid",
