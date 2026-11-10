@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import math
+from pathlib import Path
 
 import numpy as np
 import torch
@@ -87,15 +88,51 @@ def keys_s(t: float, keys: list) -> float:
 
 
 # ---------------------------------------------------------------- photo
+def _is_jpeg(path: str) -> bool:
+    with open(path, "rb") as fh:
+        return fh.read(3) == b"\xff\xd8\xff"
+
+
+def decode_rgb(path: str, device, policy=None) -> np.ndarray:
+    """Photo pixels as (h, w, 3) float32 0..1. Under a strict policy a JPEG decodes on the GPU
+    (nvJPEG) when `device` is CUDA; otherwise PIL decodes (the film2 parity oracle is pinned to it, so
+    non-strict renders stay byte-identical and report `partial(photo)`). PNG/WebP, and a JPEG nvJPEG rejects, decode with PIL on the CPU. `policy` (a GpuPolicy)
+    records which one ran, and under strict turns the CPU one into an error. nvJPEG differs from
+    libjpeg by IDCT rounding only (>= 43 dB PSNR on the oracle photos; tests pin 42)."""
+    on_cuda = torch.device(device).type == "cuda"
+    reason = "device is not cuda" if not on_cuda else None
+    if reason is None and not (policy is not None and policy.strict):
+        reason = "PIL keeps exact parity with film2; nvJPEG is used under [gpu] strict"
+    if reason is None and not _is_jpeg(path):
+        reason = f"{Path(path).suffix.lstrip('.').upper() or 'this format'} has no nvJPEG path"
+    if reason is None:
+        try:
+            from torchvision.io import ImageReadMode, decode_jpeg, read_file
+
+            img = decode_jpeg(read_file(path), device=device, mode=ImageReadMode.RGB)
+            out = (img.permute(1, 2, 0).float() / 255).cpu().numpy()
+            if policy is not None:
+                policy.gpu("photo")
+            return out
+        except Exception as exc:  # unsupported JPEG variant, no nvJPEG, torchvision missing
+            reason = f"nvJPEG rejected it ({type(exc).__name__}: {' '.join(str(exc).split())[:120]})"
+    if policy is not None:
+        policy.cpu(
+            "photo", f"decoding photo {Path(path).name} ({reason})",
+            "convert it to a baseline/progressive RGB JPEG (nvJPEG decodes JPEG only)",
+        )
+    return np.asarray(Image.open(path).convert("RGB"), np.float32) / 255
+
+
 class Photo:
     """film.Img minus the depth channel (film2 never uses relief)."""
 
-    def __init__(self, cv, path: str, crop: tuple | None = None, card: bool = False, pad: int = 90):
-        im = Image.open(path).convert("RGB")
-        w, h = im.size
+    def __init__(self, cv, path: str, crop: tuple | None = None, card: bool = False, pad: int = 90,
+                 policy=None):
+        rgb = decode_rgb(path, cv.device, policy)  # (h, w, 3) float32 0..1 on the host
+        h, w = rgb.shape[:2]
         x0, y0, x1, y1 = crop or (0, 0, w, h)
         self.crop = (x0, y0, x1, y1)
-        rgb = np.asarray(im, np.float32) / 255
         if not card:
             a = np.zeros((h, w), np.float32)
             a[y0:y1, x0:x1] = 1
@@ -103,6 +140,9 @@ class Photo:
             tex = np.dstack([rgb * a[..., None], a])
             self.th, self.tw = h, w
         else:  # print: cream border + soft drop shadow around the cropped photo
+            if policy is not None:  # the shadow is PIL's GaussianBlur on the host
+                policy.cpu("photo", f"print shadow of {Path(path).name} (PIL GaussianBlur)",
+                           "use a flat photo or a frame instead of a print/wall until the shadow is on the GPU")
             cw, ch = x1 - x0, y1 - y0
             b = int(0.035 * min(cw, ch))
             P = pad

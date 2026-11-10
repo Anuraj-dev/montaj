@@ -224,8 +224,9 @@ class Renderer:
     """`frame(f)` samples the plan's scene across the motion-blur shutter, then finishes it."""
 
     def __init__(self, tl: Timeline, spec_dir: Path, cv: Canvas, *, cache_caps: dict[str, int] | None = None,
-                 log=None):
+                 log=None, policy=None):
         self.tl = tl
+        self._policy = policy  # GpuPolicy or None; each CPU pixel seam asks it before running
         self.cv = cv
         self._log = log  # callable(str) for build/render.log lines, or None
         self._dir = Path(spec_dir)
@@ -380,7 +381,7 @@ class Renderer:
         key = (stem, crop, card)
         hit = self._photos.get(key)
         if hit is None:
-            hit = Photo(self.cv, str(find_photo(self._assets, stem)), crop=crop, card=card)
+            hit = Photo(self.cv, str(find_photo(self._assets, stem)), crop=crop, card=card, policy=self._policy)
             self._photos[key] = hit
         self._note("photos", key)
         return hit
@@ -519,7 +520,7 @@ class Renderer:
         hit = self._clips.get(stem)
         if hit is None:
             hit = ClipSource(resolve_clip(self._dir, self._assets, stem), self.tl.fps,
-                             device=self.cv.device, log=self._log)
+                             device=self.cv.device, log=self._log, policy=self._policy)
             self._clips[stem] = hit
         return hit
 
@@ -562,9 +563,19 @@ class Renderer:
         self._note("bgs", key)
         return hit
 
+    def _seam_text(self, what: str | None, hint: str) -> None:
+        """Report one text element to the GPU policy: `what=None` is a gpu line, else a Chromium one."""
+        if self._policy is None:
+            return
+        if what is None:
+            self._policy.gpu("text")
+        else:
+            self._policy.cpu("text", f"{what} rasterised by Chromium", hint)
+
     def _sprite(self, caption: str) -> torch.Tensor:
         hit = self._captions.get(caption)
         if hit is None:
+            self._seam_text(f"caption {caption!r}", "frame captions are Chromium-only today; drop the caption")
             premul, _size = raster_caption(
                 caption, font_css=None, scale=float(self.cv.k), cache_dir=self._dir / "build" / "text",
             )
@@ -748,6 +759,14 @@ class Renderer:
         scale = float(self.cv.k)
         chromium = [ln for i, ln in enumerate(flat) if i not in glyph_lines]
         everything = (*chromium, *card_lines)
+        for _ in glyph_lines:
+            self._seam_text(None, "")
+        for ln in chromium:
+            self._seam_text(f"line {ln.text!r} (style {ln.style})", "set `engine: gpu` on the line")
+        for ln in card_lines:
+            self._seam_text(f"card line {ln.text!r}", "card text is Chromium-only today; use a `text` block with `engine: gpu`")
+        for sub in subs:
+            self._seam_text(f"sub {sub.text!r}", "subs are Chromium-only today; use a `text` block with `engine: gpu`")
         drawn = iter(tuple(_move_line(ln, device) for ln in raster_lines(everything, scale=scale, cache_dir=cache)) if everything else ())
         # Back in flat order: gpu lines take their GlyphLine slot, so an all-gpu film starts no browser.
         rasters = tuple(glyph_lines[i] if i in glyph_lines else next(drawn) for i in range(len(flat))) + tuple(drawn)

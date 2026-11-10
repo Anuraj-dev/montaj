@@ -32,7 +32,7 @@ import yaml
 from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, ValidationError, field_validator
 
 from montaj.doctor import chromium
-from montaj.encode import Encoder, probe
+from montaj.encode import NVENC_MIN_SIDE, Encoder, prefer_encoder, probe
 from montaj.spec import SpecError, _line, parse_wh, round_frame
 
 _DUR = re.compile(r"^[+]?(?:\d+(?:\.\d*)?|\.\d+)[fs]$")
@@ -470,14 +470,30 @@ def _check_output(plan: CapturePlan, log: Path) -> None:
         )
 
 
+def _capture_codec(plan: CapturePlan, policy: Any) -> str:
+    """NVENC when it works and the frame is big enough for it, else libx264 (the policy decides if
+    that is allowed: strict makes it an error naming the reason)."""
+    codec = prefer_encoder()
+    if codec == "h264_nvenc" and min(plan.width, plan.height) < NVENC_MIN_SIDE:
+        if policy is not None:
+            policy.cpu("encode", f"libx264 encode of {plan.out.name}",
+                       f"NVENC rejects frames under {NVENC_MIN_SIDE} px a side; capture at a larger size")
+        return "libx264"
+    return codec
+
+
 def record(
     plan: CapturePlan,
     *,
     log: Path,
     page: Any = None,
     encoder: Any = None,
+    policy: Any = None,
 ) -> CaptureResult:
-    """Play `plan` into `plan.out`. Pass `page` / `encoder` only from tests."""
+    """Play `plan` into `plan.out`. Pass `page` / `encoder` only from tests.
+
+    Encodes with NVENC when it works (libx264 otherwise; an error under a strict `policy`). The page
+    raster stays on the CPU: headless Chromium has no GPU raster here, a named exception to strict."""
     log = Path(log)
     log.parent.mkdir(parents=True, exist_ok=True)
     log.write_text("")
@@ -496,8 +512,8 @@ def record(
     own_encoder = encoder is None
     page = page if page is not None else ChromiumPage()
     enc = encoder if encoder is not None else Encoder(
-        plan.out, plan.width, plan.height, plan.fps,
-        encoder="libx264", preset=_CAPTURE_PRESET, crf=_CAPTURE_CRF, log=log,
+        plan.out, plan.width, plan.height, plan.fps, encoder=_capture_codec(plan, policy),
+        preset=_CAPTURE_PRESET, crf=_CAPTURE_CRF, log=log, policy=policy,
     )
     try:
         _play(plan, page, enc, log)
@@ -520,10 +536,11 @@ def run(
     log: Path,
     page: Any = None,
     encoder: Any = None,
+    policy: Any = None,
 ) -> CaptureResult:
     """Load `script` and record it. `root` is the project directory (`-C`)."""
     plan = load_capture(script, root)
-    return record(plan, log=log, page=page, encoder=encoder)
+    return record(plan, log=log, page=page, encoder=encoder, policy=policy)
 
 
 class ChromiumPage:

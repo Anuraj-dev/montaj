@@ -20,4 +20,5 @@
 - ACE-Step venv `bin/python` symlink is dangling → run uv CPython 3.12 with its site-packages (`music/py.sh`).
 - 8 GB VRAM: ACE-Step needs `offload_to_cpu` + `offload_dit_to_cpu`, else the LM phase OOMs. Don't render at the same time.
 - ACE-Step location: `design-test/voice-bot/tools/ACE-Step-1.5` (19 GB) — reference via config, don't move.
+- `[gpu] strict = true` makes every CPU pixel fallback an `ERR gpu-strict` (ffmpeg decode, Chromium text, PIL photo/print shadow, libx264). Page raster in `capture` is the one named CPU exception. A cached segment is not rechecked.
 - Taste: no photo warp/drift/depth-parallax on stills; motion lives in transitions; cuts on a beat grid.

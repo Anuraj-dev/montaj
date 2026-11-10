@@ -11,7 +11,10 @@ from pathlib import Path
 
 from montaj.config import Config, ConfigError
 from montaj.config import load as load_config
-from montaj.encode import FFPROBE, FFMPEG, choose_route, has_encoder, nvenc_usable, prefer_encoder, tool_version
+from montaj.encode import (
+    FFMPEG, FFPROBE, choose_route, has_encoder, nvenc_hint, nvenc_usable, prefer_encoder, tool_version,
+)
+from montaj.gpu_policy import GpuPolicy, load_policy, resolve_device
 
 CHROMIUM_CANDIDATES = ("google-chrome-stable", "google-chrome", "chromium", "chromium-browser")
 WHISPER_IMPORT_TIMEOUT = 20  # a plain import; the model load is the slow part and lives in the worker
@@ -22,6 +25,7 @@ TRAPS: tuple[str, ...] = (
     "TRAP ace-step-vram: 8 GB VRAM - ACE-Step needs offload_to_cpu + offload_dit_to_cpu, and no render at the same time",
     "TRAP ace-step-path: ACE-Step lives at ~/.local/share/montaj/ACE-Step-1.5 (18 GB) - reference via config, don't move",
     "TRAP gpu-lock: music gen/analyze and render share the one GPU - montaj locks ~/.cache/montaj/gpu.lock, don't run them side by side",
+    "TRAP gpu-strict: [gpu] strict=true in config.toml turns every CPU pixel fallback (ffmpeg decode, Chromium text, PIL photo, libx264) into ERR gpu-strict; page raster in capture stays CPU",
     "TRAP still-photos: no warp/drift/depth-parallax on stills - motion lives in transitions, cuts on a beat grid",
 )
 
@@ -84,6 +88,7 @@ def encode_route_line() -> str:
 def doctor() -> list[str]:
     """Environment report for the CLI (or an agent) to print as-is."""
     lines = [cuda_line(), nvenc_line(), encode_route_line()]
+    lines.extend(stage_lines())
 
     lines.append(_version(FFMPEG, "ffmpeg"))
     lines.append(_version(FFPROBE, "ffprobe"))
@@ -100,6 +105,81 @@ def doctor() -> list[str]:
 
     lines.extend(TRAPS)
     return lines
+
+
+def stage_lines(policy: GpuPolicy | None = None) -> list[str]:
+    """One line per pixel stage: does it run on the GPU here? Under `[gpu] strict` a stage that
+    would fall back to the CPU is a FAIL (the render would stop with `ERR gpu-strict`); the named
+    exceptions (Chromium text styles, page raster, PNG/WebP photos) stay WARN."""
+    import torch
+
+    try:
+        pol = policy if policy is not None else load_policy()
+    except RuntimeError as exc:
+        return [f"FAIL gpu-policy: {exc}"]
+    bad = "FAIL" if pol.strict else "WARN"
+    if not torch.cuda.is_available():
+        return [f"{bad} composite: no CUDA device", f"OK gpu-policy: strict={str(pol.strict).lower()}"]
+    try:
+        device = resolve_device(pol.device)
+    except ValueError as exc:
+        return [f"FAIL gpu-policy: {exc}"]
+    lines = [f"OK gpu-policy: strict={str(pol.strict).lower()} device={device}"]
+    name = torch.cuda.get_device_name(torch.device(device))
+    lines.append(f"OK composite: {device} {name}")
+
+    from montaj.render import nvdec
+
+    lines.append(
+        "OK decode: nvdec (a clip NVDEC cannot open falls back to ffmpeg on the CPU)" if nvdec._IMPORT_ERROR is None
+        else f"{bad} decode: ffmpeg on the CPU, PyNvVideoCodec unavailable ({nvdec._IMPORT_ERROR})"
+    )
+    lines.append(photo_line(device, bad))
+    lines.append(text_stage_line())
+    codec = prefer_encoder()
+    route = choose_route(codec, 1080, 1920, device)
+    if codec != "h264_nvenc":
+        lines.append(f"{bad} encode: {codec} on the CPU ({nvenc_hint()})")
+    elif route.zero_copy:
+        lines.append("OK encode: nvenc zero-copy")
+    else:
+        lines.append(f"WARN encode: nvenc via ffmpeg pipe ({route.reason})")
+    lines.append(
+        f"WARN capture: page raster is CPU (Chromium); encode {'nvenc' if codec == 'h264_nvenc' else codec}"
+    )
+    return lines
+
+
+def photo_line(device: str, bad: str = "WARN") -> str:
+    """JPEG decodes on nvJPEG; a tiny real decode proves it. PNG/WebP are CPU (PIL) at load."""
+    import io
+
+    import torch
+    from PIL import Image
+
+    try:
+        from torchvision.io import ImageReadMode, decode_jpeg
+
+        buf = io.BytesIO()
+        Image.new("RGB", (16, 16), (200, 30, 60)).save(buf, "JPEG")
+        decode_jpeg(torch.frombuffer(bytearray(buf.getvalue()), dtype=torch.uint8), device=device, mode=ImageReadMode.RGB)
+    except Exception as exc:
+        return f"{bad} photo: nvJPEG unavailable, PIL on the CPU ({type(exc).__name__}: {' '.join(str(exc).split())[:100]})"
+    return "OK photo: nvjpeg (JPEG); PNG/WebP decode on the CPU (PIL), convert to JPEG for strict"
+
+
+def text_stage_line() -> str:
+    from montaj.render.glyphs import STYLE_ENGINE
+
+    cpu = [s for s, e in STYLE_ENGINE.items() if e != "gpu"]
+    try:
+        import fontTools  # noqa: F401
+        import uharfbuzz  # noqa: F401
+    except ImportError as exc:
+        return f"WARN text: gpu engine unavailable ({exc.name} missing: uv sync)"
+    if cpu:
+        return f"WARN text: gpu engine ready; styles {', '.join(cpu)} default to Chromium (CPU), set engine: gpu per line"
+    return "OK text: gpu"
 
 
 def text_engine_line() -> str:

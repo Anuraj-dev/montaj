@@ -224,6 +224,8 @@ slot. warm-film: overlay runs last (M1 output unchanged when there is no text). 
   trick), `whisper_python` (a python with `faster_whisper`). Each command demands only the keys it uses (`gen`: the
   three ACE keys; `analyze`: `whisper_python`; `analyze --no-words` and `compose`: none); a missing key →
   `ERR … config: <key> missing (set it in ~/.config/montaj/config.toml)`. `doctor` reports each.
+  An optional `[gpu]` table (`strict`, `device`) is read by every render stage, not by `config.load`; see
+  `docs/SPEC-REFERENCE.md` "Strict dGPU mode".
 - `montaj music gen --caption TEXT --lyrics FILE [--bpm 76] [--key "D major"] [--lang hi] [--duration 165s] [--n 3]`
   → `music/cand-<seed>.wav` + `.json` (params + seed). Runs `montaj/audio/_ace_worker.py` under `ace_python`
   with offload_to_cpu + offload_dit_to_cpu. Result: one line per candidate with its measured length, then
