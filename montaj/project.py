@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
+import re
 from dataclasses import asdict
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -60,6 +62,64 @@ def _find_stem(assets_dir: Path, stem: str, exts: tuple[str, ...]) -> Path:
 
 def find_photo(assets_dir: Path, photo_id: str) -> Path:
     return _find_stem(assets_dir, photo_id, _EXTS)
+
+
+_GLOB = re.compile(r"[*?\[]")
+
+
+def _natural(p: Path) -> list:
+    """Name order with digit runs compared as numbers, so `f2` sorts before `f10` (padded names sort as-is)."""
+    return [int(t) if t.isdigit() else t for t in re.split(r"(\d+)", p.name)]
+
+
+def find_frames(assets_dir: Path, name: str) -> list[Path]:
+    """A `frames:` layer's images in order (#59): a folder under `assets_dir`, or a glob relative to it.
+
+    Only photo files count (`.jpg .jpeg .png .webp`); hidden files are skipped. Raises FileNotFoundError when
+    nothing matches.
+    """
+    assets_dir = Path(assets_dir)
+    if _GLOB.search(name):
+        found = [p for p in assets_dir.glob(name) if p.is_file()]
+    else:
+        folder = assets_dir / name
+        if not folder.is_dir():
+            have = sorted(p.name for p in assets_dir.iterdir() if p.is_dir() and not p.name.startswith(".")) \
+                if assets_dir.is_dir() else []
+            raise FileNotFoundError(f"no folder '{name}' in {assets_dir} (have: {', '.join(have) or 'none'})")
+        found = [p for p in folder.iterdir() if p.is_file()]
+    found = [p for p in found if p.suffix.lower() in _EXTS and not p.name.startswith(".")]
+    if not found:
+        raise FileNotFoundError(f"'{name}' matches no .png/.jpg/.webp frames in {assets_dir}")
+    return sorted(found, key=_natural)
+
+
+def frames_step(layer, fps: float) -> float:
+    """Film frames each image of a `frames:` layer shows for: `every` (whole frames after resolve), or the
+    film fps over the layer's `fps`; one image per film frame by default."""
+    if layer.every is not None:
+        return float(layer.every)
+    if layer.fps is not None:
+        return float(fps) / float(layer.fps)
+    return 1.0
+
+
+def frame_index(layer, local: float, n: int, fps: float) -> int | None:
+    """Which of the `n` images a `frames:` layer shows at `local` (shot-clock frames), or None when it shows
+    none: outside `from`/`to`, or past the last image with `once`.
+
+    The clock rounds to the nearest film frame, so motion-blur sub-samples show the frame's own image.
+    Before `from` (an unset `from` during the incoming transition) it shows the `start` image.
+    """
+    if (layer.from_ is not None and local < layer.from_) or (layer.to is not None and local >= layer.to):
+        return None
+    k = max(0, math.floor(local - (layer.from_ or 0) + 0.5))
+    i = (layer.start or 0) + math.floor(k / frames_step(layer, fps) + 1e-9)
+    if layer.loop:
+        return i % n
+    if i >= n:
+        return None if layer.once else n - 1
+    return i
 
 
 def find_clip(assets_dir: Path, clip_id: str) -> Path:
@@ -145,7 +205,7 @@ def shot_mattes(shot) -> list[tuple[str, str]]:
     if getattr(shot, "matte", None) is not None and shot.clip is not None:
         out.append(("clip", shot.clip))
     for layer in shot.layers or ():
-        if getattr(layer, "mask", None) is not None:
+        if getattr(layer, "mask", None) is not None and layer.frames is None:  # validate rejects mask on frames
             out.append(("clip", layer.clip) if layer.clip is not None else ("photo", layer.image))
     return out
 
@@ -280,6 +340,37 @@ def _run_payload(run) -> dict:
     return raw
 
 
+_TRAIL_FRAMES = 4  # render.effects.TRAIL_FRAMES (that module needs torch)
+
+
+def frames_keys(asset_sha: dict[str, str], name: str) -> tuple[int, list[str]]:
+    """(image count, sha per image) of a `frames:` source, from `pipeline._asset_shas` keys."""
+    n = int(asset_sha[f"frames:{name}"])
+    return n, [asset_sha[f"frames:{name}:{i}"] for i in range(n)]
+
+
+def _note_frames(scene, f: int, shots, asset_sha: dict[str, str], fps: float, shown: dict[str, list]) -> None:
+    """Append, per `frames:` layer on screen at frame `f`, the sha of the image it draws (None when it draws
+    none), plus the earlier images its trails redraw. Only the images a segment shows reach its hash, so
+    editing one frame file re-renders only the segments that show it."""
+    from montaj.timeline import Layers, Trans
+
+    if isinstance(scene, Trans):
+        _note_frames(scene.a, f, shots, asset_sha, fps, shown)
+        _note_frames(scene.b, f, shots, asset_sha, fps, shown)
+        return
+    if not isinstance(scene, Layers):
+        return
+    for k, layer in enumerate(shots[scene.shot].layers or ()):
+        if layer.frames is None:
+            continue
+        n, shas = frames_keys(asset_sha, layer.frames)
+        local = f - scene.t0
+        back = max([0, *((fx.frames or _TRAIL_FRAMES) for fx in layer.effects or () if fx.type == "trails")])
+        picks = [frame_index(layer, local - j, n, fps) for j in range(back + 1)]
+        shown.setdefault(f"{scene.shot}.{k}", []).append([None if i is None else shas[i] for i in picks])
+
+
 def segment_hash(
     tl: Timeline,
     seg: Segment,
@@ -293,6 +384,7 @@ def segment_hash(
     plans = []
     overlay_ids: set[int] = set()
     custom_files: set[str] = set()
+    shown: dict[str, list] = {}
     by_index = {sh.index: sh.spec for sh in tl.shots}
     for f in range(seg.start, seg.end):
         plan = tl.plan(f)
@@ -306,6 +398,7 @@ def segment_hash(
         custom_files |= scene_custom_files(plan.scene, by_index)
         text_ids.update(plan.texts)
         sub_ids.update(plan.subs)
+        _note_frames(plan.scene, f, by_index, asset_sha, tl.fps, shown)
     shots = {str(i): _shot_payload(tl.shots[i].spec) for i in sorted(referenced)}
     photos: dict[str, str] = {}
     clips: dict[str, str] = {}
@@ -325,6 +418,8 @@ def segment_hash(
         "shots": shots,
         "photos": photos,
     }
+    if shown:  # #59: the bytes of each `frames:` image this segment draws, frame by frame; absent without one
+        payload["frames"] = shown
     if mattes:  # the matte file's bytes decide the cutout; absent for every film without one
         payload["mattes"] = mattes
     look = tl.spec.video.look

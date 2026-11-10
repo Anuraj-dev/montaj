@@ -627,6 +627,16 @@ class Layer(Frozen):
 
     clip: PhotoId | None = Field(default=None, exclude_if=_none)
     image: PhotoId | None = Field(default=None, exclude_if=_none)
+    # Image sequence (#59): a folder under assets/ (images in name order) or a glob. One image per `every`
+    # (whole frames after resolve) or `fps` images a second, from image `start`; past the last it loops,
+    # holds the last (default) or disappears (`once`). `project.frame_index` picks the image.
+    frames: str | None = Field(default=None, exclude_if=_none)
+    fps: RealNum | None = Field(default=None, exclude_if=_none)
+    every: DurationStr | int | None = Field(default=None, exclude_if=_none)
+    start: StrictInt | None = Field(default=None, exclude_if=_none)
+    loop: StrictBool | None = Field(default=None, exclude_if=_none)
+    hold: StrictBool | None = Field(default=None, exclude_if=_none)
+    once: StrictBool | None = Field(default=None, exclude_if=_none)
     # `id` names a layer for `parent`, which inherits that layer's transform; `anchor` is the pivot's offset from
     # the layer's centre (design px) that scale and rotate act about.
     id: str | None = Field(default=None, exclude_if=_none)
@@ -1274,7 +1284,7 @@ def _duration_fields(spec: Spec) -> list[tuple[str, str]]:
             for k, skey in enumerate(sh.speed):
                 out.append((f"shots[{i}].speed[{k}].t", skey.t))
         for k, layer in enumerate(sh.layers or ()):
-            for name, raw in (("from", layer.from_), ("to", layer.to),
+            for name, raw in (("from", layer.from_), ("to", layer.to), ("every", layer.every),
                               ("in.dur", layer.in_ and layer.in_.dur), ("out.dur", layer.out and layer.out.dur)):
                 if raw is not None:
                     out.append((f"shots[{i}].layers[{k}].{name}", raw))
@@ -1545,6 +1555,8 @@ def _collect_photos(data: object, assets_dir: Path, spec_dir: Path, errors: list
                 pid = _photo_id(layer["image"])
                 if isinstance(pid, str):
                     _require_photo(assets_dir, pid, f"{path}.image", errors, find_photo)
+            if isinstance(layer.get("frames"), str):
+                _require_frames(assets_dir, layer["frames"], f"{path}.frames", errors)
             if layer.get("clip") is not None:
                 pid = _photo_id(layer["clip"])
                 if isinstance(pid, str):
@@ -1575,6 +1587,34 @@ def _sequence_photo_id(item: object) -> tuple[str, str] | None:
         if isinstance(pid, str):
             return pid, ".photo"
     return None
+
+
+def _require_frames(assets_dir: Path, name: str, path: str, errors: list[str]) -> None:
+    """A `frames:` source exists and every image has the first one's size (headers only)."""
+    from PIL import Image
+
+    from montaj.project import find_frames
+
+    try:
+        files = find_frames(assets_dir, name)
+    except FileNotFoundError as e:
+        hint = "put the images in a folder under assets/ (or use a glob like mascot/*.png)"
+        errors.append(_line(path, str(e).replace(str(assets_dir), "assets/"), hint))
+        return
+    size = None
+    for f in files:
+        try:
+            with Image.open(f) as im:
+                got = im.size
+        except OSError:
+            errors.append(_line(path, f"{f.name} is not a readable image", "re-export it as PNG"))
+            return
+        if size is None:
+            size = got
+        elif got != size:
+            errors.append(_line(path, f"{f.name} is {got[0]}x{got[1]}, the first frame is {size[0]}x{size[1]}",
+                                "export every frame at one size"))
+            return
 
 
 def _require_photo(assets_dir: Path, pid: str, path: str, errors: list[str], find_photo) -> None:
@@ -1825,6 +1865,11 @@ def _resolve_shot_sugar(spec: Spec, sh: Shot, i: int, spec_dir: Path | None, boo
         for k, layer in enumerate(sh.layers):
             if isinstance(layer.focus, str):
                 path = f"{at}.layers[{k}].focus"
+                if layer.frames is not None:
+                    errors.append(_line(path, "a frames layer has no analysis", "use [x, y] source px"))
+                    layer = layer.model_copy(update={"focus": None})
+                    layers.append(layer)
+                    continue
                 # A layer is its own source: read its image or clip, at its own clip_in.
                 src = SimpleNamespace(photo=layer.image, clip=layer.clip)
                 got = _sugar_row(spec, src, spec_dir, book, path, errors)
@@ -3515,14 +3560,16 @@ def _layer_source_size(spec: Spec, spec_dir: Path | None, layer: Layer) -> tuple
     if layer.clip is not None:
         info = _probe_clip(spec, spec_dir, layer.clip)
         return None if info is None else (info[0], info[1])
-    if layer.image is None:
+    if layer.image is None and layer.frames is None:
         return None
     from PIL import Image
 
-    from montaj.project import find_photo
+    from montaj.project import find_frames, find_photo
 
     try:
-        with Image.open(find_photo(spec_dir / spec.assets, layer.image)) as im:
+        path = (find_photo(spec_dir / spec.assets, layer.image) if layer.image is not None
+                else find_frames(spec_dir / spec.assets, layer.frames)[0])
+        with Image.open(path) as im:
             return im.size
     except (FileNotFoundError, OSError, ValueError):
         return None
@@ -3735,6 +3782,39 @@ def _validate_mattes(spec: Spec, spec_dir: Path | None, errors: list[str]) -> No
             pass  # the missing asset itself is reported by the asset check
 
 
+def _check_frames(layer: Layer, p: str, parsed: dict[str, int], assets_dir: Path | None, errors: list[str]) -> None:
+    """#59: the playback options of a `frames:` layer, and only there."""
+    opts = {"fps": layer.fps, "every": layer.every, "start": layer.start, "loop": layer.loop,
+            "hold": layer.hold, "once": layer.once}
+    if layer.frames is None:
+        for name, v in opts.items():
+            if v is not None:
+                errors.append(_line(f"{p}.{name}", f"{name} needs frames", "add frames: <folder>"))
+        return
+    if layer.mask is not None:
+        errors.append(_line(f"{p}.mask", "a frames layer has no matte", "remove mask"))
+    if layer.fps is not None and layer.every is not None:
+        errors.append(_line(p, "fps and every are mutually exclusive", "use fps: 12 or every: 2f"))
+    if layer.fps is not None and not (math.isfinite(layer.fps) and layer.fps > 0):
+        errors.append(_line(f"{p}.fps", f"must be > 0, got {_fmt_num(layer.fps)}", "use fps: 12"))
+    every = parsed.get(f"{p}.every")
+    if every is not None and every <= 0:
+        errors.append(_line(f"{p}.every", f"must be > 0, got {every}f", "use every: 2f"))
+    if sum(bool(v) for v in (layer.loop, layer.hold, layer.once)) > 1:
+        errors.append(_line(p, "loop, hold and once are mutually exclusive", "pick one (default hold)"))
+    if layer.start is not None:
+        if layer.start < 0:
+            errors.append(_line(f"{p}.start", f"must be >= 0, got {layer.start}", "start is an image index from 0"))
+        elif assets_dir is not None:
+            from montaj.project import find_frames
+
+            with contextlib.suppress(FileNotFoundError):  # a missing source is reported by the asset check
+                n = len(find_frames(assets_dir, layer.frames))
+                if layer.start >= n:
+                    errors.append(_line(f"{p}.start", f"{layer.start} is past the last image ({n} frames)",
+                                        f"use 0 to {n - 1}"))
+
+
 def _validate_layers(
     spec: Spec, i: int, sh: Shot, hold: int | None, parsed: dict[str, int], times: dict[str, float],
     spec_dir: Path | None, errors: list[str], grid: tuple[dict[str, float], int, float | None, float],
@@ -3765,8 +3845,9 @@ def _validate_layers(
                     seen.add(cur)
                     cur = parent_of[cur]
         n_err = len(errors)
-        if (layer.clip is None) == (layer.image is None):
-            errors.append(_line(p, "need exactly one of clip or image", "set clip: or image:"))
+        if sum(x is not None for x in (layer.clip, layer.image, layer.frames)) != 1:
+            errors.append(_line(p, "need exactly one of clip or image (or frames)", "set clip:, image: or frames:"))
+        _check_frames(layer, p, parsed, spec_dir and spec_dir / spec.assets, errors)
         if layer.clip_in is not None and layer.clip is None:
             errors.append(_line(f"{p}.clip_in", "clip_in needs clip", "add clip:"))
         if layer.id is not None and not _NAME.match(layer.id):

@@ -26,6 +26,7 @@ ANALYSIS_VERSION = 1
 ANALYSIS_FILE = "analysis.json"
 PHOTO_EXTS = (".jpg", ".jpeg", ".png", ".webp")
 CLIP_EXTS = (".mp4", ".mov", ".webm", ".mkv")
+_MATTES_DIR = "mattes"  # matte.MATTES_DIR (that module imports torch)
 KEPT_KEYS = ("words",)  # written by other commands; survive a re-analysis of the same bytes
 
 
@@ -51,7 +52,10 @@ def load_analysis(assets_dir: Path | str) -> dict[str, dict]:
 
 
 def media(assets_dir: Path | str) -> list[tuple[Path, str]]:
-    """(file, kind) for every photo and clip in the assets folder, sorted by name."""
+    """(file, kind) for every photo and clip in the assets folder, sorted by name.
+
+    Flat files only: subfolders are never analysed. A subfolder of images is a `frames:` layer source,
+    listed by `frame_folders` instead (#59)."""
     assets_dir = Path(assets_dir)
     if not assets_dir.is_dir():
         return []
@@ -170,13 +174,44 @@ def describe(name: str, row: dict | None) -> str:
             f"sharp={row.get('sharpness', 0):g} bright={row.get('brightness', 0):g} colors={colors}")
 
 
+def frame_folders(assets_dir: Path | str) -> list[tuple[Path, list[Path]]]:
+    """(folder, images in order) for each subfolder of the assets folder that holds images: a `frames:`
+    layer source (#59). Hidden folders and the matte store (`mattes/`) are skipped."""
+    from montaj.project import find_frames
+
+    assets_dir = Path(assets_dir)
+    if not assets_dir.is_dir():
+        return []
+    out = []
+    for d in sorted(assets_dir.iterdir(), key=lambda p: p.name):
+        if not d.is_dir() or d.name.startswith(".") or d.name == _MATTES_DIR:
+            continue
+        try:
+            out.append((d, find_frames(assets_dir, d.name)))
+        except FileNotFoundError:
+            continue
+    return out
+
+
+def describe_frames(name: str, files: list[Path]) -> str:
+    """One `montaj ingest --list` line for a frames folder: count, first image's size, alpha or opaque."""
+    from PIL import Image
+
+    with Image.open(files[0]) as im:
+        w, h = im.size
+        alpha = im.mode in ("RGBA", "LA", "PA") or "transparency" in im.info
+    return f"{name} frames {len(files)} {w}x{h} {'alpha' if alpha else 'opaque'}"
+
+
 def describe_all(assets_dir: Path | str) -> list[str]:
+    """`montaj ingest --list`: one line per analysed photo or clip, and one per frames folder, by name."""
     rows = load_analysis(assets_dir)
     out = []
     for path, _ in media(assets_dir):
         row = rows.get(path.name)
-        out.append(describe(path.name, row if fresh(row, path) else None))
-    return out
+        out.append((path.name, describe(path.name, row if fresh(row, path) else None)))
+    out.extend((d.name, describe_frames(d.name, files)) for d, files in frame_folders(assets_dir))
+    return [line for _, line in sorted(out, key=lambda x: x[0])]
 
 
 def face_point(face: dict) -> list[float]:

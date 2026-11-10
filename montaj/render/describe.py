@@ -151,7 +151,7 @@ def _layers(tl: Timeline, scene) -> list[dict]:
         if src:
             entry["src"] = src
         if sh.spec.layers is not None:
-            entry["layers"] = [layer.clip or layer.image for layer in sh.spec.layers]
+            entry["layers"] = [layer.clip or layer.image or layer.frames for layer in sh.spec.layers]
         out.append(entry)
     return out
 

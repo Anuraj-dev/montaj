@@ -566,9 +566,9 @@ def _shot_effects_with_frames(sh: Shot, i: int, parsed: dict[str, int]) -> Shot:
 
 
 def _layer_with_frames(layer: Layer, at: str, parsed: dict[str, int]) -> Layer:
-    """A layer's from/to and in/out durations as whole frames (unset fields stay unset)."""
+    """A layer's from/to, `every` and in/out durations as whole frames (unset fields stay unset)."""
     update: dict = {}
-    for name, attr in (("from", "from_"), ("to", "to")):
+    for name, attr in (("from", "from_"), ("to", "to"), ("every", "every")):
         if getattr(layer, attr) is not None:
             update[attr] = parsed[f"{at}.{name}"]
     for name, attr in (("in", "in_"), ("out", "out")):
