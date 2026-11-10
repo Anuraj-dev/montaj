@@ -4,12 +4,13 @@ from __future__ import annotations
 
 import ast
 import contextlib
+import difflib
 import json
 import math
 import re
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any, Literal, get_args
 
 import yaml
 from pydantic import (
@@ -1004,14 +1005,56 @@ _PYDANTIC_HINTS = {
 }
 
 
+def _models_in(ann: object) -> list[type[BaseModel]]:
+    """Every model class named by a field annotation (through Optional, unions, lists, dicts)."""
+    if isinstance(ann, type) and issubclass(ann, BaseModel):
+        return [ann]
+    return [m for arg in get_args(ann) for m in _models_in(arg)]
+
+
+def _known_keys(loc: tuple) -> list[str]:
+    """Field names and aliases legal beside the unknown key at `loc`: walk the models down from `Spec`."""
+    models: list[type[BaseModel]] = [Spec]
+    for part in loc[:-1]:
+        if isinstance(part, int):
+            continue
+        nxt: list[type[BaseModel]] = []
+        for m in models:
+            for name, f in m.model_fields.items():
+                if part in (name, f.alias):
+                    nxt += _models_in(f.annotation)
+        if not nxt:
+            return []  # a union tag or an untyped mapping: no honest list
+        models = nxt
+    return sorted({k for m in models for name, f in m.model_fields.items() for k in (name, f.alias) if k})
+
+
+def _unknown_key(loc: tuple) -> tuple[str, str]:
+    """(problem, hint) for an unknown key: the nearest real key, else the keys that are legal there."""
+    key = str(loc[-1])
+    known = _known_keys(loc)
+    near = difflib.get_close_matches(key, known, n=1, cutoff=0.6)
+    if near:
+        return f"unknown key {key!r} — did you mean {near[0]!r}?", ""
+    shown = ", ".join(known[:14]) + (", ..." if len(known) > 14 else "")
+    return f"unknown key {key!r}", f"valid here: {shown}" if known else "montaj spec --search <word> finds a field"
+
+
 def _from_pydantic(exc: ValidationError) -> list[str]:
     lines = []
     for err in exc.errors():
         path = _yaml_path(tuple(err["loc"]))
+        if err["type"] == "extra_forbidden":
+            problem, hint = _unknown_key(tuple(err["loc"]))
+            lines.append(_line(path, problem, hint) if hint else f"{path}: {problem}")
+            continue
         msg = err["msg"]
         if msg.lower().startswith("value error, "):
             msg = msg[13:]
-        hint = _PYDANTIC_HINTS.get(err["type"], "check the spec")
+        key = str(err["loc"][-1]) if err["loc"] else ""
+        hint = _PYDANTIC_HINTS.get(err["type"], f"montaj spec --search {key}")
+        if err["type"] == "missing":
+            msg, hint = f"missing required key {key!r}", f"add `{key}:`; montaj spec --search {key} shows its form"
         if "bare number" in msg:
             msg = "bare number"
             hint = "use 22f, 4b or 1.5s"

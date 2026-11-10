@@ -62,7 +62,7 @@ def contact_sheet(
 ) -> Path:
     """One numbered grid of thumbnails, each labelled `<index> <stem>`, ≤ `max_w` wide."""
     if not items:
-        raise IngestError("contact sheet: no images")
+        raise IngestError("contact sheet: no images (ingest photos first: montaj ingest --photos DIR)")
     tiles = [image for _, image in items]
     labels = [f"{i + 1}  {stem}" for i, (stem, _) in enumerate(items)]
     return compose_grid(tiles, labels, out, max_w=max_w, cols=cols)
@@ -72,7 +72,7 @@ def sources(src_dir: Path | str) -> list[Path]:
     """Image files in `src_dir`, sorted by stem (case-insensitive extension match)."""
     src_dir = Path(src_dir)
     if not src_dir.is_dir():
-        raise IngestError(f"ingest: {src_dir} is not a directory")
+        raise IngestError(f"ingest: {src_dir} is not a directory (pass a photo folder)")
     files = [p for p in src_dir.iterdir() if p.is_file() and p.suffix.lower() in SUFFIXES and not p.name.startswith(".")]
     return sorted(files, key=lambda p: p.stem)
 
@@ -95,11 +95,11 @@ def ingest(
     assets_dir.mkdir(parents=True, exist_ok=True)
     files = sources(src_dir)
     if not files:
-        raise IngestError(f"ingest: no images in {src_dir} (want {', '.join(SUFFIXES)})")
+        raise IngestError(f"ingest: no images in {src_dir} (want {', '.join(SUFFIXES)}; check the folder path)")
     stems = [f.stem for f in files]
     if len(set(stems)) != len(stems):  # stems name the asset, so a collision is fatal, not a merge
         dupes = sorted({s for s in stems if stems.count(s) > 1})
-        raise IngestError(f"ingest: duplicate stems {dupes} (stem = file name without extension)")
+        raise IngestError(f"ingest: duplicate stems {dupes} (stem = file name without extension; rename one)")
 
     infos: list[AssetInfo] = []
     thumbs: list[tuple[str, Image.Image]] = []
@@ -171,14 +171,14 @@ def ingest_rec(
 
     video = Path(video)
     if not video.is_file():
-        raise IngestError(f"ingest-rec: {video} is not a file")
+        raise IngestError(f"ingest-rec: {video} is not a file (pass the recording path)")
     if video.suffix.lower() not in (".mp4", ".mov", ".webm", ".mkv"):
-        raise IngestError(f"ingest-rec: {video.name} is not mp4, mov, webm or mkv")
+        raise IngestError(f"ingest-rec: {video.name} is not mp4, mov, webm or mkv (convert it first)")
     try:
         info = probe(video, log=log)
         t0, n_audio = _probe_rec(video)
     except EncodeError as exc:
-        raise IngestError(f"ingest-rec: cannot probe {video.name}: {exc}") from exc
+        raise IngestError(f"ingest-rec: cannot probe {video.name}: {exc} (is the file a complete video?)") from exc
     rows: list[dict] = []
     if events is not None:
         errors: list[str] = []
