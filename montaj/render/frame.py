@@ -223,9 +223,11 @@ def _move_image(image: RasterImage, device) -> RasterImage:
 class Renderer:
     """`frame(f)` samples the plan's scene across the motion-blur shutter, then finishes it."""
 
-    def __init__(self, tl: Timeline, spec_dir: Path, cv: Canvas, *, cache_caps: dict[str, int] | None = None):
+    def __init__(self, tl: Timeline, spec_dir: Path, cv: Canvas, *, cache_caps: dict[str, int] | None = None,
+                 log=None):
         self.tl = tl
         self.cv = cv
+        self._log = log  # callable(str) for build/render.log lines, or None
         self._dir = Path(spec_dir)
         self._assets = self._dir / tl.spec.assets
         caps = _cache_caps(cache_caps)
@@ -516,7 +518,8 @@ class Renderer:
     def _clip_source(self, stem: str) -> ClipSource:
         hit = self._clips.get(stem)
         if hit is None:
-            hit = ClipSource(resolve_clip(self._dir, self._assets, stem), self.tl.fps)
+            hit = ClipSource(resolve_clip(self._dir, self._assets, stem), self.tl.fps,
+                             device=self.cv.device, log=self._log)
             self._clips[stem] = hit
         return hit
 

@@ -1,10 +1,14 @@
-"""Video clips. One forward ffmpeg reader per shot window.
+"""Video clips. One forward reader per shot window: NVDEC or ffmpeg.
 
 The decoded span is `[clip_in, clip_in + hold)` — pass `hold` in seconds or `nframes`.
 A shot with speed or freeze passes `src`, the source frame for each shot frame; the
 decoded span is then `[clip_in, clip_in + max(src) + 1 frames)`. A shot with a crop or
 camera passes `crop` (source px) and decodes that box at `w x h` instead of covering the frame.
-Frames stay uint8 on CPU. `frame` converts that one frame to float on the caller's device.
+Frames stay uint8 where they were decoded: on CPU from ffmpeg as RGB; on the GPU from NVDEC
+in the reader's compact form (NV12 or RGB, whichever is smaller), expanded to RGB on read.
+`frame` converts that one frame to float on the caller's device.
+`ClipSource.decoder` is the one decision of which reader runs (`nvdec.choose`); a failed
+NVDEC open demotes the source to ffmpeg and logs why.
 `clip_in` is `-ss` before `-i`, so decoded frame 0 is that far into the file.
 Timeline frame `t` is `floor(t − shot_start)`, clamped to the window.
 
@@ -26,6 +30,8 @@ from pathlib import Path
 
 import numpy as np
 import torch
+
+from montaj.render import nvdec
 
 FFMPEG = os.environ.get("MONTAJ_FFMPEG", "ffmpeg")
 # Resident decoded frames across every window this source has open.
@@ -55,6 +61,10 @@ def _read_one(stdout, w: int, h: int) -> torch.Tensor | None:
     return torch.from_numpy(np.ascontiguousarray(arr.transpose(2, 0, 1)))
 
 
+def _as_is(frame: torch.Tensor) -> torch.Tensor:
+    return frame
+
+
 class _ClipWindow:
     """Forward reader for one hold. At most `cap` uint8 frames stay in `_frames`."""
 
@@ -71,6 +81,10 @@ class _ClipWindow:
         self._proc: subprocess.Popen | None = None
         self._err: list[bytes] | None = None
         self._thread: threading.Thread | None = None
+        self._nv: nvdec.NvdecReader | None = None
+        # Compact frame -> (3, h, w) uint8 RGB. Outlives the reader, which closes once the
+        # hold is in hand.
+        self._expand = _as_is
         self._filled = 0
         self._produced: int | None = None
 
@@ -78,12 +92,14 @@ class _ClipWindow:
         return len(self._frames)
 
     def __iter__(self):
-        return iter(self._frames.values())
+        return (self._expand(frame) for frame in self._frames.values())
 
     def __getitem__(self, index: int) -> torch.Tensor:
-        return self._frames[index]
+        return self._expand(self._frames[index])
 
     def live(self) -> bool:
+        if self._nv is not None:
+            return self._nv.live()
         proc = self._proc
         return proc is not None and proc.poll() is None
 
@@ -124,12 +140,28 @@ class _ClipWindow:
         self._frames.clear()
         self._filled = 0
         self._produced = None
-        self._proc, self._err, self._thread = self._spawn()
+        source = self._source()
+        if source is None:
+            raise RuntimeError("clip source is gone")
+        if source.decoder.gpu:
+            try:
+                self._nv = nvdec.NvdecReader(
+                    source.path, source.decoder, self._clip_in, source.fps,
+                    self._w, self._h, self._count, self._crop, source.device,
+                )
+            except Exception as exc:
+                source._demote(f"NVDEC open failed ({type(exc).__name__}: {exc})")
+        self._expand = self._nv.expand if self._nv is not None else _as_is
+        if self._nv is None:
+            self._proc, self._err, self._thread = self._spawn()
         source = self._source()
         if source is not None:
             source._bound_live(self)
 
     def _close_proc(self, check: bool) -> None:
+        nv, self._nv = self._nv, None
+        if nv is not None:
+            nv.close()
         proc = self._proc
         thread = self._thread
         err = self._err
@@ -166,6 +198,12 @@ class _ClipWindow:
         source = self._source()
         return str(source.path) if source is not None else "clip"
 
+    def _read(self) -> torch.Tensor | None:
+        if self._nv is not None:
+            return self._nv.read()
+        assert self._proc is not None and self._proc.stdout is not None
+        return _read_one(self._proc.stdout, self._w, self._h)
+
     def at(self, index: int) -> torch.Tensor:
         """uint8 frame `index`, or the last frame ffmpeg actually returned."""
         if index < 0:
@@ -175,12 +213,11 @@ class _ClipWindow:
         hit = self._frames.get(index)
         if hit is not None:
             self._frames.move_to_end(index)
-            return hit
-        if self._proc is None or index < self._filled:
+            return self._expand(hit)
+        if (self._proc is None and self._nv is None) or index < self._filled:
             self._open()
-        assert self._proc is not None and self._proc.stdout is not None
         while self._filled <= index:
-            raw = _read_one(self._proc.stdout, self._w, self._h)
+            raw = self._read()
             if raw is None:
                 self._produced = self._filled
                 self._close_proc(check=True)
@@ -190,22 +227,38 @@ class _ClipWindow:
                 break
             self._keep(self._filled, raw)
             self._filled += 1
-        if self._filled >= self._count and self._proc is not None:
-            # The hold is in hand. Reap ffmpeg instead of leaving it a zombie.
+        if self._filled >= self._count and (self._proc is not None or self._nv is not None):
+            # The hold is in hand. Reap the reader instead of leaving it a zombie.
             self._produced = self._filled
             self._close_proc(check=True)
         got = self._frames.get(index)
         if got is None:
             raise RuntimeError(f"clip {self._name()} frame {index} was not retained")
-        return got
+        return self._expand(got)
 
 
 class ClipSource:
-    def __init__(self, path, fps: float):
+    """Every window of one clip file. `device` picks the decoder: a CUDA device asks
+    `nvdec.choose`; anything else decodes with ffmpeg. `log` gets one line per decision."""
+
+    def __init__(self, path, fps: float, *, device="cpu", log=None):
         self.path = Path(path)
         self.fps = float(fps)
+        self.device = torch.device(device)
+        self._log = log
+        self.decoder: nvdec.Choice = nvdec.choose(self.path, self.device)
+        self._say(f"clip {self.path.name} decode {self.decoder.name}: {self.decoder.reason}")
         self._cap = _CACHE_FRAMES
         self._cache: OrderedDict[tuple, _ClipWindow] = OrderedDict()
+
+    def _say(self, message: str) -> None:
+        if self._log is not None:
+            self._log(message)
+
+    def _demote(self, reason: str) -> None:
+        """NVDEC could not open this file after all: every later window uses ffmpeg."""
+        self.decoder = nvdec.Choice("ffmpeg", reason)
+        self._say(f"clip {self.path.name} decode ffmpeg: {reason}")
 
     def close(self) -> None:
         for entry in list(self._cache.values()):
@@ -240,7 +293,7 @@ class ClipSource:
 
     def frames(self, clip_in: float, w: int, h: int, nframes: int | None = None, *,
                hold: float | None = None, crop: tuple | None = None) -> tuple[torch.Tensor, ...]:
-        """uint8 CPU tensors (3, H, W) for the hold. The caller owns the tuple."""
+        """uint8 tensors (3, H, W) for the hold, on the decoder's device. The caller owns the tuple."""
         count = self._count(nframes, hold)
         key = self._key(clip_in, w, h, count, crop)
         window = self._window(key, float(clip_in), int(w), int(h), count, crop)

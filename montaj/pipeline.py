@@ -119,7 +119,7 @@ def _encode_segment(renderer: Renderer, seg: Segment, dest: Path, fps: float, lo
     """
     tmp = dest.with_name(f".{dest.stem}.{os.getpid()}-{secrets.token_hex(4)}.partial.mp4")
     try:
-        with Encoder(tmp, renderer.cv.W, renderer.cv.H, fps, log=log) as enc:
+        with Encoder(tmp, renderer.cv.W, renderer.cv.H, fps, log=log, device=renderer.cv.device) as enc:
             for f in range(seg.start, seg.end):
                 enc.write(renderer.frame(f))
         os.replace(tmp, dest)
@@ -170,7 +170,7 @@ def render(spec_path: Path, mode: str = "preview") -> RenderResult:
     with gpu_hold(log):
         with torch.no_grad():
             cv = Canvas(W, H, device="cuda")
-            renderer = Renderer(tl, spec_dir, cv)
+            renderer = Renderer(tl, spec_dir, cv, log=lambda message: _log(log, message))
             try:
                 for seg in tl.segments:
                     # A cache hit still has to let the previous segment's wall go.

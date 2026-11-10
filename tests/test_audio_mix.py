@@ -338,10 +338,10 @@ def test_render_muxes_the_mixed_wav_and_check_reports_it(tmp_path: Path, monkeyp
 
     class CV:
         def __init__(self, W, H, device="cuda"):
-            self.W, self.H = W, H
+            self.W, self.H, self.device = W, H, "cpu"
 
     class R:
-        def __init__(self, tl, spec_dir, cv):
+        def __init__(self, tl, spec_dir, cv, log=None):
             self.cv = cv
 
         def begin_segment(self, shots):
