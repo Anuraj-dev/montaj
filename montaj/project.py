@@ -285,6 +285,15 @@ def segment_hash(
         }
         if runs:
             payload["glyph_runs"] = runs
+        # Text motion (#22): the resolved frame values (defaults, exit clocks, seeds). Absent when unused.
+        motions = {
+            f"{i}.{j}": asdict(line.motion)
+            for i in sorted(text_ids)
+            for j, line in enumerate(tl.texts[i].lines)
+            if line.motion is not None
+        }
+        if motions:
+            payload["text_motions"] = motions
     if sub_ids:
         payload["subs"] = {
             str(i): tl.spec.subs[i].model_dump(mode="json", by_alias=True)

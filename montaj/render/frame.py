@@ -90,6 +90,8 @@ _STILL_CAP = 4
 _WALL_CAP = 2
 _CLIP_CAP = 2
 _CAPTION_CAP = 8
+# Sub-frame samples for a `text[].motion_blur` block: at least this many, more when video.motion_blur is higher.
+TEXT_BLUR_SAMPLES = 5
 
 
 @dataclass(frozen=True)
@@ -691,6 +693,7 @@ class Renderer:
             line_height=ln.line_height, by=ln.by, stagger=ln.stagger, dur=ln.dur, rise=ln.rise,
             reveal=ln.reveal, sweep=ln.sweep, shadow=bool(ln.shadow), indent=ln.indent,
             align=ln.align, box=ln.box, box_color=ln.box_color, dot=ln.dot, cursor=ln.cursor,
+            motion=getattr(ln, "motion", None),
         )
 
     def _backdrop(self, src) -> TextBackdrop | None:
@@ -736,6 +739,8 @@ class Renderer:
                 TextBlock(
                     block.from_, block.to, block.fade_in, block.fade_out, block.blur, lines,
                     self._backdrop(block.backdrop),
+                    # `motion_blur: true`: the film's sub-frame count, at least TEXT_BLUR_SAMPLES.
+                    samples=max(self.tl.spec.video.motion_blur, TEXT_BLUR_SAMPLES) if block.motion_blur else 1,
                 )
             )
         subs = tuple(Sub(s.from_, s.to, s.text, size=s.size, color=s.color) for s in self.tl.subs)

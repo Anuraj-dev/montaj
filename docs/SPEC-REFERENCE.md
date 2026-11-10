@@ -136,8 +136,9 @@ Photo fields (`crop`, `focus`, swirl `center`, wall `at`) are source-image pixel
 - `text[].from` — time expression, required — block visible window start.
 - `text[].to` — time expression, required — block visible window end.
 - `text[].fade_in` — duration, default `0s` — block fade in. `0` is instant.
-- `text[].fade_out` — duration, default `0.8s` — block fade out; the block blurs by `(1 − a)·blur`.
+- `text[].fade_out` — duration, default `0.8s` (`0s` when a line sets `out`) — block fade out; the block blurs by `(1 − a)·blur`.
 - `text[].blur` — number, default `10` — design-px blur while the block fades.
+- `text[].motion_blur` — boolean, default false — draws the block as the average of `max(video.motion_blur, 5)` sub-frame times (same shutter as `video.motion_blur`), so moving text smears.
 - `text[].backdrop` — mapping, `true`, `gradient` or `solid`, default none — dark scrim behind the block, painted by the compositor. `true` is the default gradient. Fades with the block.
 - `text[].backdrop.type` — `gradient` or `solid`, default `gradient` — `gradient` fades out; `solid` is flat over the same area.
 - `text[].backdrop.strength` — number, default `0.8` — opacity of the darkest part, from 0 to 1.
@@ -167,10 +168,12 @@ Photo fields (`crop`, `focus`, swirl `center`, wall `at`) are source-image pixel
 - `text[].lines[].box` — `none` or `chip`, default `none` — `chip` draws a rounded translucent pill behind the line, revealed with its first unit.
 - `text[].lines[].box_color` — `cream`, `gold`, `ink` or `#rrggbb`, default dark translucent — chip fill; needs `box: chip`.
 - `text[].lines[].dot` — `cream`, `gold`, `ink` or `#rrggbb`, default none — status dot before the text inside the chip; needs `box: chip`.
-- `text[].lines[].engine` — `chromium` or `gpu`, default `gpu` when the line sets any styling field below (`font`, `case`, `emphasis`, `stroke`, `glow`, `pos`, `rotate`, a `shadow` mapping) or marks `*words*`, else the style's engine (`montaj doctor` lists it; all `chromium` today) — `gpu` shapes with HarfBuzz and draws distance-field glyphs on the GPU, no browser; rejects `gold`, `box`, `cursor`, card lines and characters the fonts lack. `engine: chromium` with a styling field is an error.
+- `text[].lines[].engine` — `chromium` or `gpu`, default `gpu` when the line sets any styling field below (`font`, `case`, `emphasis`, `stroke`, `glow`, `pos`, `rotate`, a `shadow` mapping, `in`, `out`, `idle`) or marks `*words*`, else the style's engine (`montaj doctor` lists it; all `chromium` today) — `gpu` shapes with HarfBuzz and draws distance-field glyphs on the GPU, no browser; rejects `gold`, `box`, `cursor`, card lines and characters the fonts lack. `engine: chromium` with a styling field is an error.
 - `text[].lines[].font` — `montserrat-black`, `anton`, `bebas`, `poppins-extrabold`, `bangers`, `archivo-black` or `mukta-extrabold` (Latin + Devanagari), default the style's font — bundled display face (OFL); excludes `weight` and `italic`. An unknown name lists the fonts.
 - `text[].lines[].case` — `upper`, `lower` or `as-is`, default the style's (`caps` upper, others as-is).
-- `text[].lines[].emphasis` — `{color, scale}`, default `{color: "#ffe600", scale: 1}` when the text marks `*words*` — fill and size multiplier (0–3) of the marked words; needs marked words.
+- `text[].lines[].emphasis` — `{color, scale, in, shake}`, default `{color: "#ffe600", scale: 1}` when the text marks `*words*` — fill and size multiplier (0–3) of the marked words; needs marked words.
+- `text[].lines[].emphasis.in` — an `in.type` other than `type`, default the line's — entry of the units holding marked words, at that type's default `dur`, `overshoot` and `distance`.
+- `text[].lines[].emphasis.shake` — number 0–60, default none — design-px seeded shake of the marked units for `0.25s` after they reach full size, decaying to 0 (turns up to 0.4° per px).
 - `text[].lines[].stroke` — `{width, color}`, default none — outline `width` design px (≤ 37.5% of `size`; `validate` warns over 20%), `color` default `#000000`.
 - `text[].lines[].glow` — number 0–1, default none — halo in the fill colour, blur 0.25× `size`, at this opacity.
 - `text[].lines[].pos` — `[x, y]` design px, default none — centre of the line box; replaces `y` and `align`.
@@ -179,6 +182,21 @@ Photo fields (`crop`, `focus`, swirl `center`, wall `at`) are source-image pixel
 - `text[].lines[].wrap` — `balance`, default none — break at spaces into the fewest lines (at most `max_lines`) that fit `max_width`, of similar width, never leaving a short word alone on the last line. The lines stack at the line-box height; the reveal continues down the stack. With `fit`, the size shrinks only if `max_lines` is not enough. At most 24 words.
 - `text[].lines[].max_width` — number, default `936` (frame width minus 2 × 72 design px) — the width `fit` and `wrap` aim for; set without `fit` or `wrap`, a wider line is an `ERR`.
 - `text[].lines[].max_lines` — number 1 to 4, default `2` — most lines `wrap: balance` may use; needs `wrap`.
+- `text[].lines[].in` — type name or mapping, default none (the `reveal`) — per-unit entry (gpu engine); replaces `reveal` (`reveal: pop`/`type` with `in` is an error). `in: pop` = `in: {type: pop}`. Closed form, so every frame is a function of time.
+- `text[].lines[].in.type` — `pop` (0.8→overshoot→1, `0.2s`), `slam` (1.8→1 accelerating, then a 2-frame squash by the overshoot, `0.2s`), `slide` (`0.3s`), `drop` (falls `distance` and bounces, `0.5s`), `rise` (the `reveal: rise` motion, identical pixels), `type` (the typewriter, identical pixels), `flip` (vertical unfold, `0.3s`) or `scale-in` (0→1, `0.25s`), required.
+- `text[].lines[].in.by` — `word` or `char`, default the line's `by` — entry unit.
+- `text[].lines[].in.dur` — duration, default per type above — entry length of one unit; overrides `dur`. Rejected for `type`.
+- `text[].lines[].in.stagger` — duration, default the line's `stagger` — delay between units; overrides `stagger`.
+- `text[].lines[].in.overshoot` — number 1–2, default pop `1.08`, slam `1.06`, slide `1.04`, flip/scale-in `1` — peak past rest (scale, height or travel), reached at 60% of `dur`; `pop`, `slam`, `slide`, `flip`, `scale-in` only.
+- `text[].lines[].in.from` — `left`, `right`, `top` or `bottom`, default `left` — side a `slide` enters from.
+- `text[].lines[].in.distance` — design px 0–2000, default slide `160`, drop `220`, rise the line's `rise` — travel of `slide`, `drop`, `rise`.
+- `text[].lines[].out` — type name or mapping, default none — per-unit exit (gpu engine); the last unit's exit ends at the block's `to`.
+- `text[].lines[].out.type` — `cut` (instant), `fade` (`0.2s`), `pop-out` (swells to 1.08, shrinks to 0, `0.2s`) or `slide` (`0.25s`), required.
+- `text[].lines[].out.dur` — duration, default per type above — exit length of one unit. Rejected for `cut`.
+- `text[].lines[].out.stagger` — duration, default `0s` — delay between units leaving, continuous across `wrap` lines.
+- `text[].lines[].out.to` — `left`, `right`, `top` or `bottom`, default `right` — side a `slide` exit leaves toward.
+- `text[].lines[].out.distance` — design px 0–2000, default `160` — travel of a `slide` exit.
+- `text[].lines[].idle` — `float` or `pulse` (or `{type, amount}`), default none — loop every `1.5s` once a unit lands: `float` bobs `amount` design px (default `4`), `pulse` scales by `amount` percent (default `4`); 0–100.
 - `validate` — shapes every text line (card lines too) and reports `ERR text[1].lines[0]: 132px wider than the frame at size 100 (fits at size 88; or set fit: true)` when the line box leaves the 1080-wide frame. Lines with a character the bundled fonts lack are not measured.
 - `text[].lower_third` — `{title, subtitle?, at?, side?, y?}`, replaces `lines` — sugar for a bold sans title chip with a gold dot and a sans subtitle 110 design px below. `at` default the block `from`, `side` `left` or `right` default `left`, `y` default `1500` (design px, title top). `fade_in`/`fade_out` default `0.4s`. No bar or slide yet.
 - `subs` — list, default none — lyric subtitles, one fixed style.

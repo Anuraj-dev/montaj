@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass, field
+import zlib
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from montaj.render.core import EASE as EASE_FN, key as eval_key
+from montaj.render import motion as M
 from montaj.render.glyphs import FontBook, GlyphRun, layout_line, parse_emphasis, plan_text
+from montaj.render.motion import Motion
 from montaj.spec import (
     TextEmphasis,
     TextShadow,
@@ -165,6 +168,8 @@ class ResolvedLine:
     # `engine: gpu` lines only: the HarfBuzz layout, fixed here so the renderer never shapes and the
     # segment hash sees every glyph id, position and font identity (project.segment_hash).
     glyphs: GlyphRun | None = None
+    # Per-unit motion (#22), gpu lines with `in`/`out`/`idle`/emphasis motion; hashed by project.segment_hash.
+    motion: Motion | None = None
 
 
 @dataclass(frozen=True)
@@ -176,6 +181,7 @@ class ResolvedText:
     blur: float
     lines: tuple[ResolvedLine, ...]
     backdrop: TextBackdrop | None = None
+    motion_blur: bool = False
 
 
 @dataclass(frozen=True)
@@ -586,20 +592,25 @@ def _resolve_texts(spec: Spec, times: dict[str, float], fps: int) -> list[Resolv
         frm = times[f"text[{i}].from"]
         to = times[f"text[{i}].to"]
         fi = times.get(f"text[{i}].fade_in", 0.0)
-        fo = times.get(f"text[{i}].fade_out", 0.8 * fps)
+        # A line with an `out` exit leaves by itself, so the block does not also fade by default.
+        exits = any(line.out is not None for line in block.lines)
+        fo = times.get(f"text[{i}].fade_out", 0.0 if exits else 0.8 * fps)
         lines: list[ResolvedLine] = []
         for j, line in enumerate(block.lines):
-            typed = line.reveal == "type"  # typewriter: one char per stagger, each instant
-            stagger = times.get(
-                f"text[{i}].lines[{j}].stagger",
-                (0.05 if typed else 0.07 if line.by == "char" else 0.16) * fps,
-            )
-            dur = times.get(f"text[{i}].lines[{j}].dur", 0.0 if typed else 0.9 * fps)
+            path = f"text[{i}].lines[{j}]"
+            kind = line.in_.type if line.in_ is not None else None
+            typed = line.reveal == "type" or kind == "type"  # typewriter: one char per stagger, each instant
+            by = "char" if typed else (line.in_.by if line.in_ is not None and line.in_.by else line.by)
+            stagger = times.get(f"{path}.in.stagger", times.get(
+                f"{path}.stagger",
+                (0.05 if typed else 0.07 if by == "char" else 0.16) * fps,
+            ))
+            dflt = M.IN_DUR[kind] if kind is not None else 0.0 if typed else 0.9
+            dur = times.get(f"{path}.in.dur", times.get(f"{path}.dur", dflt * fps))
             if line.sweep:
-                sweep = (times[f"text[{i}].lines[{j}].sweep[0]"], times[f"text[{i}].lines[{j}].sweep[1]"])
+                sweep = (times[f"{path}.sweep[0]"], times[f"{path}.sweep[1]"])
             else:
                 sweep = (frm, to)
-            by = "char" if typed else line.by
             at = times[f"text[{i}].lines[{j}].at"]
             gpu = line_engine(line) == "gpu"
             escale = line.emphasis.scale if line.emphasis is not None else 1.0
@@ -629,7 +640,16 @@ def _resolve_texts(spec: Spec, times: dict[str, float], fps: int) -> list[Resolv
                     seen += len(plain.split(" ")) if by == "word" else len(plain) + 1
                 if gpu and abs(rotate) > 1e-9 and n > 1:
                     pieces = _turn_stack(book, line, pieces, rotate, escale, by)
-            for text, size, y, pos, piece_at in pieces:
+            motion = _line_motion(line, path, times, fps, to, dur, i, j) if gpu else None
+            if motion is not None and line.out is not None:
+                # Exits run last unit to the block's `to`: each piece's clock starts at its first unit.
+                offsets = [round((p[4] - at) / stagger) if stagger > 0 else 0 for p in pieces]
+                total = offsets[-1] + _unit_count(pieces[-1][0], by)
+            for k_piece, (text, size, y, pos, piece_at) in enumerate(pieces):
+                piece_motion = motion
+                if motion is not None and line.out is not None:
+                    tail = total - 1 - offsets[k_piece]
+                    piece_motion = replace(motion, out_at=to - motion.out_dur - tail * motion.out_stagger)
                 run = None
                 if gpu:
                     book = book or FontBook()
@@ -656,7 +676,7 @@ def _resolve_texts(spec: Spec, times: dict[str, float], fps: int) -> list[Resolv
                         by=by,
                         stagger=stagger,
                         dur=dur,
-                        rise=0.0 if typed else line.rise,
+                        rise=0.0 if typed else (motion.distance if motion is not None and kind == "rise" else line.rise),
                         reveal=line.reveal,
                         sweep=sweep,
                         shadow=line.shadow,
@@ -671,6 +691,7 @@ def _resolve_texts(spec: Spec, times: dict[str, float], fps: int) -> list[Resolv
                         glow=line.glow,
                         # Marked words without an `emphasis:` mapping take its defaults.
                         emphasis=line.emphasis if line.emphasis is not None or run is None or not run.spans else TextEmphasis(),
+                        motion=piece_motion,
                     )
                 )
         out.append(
@@ -682,9 +703,59 @@ def _resolve_texts(spec: Spec, times: dict[str, float], fps: int) -> list[Resolv
                 blur=block.blur,
                 lines=tuple(lines),
                 backdrop=block.backdrop,
+                motion_blur=block.motion_blur,
             )
         )
     return out
+
+
+def _unit_count(text: str, by: str) -> int:
+    plain = parse_emphasis(text)[0]
+    return len(plain.split(" ")) if by == "word" else len(plain)
+
+
+def _line_motion(line, path: str, times: dict[str, float], fps: int, to: float, dur: float,
+                 i: int, j: int) -> Motion | None:
+    """The line's motion as plain frame values, or None for a line that only reveals (legacy path).
+
+    Without `in`, the motion starts from the line's `reveal` (rise or type), so `out`, `idle` and
+    emphasis motion work on a plain line. `seed` is fixed by the line's place in the spec.
+    """
+    emph = line.emphasis
+    emph_moves = emph is not None and (emph.in_ is not None or emph.shake is not None)
+    if line.in_ is None and line.out is None and line.idle is None and not emph_moves:
+        return None
+    m = line.in_
+    kind = m.type if m is not None else line.reveal
+    if kind == "rise":
+        distance = float(m.distance) if m is not None and m.distance is not None else float(line.rise)
+    else:
+        distance = float(m.distance) if m is not None and m.distance is not None else M.IN_DISTANCE.get(kind, 0.0)
+    ov = float(m.overshoot) if m is not None and m.overshoot is not None else M.IN_OVERSHOOT.get(kind, 1.0)
+    fields: dict = dict(kind=kind, dur=float(dur), overshoot=ov, distance=distance,
+                        from_=(m.from_ or "left") if kind == "slide" and m is not None else None,
+                        seed=zlib.crc32(f"text[{i}].lines[{j}]".encode()))
+    if emph is not None and emph.in_ is not None:
+        ek = emph.in_
+        fields.update(emph_kind=ek, emph_dur=M.IN_DUR[ek] * fps, emph_overshoot=M.IN_OVERSHOOT.get(ek, 1.0),
+                      emph_distance=float(line.rise) if ek == "rise" else M.IN_DISTANCE.get(ek, 0.0))
+    if emph is not None and emph.shake:
+        fields.update(shake=float(emph.shake), shake_dur=float(round(M.SHAKE_DUR * fps)))
+    if line.out is not None:
+        o = line.out
+        fields.update(
+            out_kind=o.type,
+            out_dur=times.get(f"{path}.out.dur", M.OUT_DUR[o.type] * fps),
+            out_stagger=times.get(f"{path}.out.stagger", 0.0),
+            out_to=(o.to or "right") if o.type == "slide" else None,
+            out_distance=float(o.distance) if o.distance is not None else (M.OUT_DISTANCE if o.type == "slide" else 0.0),
+        )
+    if line.idle is not None:
+        a = line.idle.amount
+        fields.update(idle_kind=line.idle.type,
+                      idle_amount=float(a) if a is not None else M.IDLE_AMOUNT[line.idle.type],
+                      idle_period=M.IDLE_PERIOD * fps)
+    return Motion(**fields)
 
 
 def _pair(v) -> tuple[float, float] | None:

@@ -34,6 +34,7 @@ from PIL import Image
 
 from montaj.doctor import chromium as find_chromium
 from montaj.render.core import outc, sine
+from montaj.render.motion import Motion, Pose, unit_poses
 from montaj.render.type import GlyphLine, GlyphXform, draw_run_crop
 
 # Stage sits at (OX, OY) so shadow padding stays inside the viewport and the
@@ -127,6 +128,7 @@ class TextLine:
     box_color: str | None = None
     dot: str | None = None
     cursor: bool = False
+    motion: Motion | None = None  # gpu lines only: per-unit motion (render/motion.py)
 
     def __post_init__(self) -> None:
         if self.by not in ("word", "char"):
@@ -163,6 +165,7 @@ class TextBlock:
     blur: float
     lines: tuple[TextLine, ...]
     backdrop: TextBackdrop | None = None
+    samples: int = 1  # > 1: the block is averaged over that many sub-frame times (text motion blur)
 
     def __post_init__(self) -> None:
         if not isinstance(self.lines, tuple):
@@ -1218,6 +1221,57 @@ def _paint_glyphs(dst: torch.Tensor, cv, block: TextBlock, line: TextLine, raste
     _stamp(dst, crop.to(dtype=dst.dtype), x0, y0)
 
 
+def _emph_units(run) -> frozenset[int]:
+    return frozenset(g.unit for g in run.glyphs if g.emph)
+
+
+def _motion_poses(line: TextLine, run, t: float, fps: float) -> list[Pose]:
+    return unit_poses(line.motion, run.units, _emph_units(run), t, line.at, _timing(line, fps)[0])
+
+
+def _unit_pivots(run) -> dict[int, tuple[float, float]]:
+    """Design-px centre of each unit's inked glyphs; the unit's pose acts about it."""
+    boxes: dict[int, list[float]] = {}
+    for g in run.glyphs:
+        if g.ink[2] <= g.ink[0]:
+            continue
+        b = boxes.setdefault(g.unit, [g.ink[0], g.ink[1], g.ink[2], g.ink[3]])
+        b[0], b[1], b[2], b[3] = min(b[0], g.ink[0]), min(b[1], g.ink[1]), max(b[2], g.ink[2]), max(b[3], g.ink[3])
+    return {u: ((b[0] + b[2]) / 2, (b[1] + b[3]) / 2) for u, b in boxes.items()}
+
+
+def motion_xforms(line: TextLine, run, t: float, fps: float) -> list[GlyphXform | None]:
+    """One GlyphXform per glyph from the units' poses at `t`. A unit turns and scales about its own
+    centre: each glyph gets the unit's scale/turn about its ink centre plus the offset that puts that
+    centre where the unit's transform sends it. A pure move (rise, slide, drop) keeps one shared xform
+    per unit, so the unit still blurs as one layer — identical to the legacy reveal."""
+    poses = _motion_poses(line, run, t, fps)
+    pivots = _unit_pivots(run)
+    out: list[GlyphXform | None] = []
+    for g in run.glyphs:
+        p = poses[g.unit] if g.unit < len(poses) else Pose()
+        if p == Pose():
+            out.append(None)
+            continue
+        dx, dy = p.dx, p.dy
+        if (p.scale != 1.0 or p.sy != 1.0 or p.rotate != 0.0) and g.unit in pivots and g.ink[2] > g.ink[0]:
+            px, py = pivots[g.unit]
+            cx, cy = (g.ink[0] + g.ink[2]) / 2, (g.ink[1] + g.ink[3]) / 2
+            a = math.radians(p.rotate)
+            c, sn = math.cos(a), math.sin(a)
+            ux, uy = (cx - px) * p.scale, (cy - py) * p.scale * p.sy
+            dx += px + ux * c - uy * sn - cx
+            dy += py + ux * sn + uy * c - cy
+        out.append(GlyphXform(dx=dx, dy=dy, scale=p.scale, rotate=p.rotate, opacity=p.opacity, blur=p.blur, sy=p.sy))
+    return out
+
+
+def _paint_motion(dst: torch.Tensor, cv, line: TextLine, raster: GlyphLine, t: float, fps: float) -> None:
+    crop, x0, y0 = draw_run_crop(cv, raster.run, raster.style, motion_xforms(line, raster.run, t, fps),
+                                 atlas=raster.atlas)
+    _stamp(dst, crop.to(dtype=dst.dtype), x0, y0)
+
+
 def _pop(line: TextLine, block: TextBlock, t: float) -> float:
     # film.html:289-291, per line. Spec span is the block window, not one counter step.
     span = block.end - block.start
@@ -1253,7 +1307,9 @@ def line_extent(block: TextBlock, line: TextLine, raster: RasterLine | GlyphLine
         return None
     glyph = isinstance(raster, GlyphLine)
     n = raster.run.units if glyph else len(raster.units)
-    if line.reveal == "pop":
+    if glyph and line.motion is not None:  # a unit shows while its pose is visible (entered, not yet gone)
+        ks = [1.0 if p.opacity > 1e-4 else 0.0 for p in _motion_poses(line, raster.run, t, fps)]
+    elif line.reveal == "pop":
         ks = [1.0 if _pop(line, block, t) > 1e-4 else 0.0] * n
     else:
         ks = _unit_ks(line, n, t, fps)
@@ -1285,6 +1341,9 @@ def line_extent(block: TextBlock, line: TextLine, raster: RasterLine | GlyphLine
 def _paint_line(dst: torch.Tensor, cv, block: TextBlock, line: TextLine, raster: RasterLine | GlyphLine,
                 t: float, fps: float) -> None:
     glyph = isinstance(raster, GlyphLine)
+    if glyph and line.motion is not None:
+        _paint_motion(dst, cv, line, raster, t, fps)
+        return
     paint = _paint_glyphs if glyph else _paint
     n = raster.run.units if glyph else len(raster.units)
     if line.reveal == "pop":
@@ -1438,6 +1497,24 @@ def _paint_backdrop(dst: torch.Tensor, cv, block: TextBlock) -> None:
     _darken(dst, alpha)
 
 
+def _draw_block(out: torch.Tensor, cv, block: TextBlock, group, t: float, fps: float) -> None:
+    a = _vis(t, block, fps)
+    if a <= 0.0:
+        return
+    if a >= 1.0 - 1e-6:
+        _paint_backdrop(out, cv, block)
+        for line, raster in group:
+            _paint_line(out, cv, block, line, raster, t, fps)
+        return
+    # Child filters first, then the block blur, then opacity (film.html:416-417).
+    layer = torch.zeros(4, out.shape[-2], out.shape[-1], device=out.device, dtype=out.dtype)
+    _paint_backdrop(layer, cv, block)
+    for line, raster in group:
+        _paint_line(layer, cv, block, line, raster, t, fps)
+    layer = _blur(layer, (1.0 - a) * block.blur * cv.k)
+    _stamp(out, layer * a, 0, 0)
+
+
 def _rasters_of(rasters) -> tuple[tuple[RasterLine, ...], tuple[RasterImage, ...]]:
     if isinstance(rasters, RasterSet):
         return tuple(rasters.lines), tuple(rasters.subs)
@@ -1466,21 +1543,19 @@ def draw_text(cv, img: torch.Tensor, blocks, subs, t: float, rasters, *, fps: fl
         for block in blocks:
             group = [(line, lines[cursor + i]) for i, line in enumerate(block.lines)]
             cursor += len(group)
-            a = _vis(t, block, fps)
-            if a <= 0.0:
+            n = block.samples
+            if n <= 1:
+                _draw_block(out, cv, block, group, t, fps)
                 continue
-            if a >= 1.0 - 1e-6:
-                _paint_backdrop(out, cv, block)
-                for line, raster in group:
-                    _paint_line(out, cv, block, line, raster, t, fps)
-                continue
-            # Child filters first, then the block blur, then opacity (film.html:416-417).
-            layer = torch.zeros(4, out.shape[-2], out.shape[-1], device=out.device, dtype=out.dtype)
-            _paint_backdrop(layer, cv, block)
-            for line, raster in group:
-                _paint_line(layer, cv, block, line, raster, t, fps)
-            layer = _blur(layer, (1.0 - a) * block.blur * cv.k)
-            _stamp(out, layer * a, 0, 0)
+            # Text motion blur: the block alone, averaged over the frame's sub-frame times (same shutter
+            # as Renderer.frame). Compositing is linear in the layer, so averaging layers equals
+            # averaging the composited frames.
+            acc = torch.zeros(4, out.shape[-2], out.shape[-1], device=out.device, dtype=out.dtype)
+            for k in range(n):
+                layer = torch.zeros_like(acc)
+                _draw_block(layer, cv, block, group, t + (k / (n - 1) - 0.5) * 0.5, fps)
+                acc += layer
+            _stamp(out, acc / n, 0, 0)
         # film.html:431-432. First window that contains t wins, even at opacity 0.
         lead, tail, fade = 0.2 * fps, 0.3 * fps, 0.5 * fps
         for sub, ras in zip(subs, sub_rasters):
