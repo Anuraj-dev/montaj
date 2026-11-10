@@ -198,4 +198,7 @@ def ingest_rec(
     if events is not None:
         events_path = assets_dir / f"{video.stem}.events.json"
         events_path.write_text(dump_events(rows))
+    elif not (assets_dir / f"{video.stem}.events.json").exists():
+        # Always mark a recording (#63): `check` skips luma jumps in clips with an events file.
+        (assets_dir / f"{video.stem}.events.json").write_text(dump_events([]))
     return RecInfo(video.stem, dest, events_path, info.duration, info.fps, n_audio, len(rows), t0)

@@ -22,6 +22,8 @@ from montaj.analysis import load_analysis
 from montaj.gpu_policy import GpuPolicy, GpuStrictError, load_policy, resolve_device
 from montaj.grade import Grade
 from montaj.pipeline import _apply_mode
+from montaj.project import clip_is_file
+from montaj.qa import _span_label
 from montaj.render.canvas import Canvas
 from montaj.render.color import grade as apply_grade
 from montaj.render.color import to_display, to_linear
@@ -500,8 +502,8 @@ def match(root: Path, to: int, *, policy: GpuPolicy | None = None) -> tuple[list
         solved: dict[int, Grade] = {}
         rows: list[MatchRow] = []
         for i in range(n):
-            if i == to or not measurable(r.tl, i):
-                continue
+            if i == to or spec.shots[i].match is False or not measurable(r.tl, i):
+                continue  # `match: false`: this shot's look is designed (#63)
             pics, _ = _pictures(r, i)
             if not pics:
                 continue
@@ -543,7 +545,7 @@ def _window(tl: Timeline, i: int) -> tuple[float, float]:
     if isinstance(sh.range, tuple):
         return _clip_start_s(tl.spec, sh.range[0]), _clip_start_s(tl.spec, sh.range[1])
     a = _clip_start_s(tl.spec, sh.clip_in)
-    speed = float(sh.speed) if isinstance(sh.speed, int | float) else 1.0  # keyed speed: approximate
+    speed = float(sh.speed) if isinstance(sh.speed, int | float) else 1.0  # keyed speed never reaches here
     return a, a + (rs.end - rs.start) / tl.fps * speed
 
 
@@ -556,9 +558,12 @@ def _same_scene(tl: Timeline, i: int, j: int, rows: dict[str, dict], recs: froze
         return bool(a.photo) and str(a.photo) == str(b.photo) and not a.clip and not b.clip
     if not a.clip or str(a.clip) != str(b.clip):
         return False
-    stem = Path(str(a.clip)).stem
+    # A clip id is an assets stem (dots allowed); only a file path has a suffix to drop.
+    stem = Path(str(a.clip)).stem if clip_is_file(str(a.clip)) else str(a.clip)
     if stem in recs:
         return False
+    if not isinstance(a.speed, int | float | None) or not isinstance(b.speed, int | float | None):
+        return False  # keyed speed: the source window is unknown, so no scene claim
     (a0, a1), (b0, b1) = _window(tl, i), _window(tl, j)
     if max(b0 - a1, a0 - b1) > SCENE_GAP_S:
         return False
@@ -602,10 +607,11 @@ def warnings(stats: list[ShotScope], tl: Timeline, rows: dict[str, dict] | None 
         head = f"scopes shots {i}→{i + 1} ({_t(at)})"
         off = next((k for k in (i, i + 1) if getattr(tl.shots[k].spec, "match", None) is False), None)
         hit = next((k for k, e in enumerate(expects) if e.start <= at <= e.end), None)
+        if hit is not None:
+            used[hit] = True
         if off is not None:
             out.append(f"INFO {head} luma jump ignored as intended: match: false on shot {off}")
         elif hit is not None:
-            used[hit] = True
             why = expects[hit].why
             out.append(f"INFO {head} luma jump ignored as intended" + (f": {why}" if why else ""))
         else:
@@ -613,7 +619,7 @@ def warnings(stats: list[ShotScope], tl: Timeline, rows: dict[str, dict] | None 
                        f"(montaj match --to {i}; designed? check.expect luma or match: false)")
     for k, e in enumerate(expects):
         if not used[k]:
-            out.append(f"INFO expect luma {round(e.start, 2):g}-{round(e.end, 2):g}s not found")
+            out.append(f"INFO expect luma {_span_label((e.start, e.end))} not found")
     return out
 
 
