@@ -164,7 +164,7 @@ def render(spec_path: Path, mode: str = "preview", policy: GpuPolicy | None = No
         # CPU only, so it runs outside the GPU lock. Specs without them keep `audio.track` as is.
         plan = plan_audio(
             tl.spec, spec_dir, tl.markers, spec.video.fps, tl.spec.video.bpm,
-            _parse_beat0(tl.spec.video.beat0, spec.video.fps, []) or 0.0, [],
+            _parse_beat0(tl.spec.video.beat0, spec.video.fps, []) or 0.0, [], shots=tl.shots,
         )
         if plan is not None and plan.active:
             track, stats = render_mix(plan, spec_dir / "build", log=log)

@@ -199,6 +199,9 @@ def _shot_payload(shot) -> dict:
     raw = shot.model_dump(mode="json", by_alias=True)
     if raw.get("range") is None:
         raw.pop("range", None)
+    # Linked audio (#40) changes the mix, not the pixels: retiming a J/L cut re-renders nothing.
+    for name in ("audio", "gain", "audio_lead", "audio_tail"):
+        raw.pop(name, None)
     return raw
 
 
