@@ -239,6 +239,10 @@ Photo fields (`crop`, `focus`, swirl `center`, wall `at`) are source-image pixel
 - `check.loudness` — mapping, default none — replaces the `-14` LUFS target used by `check`.
 - `check.loudness.i` — number, required with loudness — integrated-loudness target, in LUFS.
 - `check.loudness.tol` — number, default `1` — how far the measurement may sit from `i`, in LU.
+- `check.pacing` — mapping, default none — pacing targets. `check` always prints `INFO pacing|hook|beats|captions|audio|variety` numbers (also under `--json` as `pacing`); a `WARN` appears only for a target set here and missed. Like all of `check`, it stays out of the segment hash.
+- `check.pacing.max_shot` — duration, default none — longest allowed shot. Misses print `WARN pacing longest=<t>@shot<i>`.
+- `check.pacing.min_per10s` — number ≥ 0, default none — fewest shot changes per 10 s (`cuts` is shots − 1). Misses print `WARN pacing per10s=<n>`.
+- `check.pacing.hook_text_by` — duration, default none — latest time the first on-screen text (text lines or subs) may appear. A film with no text also warns.
 
 Transitions (`shots[].in`):
 
