@@ -18,7 +18,7 @@ import numpy as np
 
 from montaj.spec import Audio, Shot, Spec, _assets_dir, _line
 
-CUTS_VERSION = 1
+CUTS_VERSION = 2
 SILENCE_S = 0.35  # a gap between words longer than this is cut
 FILLERS_EN = frozenset("um umm ummm uh uhh uhm er erm err ah ahh hmm hm mm mmm".split())
 FILLERS_HI = frozenset("अम्म अं आं उम हम्म हम्".split())
@@ -28,6 +28,9 @@ PUNCH_ZOOM = 1.12
 _SNAP_BACK_S = 0.10  # an edge may move this far out, onto a quieter frame
 _SNAP_IN_S = 0.03  # ... or this far in
 _ENERGY_HOP = 480  # 10 ms at 48 kHz
+_PAUSE_REL_DB = 20.0  # a pause sits this far under the clip's speech level (p95) ...
+_PAUSE_FLOOR_DB = -45.0  # ... but never needs to be quieter than this
+_PAUSE_HYST_DB = 3.0  # a pause starts below the threshold and ends above threshold + this
 _TIGHT_S = 0.02  # a retake needs this much speech to compare
 
 
@@ -62,24 +65,62 @@ def _quietest(db: np.ndarray, lo: float, hi: float, prefer: float) -> float:
     return (k + 0.5) / 100
 
 
+def find_pauses(db: np.ndarray, silence: float) -> list[tuple[float, float]]:
+    """`(start, end)` seconds of each run of at least `silence` below the clip-relative threshold.
+
+    Whisper stretches words end to start, so a real pause hides inside a word; the audio shows it.
+    Threshold: speech p95 minus 20 dB, floored at -45 dB; 3 dB hysteresis keeps a breathy tail in the pause.
+    """
+    if len(db) == 0:
+        return []
+    thr = max(float(np.percentile(db, 95)) - _PAUSE_REL_DB, _PAUSE_FLOOR_DB)
+    out: list[tuple[float, float]] = []
+    start: int | None = None
+    for j, v in enumerate(db):
+        if start is None:
+            if v < thr:
+                start = j
+        elif v > thr + _PAUSE_HYST_DB:
+            if (j - start) / 100 >= silence:
+                out.append((start / 100, j / 100))
+            start = None
+    if start is not None and (len(db) - start) / 100 >= silence:
+        out.append((start / 100, len(db) / 100))
+    return out
+
+
 def plan_spans(words: list[dict], lang: str = "hi", silence: float = SILENCE_S, db: np.ndarray | None = None,
                duration: float | None = None) -> tuple[list[dict], int]:
     """`(spans, fillers removed)`. A span is `{i, s, e, text}` (+ `retake: true`), seconds in the source."""
     groups: list[list[dict]] = []
     fillers = 0
     prev_end: float | None = None
+    prev_mid = 0.0
+    pauses = find_pauses(db, silence) if db is not None else []
     cut_here = True  # the next kept word opens a span
     for w in words:
         if is_filler(w["w"], lang):
             fillers += 1
             cut_here = True
             continue
-        if cut_here or prev_end is None or w["s"] - prev_end > silence:
+        mid = (w["s"] + w["e"]) / 2  # a word straddling a pause belongs to the span holding its midpoint
+        for ps, pe in pauses:
+            if ps <= mid < pe:  # midpoint inside the pause: the word ends the span before it
+                mid = ps
+        paused = any(ps < mid and pe > prev_mid for ps, pe in pauses)
+        if cut_here or prev_end is None or w["s"] - prev_end > silence or paused:
             groups.append([])
         groups[-1].append(w)
         prev_end = w["e"]
+        prev_mid = mid
         cut_here = False
     spans = [{"s": g[0]["s"], "e": g[-1]["e"], "text": " ".join(x["w"] for x in g)} for g in groups]
+    for sp in spans:  # an edge inside a pause moves to the pause edge
+        for ps, pe in pauses:
+            if ps <= sp["s"] < pe:
+                sp["s"] = pe
+            if ps < sp["e"] <= pe:
+                sp["e"] = ps
     if db is not None and len(db):
         _snap(spans, db)
     if duration is not None:

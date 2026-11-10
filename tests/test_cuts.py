@@ -192,3 +192,33 @@ def test_cut_command_writes_the_plan_and_prints_the_table(tmp_path: Path, capsys
     rows = capsys.readouterr().out.splitlines()
     assert rows[0].split() == ["span", "start", "end", "text"] and len(rows) == 7 and rows[4].endswith("retake?")
     assert rows[-1] == "OK 5 spans"
+
+
+def _bursts(starts: list[float], dur: float, total: float) -> np.ndarray:
+    n = int(total * SR)
+    a = np.zeros((n, 2))
+    for s in starts:
+        t = np.arange(int(dur * SR)) / SR
+        a[int(s * SR): int(s * SR) + len(t)] = (0.3 * np.sin(2 * np.pi * 220 * t))[:, None]
+    return a
+
+
+def test_pauses_inside_contiguous_words_split_the_spans() -> None:
+    audio = _bursts([0.5, 2.1, 3.7], 1.0, 5.0)  # 0.6 s silences between bursts
+    words = [w("a", 0.5, 1.0), w("b", 1.0, 1.9), w("c", 1.9, 2.6), w("d", 2.6, 3.65), w("e", 3.65, 4.7)]
+    spans, _ = cuts.plan_spans(words, "en", db=cuts.energy_db(audio), duration=5.0)
+    assert len(spans) == 3
+    for sp, (lo, hi) in zip(spans, [(0.5, 1.5), (2.1, 3.1), (3.7, 4.7)]):
+        assert lo - 0.11 <= sp["s"] <= lo + 0.04 and hi - 0.04 <= sp["e"] <= hi + 0.11
+    assert spans[0]["e"] < 1.6 and spans[1]["s"] > 1.9 and spans[1]["e"] < 3.7 and spans[2]["s"] > 3.1
+
+
+def test_real_word_gaps_plan_the_same_with_energy() -> None:
+    audio = np.zeros((int(8.5 * SR), 2))
+    for s, e in [(0.5, 1.2), (1.65, 2.3), (3.5, 4.4), (5.0, 6.4), (7.0, 7.95)]:
+        audio[int(s * SR): int(e * SR)] = 0.3 * np.sin(2 * np.pi * 220 * np.arange(int((e - s) * SR)) / SR)[:, None]
+    db = cuts.energy_db(audio)
+    with_db, _ = cuts.plan_spans(WORDS, "en", db=db, duration=8.5)
+    plain, _ = cuts.plan_spans(WORDS, "en")
+    assert [sp["text"] for sp in with_db] == [sp["text"] for sp in plain]
+    assert all(abs(a["s"] - b["s"]) <= 0.11 and abs(a["e"] - b["e"]) <= 0.11 for a, b in zip(with_db, plain))
