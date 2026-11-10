@@ -1,0 +1,52 @@
+# Talking-head short, ~36 s: transcript cuts, punch captions, word-anchored zooms and SFX, b-roll insets, hook title in the first second.
+# Integration recipe for `cuts: auto`, `captions`, `emphasis`, `audio.sfx: auto`, `layers` and `check.pacing`.
+#   0-1.6 s   hook title over the first line
+#   spans 1-7    jump cuts on the presenter (every second one punched in), zoom on "zoom", boom + shake on "boom"
+#   span 8       b-roll inset card pops in over the presenter
+#   spans 9-10   "Three quick tips", zoom transition in
+#   span 11      b-roll full frame, presenter inset, whip in
+#   spans 12-14  presenter, flash on "free"
+# Demo assets (no private footage): montaj new <project> --recipe talking-short. Real footage: recipes/talking-short.md.
+# Word times: talk.words.json is the voice's words in film time, written by `recipes/talking-short.py words .`
+video: {size: 1080x1920, fps: 30, look: clean, background: "#0d1117"}
+assets: assets
+shots:
+  # Spans 1-7 of assets/voice.cuts.json (`montaj cut voice --print`); the rest play in later shots.
+  - {clip: voice, cuts: auto, cuts_punch: alternate, drop: [8, 9, 10, 11, 12, 13, 14]}
+  # Span 8 as a b-roll inset. hold / clip_in are span 8's `frames` / `src_in` from `talking-short.py words`.
+  - hold: 114f
+    layers:
+      - {clip: voice, clip_in: 744f}
+      - {clip: broll1, box: [90, 330, 990, 836], radius: 28, shadow: 0.6, from: 6f, to: 108f, in: {type: pop, dur: 8f}, out: {type: fade, dur: 6f}}
+  - {clip: voice, cuts: auto, drop: [1, 2, 3, 4, 5, 6, 7, 8, 11, 12, 13, 14], in: {type: zoom, dur: 6f}}
+  # Span 11: b-roll full frame, the presenter in a corner card.
+  - hold: 77f
+    in: {type: whip, dur: 8f}
+    layers:
+      - {clip: broll2}
+      - {clip: voice, clip_in: 1035f, box: [620, 180, 1000, 856], radius: 24, shadow: 0.7, in: {type: pop, dur: 8f}}
+  - {clip: voice, cuts: auto, cuts_punch: alternate, drop: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11], in: {type: whip, dur: 8f}}
+captions: {source: talk.words.json, preset: punch}
+emphasis:
+  - {match: stop, sfx: hit}
+  - {match: zoom, zoom: 1.3, sfx: whoosh}
+  - {match: boom, sfx: boom, shake: 30}
+  - {match: pops, sfx: pop}
+  - {match: three, caption: accent}
+  - {match: free, flash: 0.5, sfx: shutter}
+text:
+  # Hook: on screen from frame 0, above the captions and inside the top safe zone.
+  - from: 0s
+    to: 1.6s
+    fade_out: 0.2s
+    lines:
+      - {text: "ONE TEXT FILE", font: anton, size: 120, y: 290, at: 0s, in: {type: slam}, stroke: {width: 8}}
+      - {text: "*ZERO* MANUAL EDITS", font: anton, size: 84, y: 430, at: 0.25s, in: {type: pop}, stroke: {width: 6}, emphasis: {color: "#ffe600"}}
+audio:
+  # The voice under the b-roll shots (layers carry no linked sound): in/out = src_in .. src_in + frames, at = film_at.
+  clips:
+    - {src: voice, in: 744f, out: 858f, at: 587f, id: voice}
+    - {src: voice, in: 1035f, out: 1112f, at: 815f, id: voice}
+  sfx: auto
+check:
+  pacing: {max_shot: 4.5s, min_per10s: 3, hook_text_by: 1s}

@@ -853,3 +853,23 @@ def test_new_without_photos_runs_recipe_demo(
 
     code, out, _ = _run(["new", "c", "--recipe", "bad"], capsys)
     assert code == 1 and "exited 3" in out and "new-demo.log" in out
+
+
+def test_new_list_reads_each_recipe(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    recipes = tmp_path / "recipes"
+    recipes.mkdir()
+    (recipes / "short.yaml").write_text("# A talking short, ~36 s: cuts and captions.\nvideo: {size: 1080x1920}\n")
+    (recipes / "wide.yaml").write_text("# Wide film. More words\nvideo: {size: 1920x1080}\n")
+    monkeypatch.setattr("montaj.cli.RECIPES", recipes)
+
+    code, out, err = _run(["new", "--list"], capsys)
+    assert code == 0 and err == ""
+    lines = out.rstrip().splitlines()
+    assert lines[0].split()[:3] == ["short", "9:16", "~36"] and lines[0].endswith("A talking short, ~36 s: cuts and captions")
+    assert lines[1].split()[:3] == ["wide", "16:9", "-"] and lines[1].endswith("Wide film")
+    assert lines[-1] == "OK 2 recipes"
+
+    code, out, _ = _run(["new"], capsys)
+    assert code == 1 and out.startswith("ERR new:")

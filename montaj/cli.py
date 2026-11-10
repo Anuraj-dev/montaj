@@ -71,9 +71,10 @@ def _parser() -> argparse.ArgumentParser:
     sub.add_parser("doctor")
 
     new = sub.add_parser("new")
-    new.add_argument("dir")
-    new.add_argument("--recipe", required=True)
+    new.add_argument("dir", nargs="?")
+    new.add_argument("--recipe", default=None)
     new.add_argument("--photos", default=None)
+    new.add_argument("--list", action="store_true", help="one line per recipe: name, aspect, length, purpose")
 
     ing = sub.add_parser("ingest")
     ing.add_argument("--photos", default=None)
@@ -315,7 +316,29 @@ def _cmd_doctor() -> list[str]:
     return lines
 
 
+def _recipe_list() -> list[str]:
+    """`name  aspect  length  purpose`, read from each recipe itself: `video.size` and its first comment line."""
+    import re
+
+    rows = []
+    for src in sorted(RECIPES.glob("*.yaml")):
+        text = src.read_text(encoding="utf-8")
+        first = next((ln[1:].strip() for ln in text.splitlines() if ln.startswith("#")), "")
+        purpose = re.split(r"\.(?:\s|$)", first, maxsplit=1)[0]  # its first sentence
+        size = str(((yaml.safe_load(text) or {}).get("video") or {}).get("size", ""))
+        w, _, h = size.partition("x")
+        aspect = f"{int(w) // math.gcd(int(w), int(h))}:{int(h) // math.gcd(int(w), int(h))}" if (
+            w.isdigit() and h.isdigit() and int(h)) else "?"
+        m = re.search(r"~?\d+(?:\.\d+)?(?:[-–]\d+)?\s?s\b", purpose)
+        rows.append(f"{src.stem:<20} {aspect:<5} {m.group(0) if m else '-':<7} {purpose}")
+    return [*rows, f"OK {len(rows)} recipes"]
+
+
 def _cmd_new(ns: argparse.Namespace, root: Path) -> list[str]:
+    if ns.list:
+        return _recipe_list()
+    if ns.dir is None or ns.recipe is None:
+        return ["ERR new: need DIR and --recipe NAME (or --list)"]
     dest = _at(root, ns.dir)
     spec_out = dest / "montaj.yaml"
     if spec_out.exists():
