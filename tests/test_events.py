@@ -215,7 +215,7 @@ def test_reingest_other_video_drops_stale_events(tmp_path: Path) -> None:
     assert main(["-C", str(tmp_path), "ingest-rec", "one/take.mp4"]) == 0  # same bytes: kept
     assert sidecar.is_file()
     assert main(["-C", str(tmp_path), "ingest-rec", "two/take.mp4"]) == 0  # different bytes
-    assert not sidecar.exists()
+    assert json.loads(sidecar.read_text()) == []  # old events gone; still marked a recording (#63)
 
 
 def test_negative_pre_starts_after_the_event(tmp_path: Path) -> None:

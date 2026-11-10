@@ -250,6 +250,7 @@ def _shot_payload(shot) -> dict:
         raw.pop(name, None)
     for layer in raw.get("layers") or ():
         layer.pop("audio", None)
+    raw.pop("match", None)  # `match: false` (#63) only tells check a luma jump is designed
     return raw
 
 
