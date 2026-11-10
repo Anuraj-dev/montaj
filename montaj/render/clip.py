@@ -241,13 +241,15 @@ class ClipSource:
     """Every window of one clip file. `device` picks the decoder: a CUDA device asks
     `nvdec.choose`; anything else decodes with ffmpeg. `log` gets one line per decision."""
 
-    def __init__(self, path, fps: float, *, device="cpu", log=None):
+    def __init__(self, path, fps: float, *, device="cpu", log=None, policy=None):
         self.path = Path(path)
+        self._policy = policy
         self.fps = float(fps)
         self.device = torch.device(device)
         self._log = log
         self.decoder: nvdec.Choice = nvdec.choose(self.path, self.device)
         self._say(f"clip {self.path.name} decode {self.decoder.name}: {self.decoder.reason}")
+        self._seam(self.decoder)
         self._cap = _CACHE_FRAMES
         self._cache: OrderedDict[tuple, _ClipWindow] = OrderedDict()
 
@@ -255,9 +257,22 @@ class ClipSource:
         if self._log is not None:
             self._log(message)
 
+    def _seam(self, choice: nvdec.Choice) -> None:
+        """Tell the GPU policy which decoder this clip got; strict turns ffmpeg into an error."""
+        if self._policy is None:
+            return
+        if choice.gpu:
+            self._policy.gpu("decode")
+        else:
+            self._policy.cpu(
+                "decode", f"decoding clip {self.path.name} ({choice.reason})",
+                "use an 8-bit 4:2:0 H.264/HEVC/VP9/AV1 file NVDEC supports (see `build/render.log` decode line)",
+            )
+
     def _demote(self, reason: str) -> None:
         """NVDEC could not open this file after all: every later window uses ffmpeg."""
         self.decoder = nvdec.Choice("ffmpeg", reason)
+        self._seam(self.decoder)
         self._say(f"clip {self.path.name} decode ffmpeg: {reason}")
 
     def close(self) -> None:

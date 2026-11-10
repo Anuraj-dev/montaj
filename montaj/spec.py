@@ -687,8 +687,17 @@ class LoudnessTarget(Frozen):
     tol: RealNum = 1.0
 
 
+class PacingTarget(Frozen):
+    """`check.pacing`: targets `check` judges the cut rhythm against. Unset fields are never judged."""
+
+    max_shot: DurationStr | None = None
+    min_per10s: RealNum | None = None
+    hook_text_by: DurationStr | None = None
+
+
 class CheckSpec(Frozen):
     expect: list[ExpectSpan] = Field(default_factory=list)
+    pacing: PacingTarget | None = None
     loudness: LoudnessTarget | None = None
     digits: Literal["none", "spec"] | None = None
     faces: Literal["none"] | None = None
@@ -2699,6 +2708,15 @@ def _validate_check(
     """
     if spec.check is None:
         return
+    pace = spec.check.pacing
+    if pace is not None:
+        for name in ("max_shot", "hook_text_by"):
+            raw = getattr(pace, name)
+            if raw is not None:
+                _dur_frames(raw, fps, bpm, f"check.pacing.{name}", errors)
+        if pace.min_per10s is not None and not (math.isfinite(pace.min_per10s) and pace.min_per10s >= 0):
+            errors.append(_line("check.pacing.min_per10s", f"must be >= 0, got {_fmt_num(pace.min_per10s)}",
+                                "use min_per10s: 4"))
     loud = spec.check.loudness
     if loud is not None:
         if not math.isfinite(loud.i):

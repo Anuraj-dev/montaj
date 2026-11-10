@@ -49,7 +49,7 @@ def test_one_render_per_burst_err_then_recover_and_stop(tmp_path: Path, monkeypa
         out.parent.mkdir(parents=True, exist_ok=True)
         out.write_bytes(b"\x00\x00")
         return SimpleNamespace(
-            path=out, n_frames=6, seconds=0.2, size=(540, 960), rendered=1, cached=0
+            path=out, n_frames=6, seconds=0.2, size=(540, 960), rendered=1, cached=0, gpu="all"
         )
 
     monkeypatch.setattr(pipeline, "render", fake_render)
@@ -131,7 +131,7 @@ def test_watch_keeps_running_after_poll_error(tmp_path: Path, monkeypatch) -> No
         out.parent.mkdir(parents=True, exist_ok=True)
         out.write_bytes(b"\x00\x00")
         return SimpleNamespace(
-            path=out, n_frames=6, seconds=0.2, size=(540, 960), rendered=1, cached=0
+            path=out, n_frames=6, seconds=0.2, size=(540, 960), rendered=1, cached=0, gpu="all"
         )
 
     monkeypatch.setattr(watch_mod, "_fingerprint", flaky)

@@ -249,6 +249,10 @@ Photo fields (`crop`, `focus`, swirl `center`, wall `at`) are source-image pixel
 - `check.loudness` — mapping, default none — replaces the `-14` LUFS target used by `check`.
 - `check.loudness.i` — number, required with loudness — integrated-loudness target, in LUFS.
 - `check.loudness.tol` — number, default `1` — how far the measurement may sit from `i`, in LU.
+- `check.pacing` — mapping, default none — pacing targets. `check` always prints `INFO pacing|hook|beats|captions|audio|variety` numbers (also under `--json` as `pacing`); a `WARN` appears only for a target set here and missed. Like all of `check`, it stays out of the segment hash.
+- `check.pacing.max_shot` — duration, default none — longest allowed shot. Misses print `WARN pacing longest=<t>@shot<i>`.
+- `check.pacing.min_per10s` — number ≥ 0, default none — fewest shot changes per 10 s (`cuts` is shots − 1). Misses print `WARN pacing per10s=<n>`.
+- `check.pacing.hook_text_by` — duration, default none — latest time the first on-screen text (text lines or subs) may appear. A film with no text also warns.
 
 Transitions (`shots[].in`):
 
@@ -312,3 +316,11 @@ Content guards (under `check`, read by `montaj check` only; they never change th
 
 ## Event logs (screen recordings)
 `montaj ingest-rec raw/take.mp4 --events raw/take.events.json` copies the recording to `assets/` and writes `assets/<stem>.events.json`. Input and output are a JSON list `[{"t": 3.42, "kind": "state", ...fields}]`; `t` is finite seconds. Input `t` is seconds from record start; ingest subtracts the container `start_time` (earliest stream), so in `assets/` `t` is seconds on the clock `clip_in` seeks. Re-ingesting different video bytes under the same stem without `--events` deletes the old `<stem>.events.json`. Rows stay in log order. Field values are exact-matched (numbers numerically; a missing field never equals `null`); in `event:` markers `true`/`false`/`null` are JSON literals and `"true"` quoted is the string; `contains:` / `~=` match substrings of string fields.
+
+## Strict dGPU mode (machine config, not the spec)
+`~/.config/montaj/config.toml`:
+- `[gpu] strict = true` — any CPU pixel path stops the command with `ERR gpu-strict: <what> would run on the CPU: <hint>` instead of falling back. Default false. `MONTAJ_GPU_STRICT=1|0` overrides it for one run.
+- `[gpu] device = "cuda:0"` — the CUDA device every stage uses; also a GPU UUID or name substring (`"RTX 5050"`), so an integrated GPU is never picked. Default: the current CUDA device.
+- Policed pixel stages: **decode** (clip not openable by NVDEC -> ffmpeg), **photo** (nvJPEG for JPEG under strict, PIL otherwise so non-strict stays film2-exact; PNG/WebP and prints' PIL shadow blur are CPU), **text** (lines on the Chromium engine, card lines, subs, frame captions are CPU; `engine: gpu` is not), **encode** (`libx264` when NVENC is unusable; NVENC through the ffmpeg pipe still counts as GPU). A cached segment runs nothing, so strict does not recheck it.
+- `render` / `watch` `OK` lines end `gpu=all`, or `gpu=partial(text,decode)` naming stages that fell back (non-strict). `montaj doctor` prints one line per stage (`composite`, `decode`, `photo`, `text`, `encode`, `capture`); under strict a stage that would fall back is `FAIL`.
+- Not pixel work, not policed: text shaping, demux/mux, audio mix, Python orchestration. Named exceptions: `capture` rasterises the page in headless Chromium (CPU); its encode uses NVENC (libx264 only when NVENC is unusable, an error under strict). `ingest` and `sheet` use PIL on the CPU.

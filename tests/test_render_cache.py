@@ -327,10 +327,10 @@ def test_segment_lifetime_releases_a_wall_and_reloads_on_the_next_use(tmp_path: 
     seen: set[tuple] = set()
     orig_init = Photo.__init__
 
-    def spy_init(self, cv, photo_path, crop=None, card=False, pad=90):
+    def spy_init(self, cv, photo_path, crop=None, card=False, pad=90, policy=None):
         inits["n"] += 1
         seen.add((str(photo_path), None if crop is None else tuple(crop), bool(card)))
-        orig_init(self, cv, photo_path, crop, card, pad)
+        orig_init(self, cv, photo_path, crop, card, pad, policy)
 
     monkeypatch.setattr(Photo, "__init__", spy_init)
     from montaj.render import frame as frame_mod
