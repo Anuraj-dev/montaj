@@ -53,7 +53,7 @@ class _Usage(Exception):
 
 _COMMANDS = (
     "doctor", "new", "ingest", "ingest-rec", "validate", "render", "sheet", "check", "export", "music",
-    "review", "watch", "taste", "capture", "inspect", "captions", "transcribe", "ref", "custom", "cut", "words",
+    "review", "watch", "taste", "capture", "inspect", "captions", "transcribe", "ref", "custom", "cut", "words", "spec",
 )
 
 
@@ -185,6 +185,10 @@ def _parser() -> argparse.ArgumentParser:
     ins.add_argument("--problems", action="store_true")
     ins.add_argument("--track", default=None, metavar="SHOT.LAYER.PROP")
 
+    sp = sub.add_parser("spec")
+    sp.add_argument("topic", nargs="?")
+    sp.add_argument("--search", default=None, metavar="WORD")
+
     wd = sub.add_parser("words")
     wd.add_argument("--grep", default=None, metavar="TEXT")
     return p
@@ -310,7 +314,7 @@ def _export_source(root: Path) -> Path:
 def _cmd_doctor() -> list[str]:
     lines = doctor()
     failed = sum(line.startswith("FAIL") for line in lines)
-    lines.append(f"ERR doctor: {failed} failed" if failed else "OK doctor")
+    lines.append(f"ERR doctor: {failed} failed (fix the FAIL lines above, then rerun montaj doctor)" if failed else "OK doctor")
     return lines
 
 
@@ -924,7 +928,7 @@ def _cmd_check(ns: argparse.Namespace, root: Path, numbers: dict | None = None) 
     errs = sum(line.startswith("ERR") for line in lines)
     warns = sum(line.startswith("WARN") for line in lines)
     if errs:
-        lines.append(f"ERR check: {errs} guard(s) unavailable")
+        lines.append(f"ERR check: {errs} guard(s) unavailable (see the ERR lines above; uv sync --extra guards adds the optional ones)")
     else:
         lines.append(f"WARN check: {warns} warnings" if warns else "OK check")
     return lines
@@ -985,7 +989,7 @@ def _cmd_music_gen(ns: argparse.Namespace, root: Path) -> list[str]:
             f"{_rel(root, wav)} seed={seed} {_candidate_duration(wav, log):.1f}s"
             for wav, seed in zip(exc.files, exc.seeds, strict=True)
         ]
-        lines.append(f"ERR music gen: {len(exc.files)}/{exc.n} candidates ({exc.reason})")
+        lines.append(f"ERR music gen: {len(exc.files)}/{exc.n} candidates ({exc.reason}; rerun to get the rest)")
         return lines
     lines = [
         f"{_rel(root, wav)} seed={seed} {_candidate_duration(wav, log):.1f}s"
@@ -1214,6 +1218,10 @@ def _dispatch(ns: argparse.Namespace, root: Path) -> list[str]:
         return _cmd_cut(ns, root)
     if ns.cmd == "words":
         return _cmd_words(ns, root)
+    if ns.cmd == "spec":
+        from montaj.specref import run as spec_ref
+
+        return spec_ref(ns.topic, ns.search)
     if ns.cmd == "review":
         return review_summary(root)[0]
     if ns.cmd == "taste":
@@ -1233,12 +1241,13 @@ def main(argv: list[str] | None = None) -> int:
     try:
         ns = _parser().parse_args(rest)
     except _Usage as exc:
-        return _emit([f"ERR {_argv_cmd(rest)}: {_one_line(str(exc))}"], as_json)
+        cmd = _argv_cmd(rest)
+        return _emit([f"ERR {cmd}: {_one_line(str(exc))} (montaj {'' if cmd == 'cli' else cmd + ' '}--help)"], as_json)
     except SystemExit as exc:
         # `--help` prints itself and exits 0. Any other exit becomes one ERR line.
         if exc.code in (0, None):
             return 0
-        return _emit([f"ERR {_argv_cmd(rest)}: exit {exc.code}"], as_json)
+        return _emit([f"ERR {_argv_cmd(rest)}: exit {exc.code} (montaj --help lists commands)"], as_json)
     root = _root(chdir)
     try:
         if _streaming(ns, root):

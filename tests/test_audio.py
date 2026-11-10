@@ -318,7 +318,7 @@ def test_music_gen_partial_failure_keeps_files_and_errs(
         ["-C", str(proj), "music", "gen", "--caption", "x", "--lyrics", "lyrics.txt", "--n", "3"], capsys,
     )
     assert code == 1 and err == "", lines
-    assert lines[-1] == "ERR music gen: 2/3 candidates (cuda hiccup)"
+    assert lines[-1] == "ERR music gen: 2/3 candidates (cuda hiccup; rerun to get the rest)"
     assert lines[:-1] == [
         "music/cand-0000beef.wav seed=0000beef 0.1s",
         "music/cand-0001beef.wav seed=0001beef 0.1s",
