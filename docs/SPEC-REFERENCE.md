@@ -70,9 +70,18 @@ Photo fields (`crop`, `focus`, swirl `center`, wall `at`) are source-image pixel
 - `shots[].card.text` — list, required — lines with the same fields as `text[].lines[]`. `at`, `stagger`, `dur` and `sweep` are durations from this shot's start (`0s`, `12f`, `1b`), not film markers. The colour and the lines are one picture, so a fade or whip carries both.
 - `shots[].custom` — path to a `.py` file, relative to the spec, one source: photo, wall, clip, blank, sequence, card or custom — the shot is drawn by that file's `draw(ctx)` on the GPU. Mutually exclusive with the other sources; `crop`, `focus` and `zoom` do not apply. **A spec with `custom:` executes that code in-process with its author's trust (like `music compose`); Montaj does not sandbox it.** See custom code.
 - `shots[].params` — mapping, default none — values handed to the shot's `draw` as `ctx.params`. Needs `custom`. Part of the segment hash.
-- `shots[].effects` — list, default none — custom effects applied in order to this shot's picture (any source except blank), before the look. A transition carries each side's effects.
-- `shots[].effects[].custom` — path to a `.py` file, required — `draw(ctx)` gets the shot picture as `ctx.inputs[0]` and returns the new picture.
-- `shots[].effects[].params` — mapping, default none — `ctx.params` for that effect.
+- `shots[].effects` — list, default none — effects applied in order to this shot's picture (any source except blank), before the look; each entry is a built-in `type` or a `custom` file. A transition carries each side's effects.
+- `shots[].effects[].custom` — path to a `.py` file, one of `custom`/`type` — `draw(ctx)` gets the shot picture as `ctx.inputs[0]` and returns the new picture.
+- `shots[].effects[].params` — mapping, default none — `ctx.params` for a `custom` effect.
+- `shots[].effects[].type` — `shake` · `blur` · `bloom` · `chroma` · `trails`, one of `custom`/`type` — a built-in effect; amount 0 is off.
+- `shots[].effects[].amount` — number or `[{t, v}, …]` keyframes (`t` from the shot start, linear, held at the ends), default per type — strength: shake peak px (12, max 200), blur sigma px (8, max 200), bloom gain (0.6, max 4), chroma split (0.3; 1 = 32 px at the corner, max 4), trails mix (1, max 1). Px are design px.
+- `shots[].effects[].at` — time or marker (film clock), default none — a hit: full strength at `at`, falling linearly to off over `dur`; off outside.
+- `shots[].effects[].dur` — duration, default `8f` — length of the `at` hit; needs `at`.
+- `shots[].effects[].seed` — int, default `0` — shake only: which shake pattern (a pure function of seed and time).
+- `shots[].effects[].threshold` — number 0 to below 1, default `0.75` — bloom only: luma above which pixels glow.
+- `shots[].effects[].radius` — design px above 0 to 400, default `24` — bloom only: glow spread (sigma).
+- `shots[].effects[].frames` — int 1 to 16, default `4` — trails only: how many earlier frames echo (re-rendered, so a segment's first frame matches the whole film).
+- `shots[].effects[].decay` — number above 0 to 1, default `0.6` — trails only: each older echo's weight relative to the next newer one.
 - `shots[].layers` — list, default none — several sources composited back to front over `video.background`; replaces the shot's single source and its `crop`/`focus`/`zoom`/`camera`/`speed`/`freeze`. A transition carries the whole stack. One full-frame clip layer renders bit-identical to a clip shot.
 - `shots[].layers[].clip` — string, one of clip or image — a video stem. Without `from` it starts with the shot, so it plays through the incoming transition like a clip shot. The source must last the layer's span.
 - `shots[].layers[].image` — string, one of clip or image — a PNG (alpha honoured, decoded on the GPU) or JPEG stem.
@@ -91,6 +100,7 @@ Photo fields (`crop`, `focus`, swirl `center`, wall `at`) are source-image pixel
 - `shots[].layers[].shadow` — number 0 to 1, default `0` — soft drop shadow under the layer's rectangle, this strong.
 - `shots[].layers[].in` — `{type, dur}`, default none — how the layer arrives at `from`: `fade` (opacity) or `pop` (overshoot scale and quick fade). `dur` is a duration > 0.
 - `shots[].layers[].out` — `{type, dur}`, default none — how the layer leaves, ending at `to` (or the hold's end). Same types as `in`.
+- `shots[].layers[].effects` — list of built-in effects (same fields as `shots[].effects[]`, no `custom`), default none — on this layer only: shake moves it, trails draw fading earlier copies, blur/bloom/chroma filter its pixels (spreading past its box).
 - `shots[].crop` — `[x0, y0, x1, y1]`, default the full image — the part of the photo that is shown. On a clip it is a box of the source video frame, in source px, inside the video.
 - `shots[].focus` — `[x, y]`, `face`, `face:N` or `subject`, default the crop centre — the photo point placed at the screen centre. On a clip it is a source-video pixel inside the crop, a one-key `camera`. `face` is the centre of the largest face box, `face:N` the N-th largest, `subject` the saliency peak, all read from `assets/analysis.json` and written into the shot as `[x, y]` before hashing; on a clip they come from the scene holding the shot's start. A photo with no face is `ERR shots[i].focus: no face in <stem> (use subject or [x, y])`.
 - `shots[].zoom` — number, default cover — design pixels per photo pixel. Cover fits the crop with a hair of overscan. On a clip it is a multiple of cover (>= 1), a one-key `camera`, as in `camera[].zoom`.

@@ -28,6 +28,7 @@ from montaj.render.canvas import Canvas
 from montaj.render.clip import ClipSource, window_key
 from montaj.render.core import Photo, fit_s, sine, still
 from montaj.render.custom import CustomRunner
+from montaj.render import effects as fxlib
 from montaj.render.finish import LOOKS, finish, lut_texture
 from montaj.render.layers import LayerState, LayerTexture, composite, layer_state, load_rgba
 from montaj.render.shots import (
@@ -696,14 +697,61 @@ class Renderer:
             radius = float(layer.radius or 0.0) * k
             shadow = float(layer.shadow or 0.0)
             if (out is None and plan.full and state == _IDENTITY and mode == "normal"
-                    and radius == 0 and shadow == 0):
+                    and radius == 0 and shadow == 0 and not layer.effects):
                 out = self._layer_clip(plan, t)
                 continue
             if out is None:
                 out = self._background()
-            tex = LayerTexture(self._layer_clip(plan, t)) if plan.clip is not None else self._layer_image(plan.stem)
-            composite(self.cv, out, tex, plan.src, plan.dest, state, mode, radius, shadow)
+            fxs = layer.effects or ()
+            local = t - scene.t0
+            # Trails: older copies first, fainter with age, each re-drawn at its own time (no frame memory).
+            for fx in fxs:
+                if fx.type != "trails":
+                    continue
+                v = min(1.0, fxlib.level(fx, local))
+                if v <= 0:
+                    continue
+                self._seam_effect("trails")
+                decay = fxlib.TRAIL_DECAY if fx.decay is None else float(fx.decay)
+                for i in range(fx.frames or fxlib.TRAIL_FRAMES, 0, -1):
+                    ghost = layer_state(layer, local - i, hold)
+                    if ghost is not None:
+                        ghost = LayerState(ghost.scale, ghost.rotate, ghost.opacity * v * decay ** i)
+                        self._draw_layer(out, layer, plan, ghost, t - i, local - i, mode, radius, shadow)
+            self._draw_layer(out, layer, plan, state, t, local, mode, radius, shadow)
         return out if out is not None else self._background()
+
+    def _draw_layer(self, out, layer, plan, state, t, local, mode, radius, shadow) -> None:
+        """One layer at film time `t` (`local` on the shot clock), with its shake and pixel effects."""
+        fxs = layer.effects or ()
+        dest = plan.dest
+        post = pad = None
+        if fxs:
+            x0, y0, x1, y1 = dest
+            for fx in fxs:
+                if fx.type == "shake":
+                    amp = fxlib.level(fx, local) * self.cv.k
+                    if amp > 0:
+                        self._seam_effect("shake")
+                        dx, dy = fxlib.shake_offset(fx.seed or 0, local, self.tl.fps, amp)
+                        x0, y0, x1, y1 = x0 + dx, y0 + dy, x1 + dx, y1 + dy
+            dest = (x0, y0, x1, y1)
+            ref = math.hypot(x1 - x0, y1 - y0) / 2.0 * state.scale
+            post = fxlib.layer_pixels(self.cv, fxs, local, ref)
+            if post is not None:
+                self._seam_effect("layer")
+                pad = fxlib.layer_pad(self.cv, fxs, local)
+        tex = LayerTexture(self._layer_clip(plan, t)) if plan.clip is not None else self._layer_image(plan.stem)
+        composite(self.cv, out, tex, plan.src, dest, state, mode, radius, shadow, post=post, post_pad=pad or 0.0)
+
+    def _seam_effect(self, what: str) -> None:
+        """Built-in effects are torch on the canvas device: gpu on CUDA, a CPU fallback otherwise."""
+        if self._policy is None:
+            return
+        if torch.device(self.cv.device).type == "cuda":
+            self._policy.gpu("effect")
+        else:
+            self._policy.cpu("effect", f"{what} effect", "render on a CUDA device")
 
     def _frame_bg(self, stem: str, photo: Photo) -> torch.Tensor:
         key = (stem, photo.crop)
@@ -975,14 +1023,30 @@ class Renderer:
                                 p=local / max(1, scene.end - 1 - scene.t0), f=t, inputs=[])
 
     def _effects(self, scene: Scene, t: float) -> torch.Tensor:
-        """The base scene, then each `effects[]` file in order, each reading the layer so far."""
-        img = self._eval(scene, t, effects=False)
+        """The base scene, then each `effects[]` entry in order, each reading the picture so far."""
         shot = self.tl.shots[scene.shot]
+        return self._effect_chain(scene, shot, t, len(shot.spec.effects))
+
+    def _effect_chain(self, scene: Scene, shot, t: float, n: int) -> torch.Tensor:
+        """The picture after the first `n` effects at `t`. Trails call it again at earlier times, so a
+        frame's trail is the same whether or not its segment rendered the frames before it."""
+        if n == 0:
+            return self._eval(scene, t, effects=False)
+        fx = shot.spec.effects[n - 1]
         local = t - shot.start
-        for fx in shot.spec.effects:
-            img = self._run_custom(fx.custom, fx.params, t=local / self.tl.fps,
-                                   p=local / max(1, shot.end - 1 - shot.start), f=t, inputs=[img])
-        return img
+        if fx.custom is not None:
+            img = self._effect_chain(scene, shot, t, n - 1)
+            return self._run_custom(fx.custom, fx.params, t=local / self.tl.fps,
+                                    p=local / max(1, shot.end - 1 - shot.start), f=t, inputs=[img])
+        v = fxlib.level(fx, local)
+        if v <= 0:
+            return self._effect_chain(scene, shot, t, n - 1)
+        self._seam_effect(fx.type)
+        if fx.type == "trails":
+            decay = fxlib.TRAIL_DECAY if fx.decay is None else float(fx.decay)
+            return fxlib.trails(lambda i: self._effect_chain(scene, shot, t - i, n - 1), v,
+                                fx.frames or fxlib.TRAIL_FRAMES, decay)
+        return fxlib.frame_effect(self.cv, self._effect_chain(scene, shot, t, n - 1), fx, local, self.tl.fps)
 
     def _eval(self, scene: Scene, t: float, effects: bool = True) -> torch.Tensor:
         if isinstance(scene, Blank):

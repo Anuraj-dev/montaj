@@ -526,6 +526,42 @@ LAYER_FITS = ("cover", "contain")
 LAYER_ANIMS = ("fade", "pop")
 
 
+EFFECT_TYPES = ("shake", "blur", "bloom", "chroma", "trails")
+# The built-in knobs each effect type reads besides amount, at and dur.
+EFFECT_KNOBS = {"shake": ("seed",), "blur": (), "bloom": ("threshold", "radius"), "chroma": (),
+                "trails": ("frames", "decay")}
+
+
+class EffectKey(Frozen):
+    """One `amount` keyframe: `t` a duration from the shot start (whole frames after resolve)."""
+
+    t: DurationStr | int
+    v: RealNum
+
+
+class Effect(Frozen):
+    """`shots[].effects[]` / `layers[].effects[]`: a custom file (`custom`) or a built-in (`type`, #38).
+
+    A custom file redraws the shot's picture (ctx.inputs[0]). A built-in reads `amount` (a number or
+    keyframes) and the knobs `EFFECT_KNOBS` names for its type; `at` + `dur` make it a hit that decays to
+    nothing. `at` is a film time; after resolve it, `dur` and keyframe `t` are whole frames from the
+    shot start. Unset fields stay out of the dump, so a custom-only film keeps its segment hash.
+    """
+
+    custom: str | None = Field(default=None, exclude_if=_none)
+    params: dict[str, Any] | None = Field(default=None, exclude_if=_none)
+    type: str | None = Field(default=None, exclude_if=_none)
+    amount: RealNum | list[EffectKey] | None = Field(default=None, exclude_if=_none)
+    at: TimeExpr | int | None = Field(default=None, exclude_if=_none)
+    dur: DurationStr | int | None = Field(default=None, exclude_if=_none)
+    seed: StrictInt | None = Field(default=None, exclude_if=_none)
+    threshold: RealNum | None = Field(default=None, exclude_if=_none)
+    radius: RealNum | None = Field(default=None, exclude_if=_none)
+    frames: StrictInt | None = Field(default=None, exclude_if=_none)
+    decay: RealNum | None = Field(default=None, exclude_if=_none)
+
+
+
 class LayerAnim(Frozen):
     """A layer's entrance or exit. `dur` becomes whole frames in `resolve`."""
 
@@ -559,6 +595,8 @@ class Layer(Frozen):
     shadow: RealNum | None = Field(default=None, exclude_if=_none)
     in_: LayerAnim | None = Field(default=None, alias="in", exclude_if=_none)
     out: LayerAnim | None = Field(default=None, exclude_if=_none)
+    # Built-in effects on this layer (#38): shake moves it, trails echo it, the rest filter its pixels.
+    effects: list[Effect] | None = Field(default=None, exclude_if=_none)
 
 
 class CardSpec(Frozen):
@@ -566,13 +604,6 @@ class CardSpec(Frozen):
 
     color: str
     text: list[TextLine]
-
-
-class CustomEffect(Frozen):
-    """`shots[].effects[]`: a custom file that redraws the shot's layer (ctx.inputs[0])."""
-
-    custom: str
-    params: dict[str, Any] | None = Field(default=None, exclude_if=lambda v: v is None)
 
 
 class Shot(Frozen):
@@ -606,7 +637,7 @@ class Shot(Frozen):
     # Code-drawn shot (#37): a .py file whose draw(ctx) paints the frame; params reach ctx.params.
     custom: str | None = Field(default=None, exclude_if=lambda v: v is None)
     params: dict[str, Any] | None = Field(default=None, exclude_if=lambda v: v is None)
-    effects: list[CustomEffect] | None = Field(default=None, exclude_if=lambda v: v is None)
+    effects: list[Effect] | None = Field(default=None, exclude_if=lambda v: v is None)
     # Back to front; replaces the single source (#34). Absent stays out of model_dump.
     layers: list[Layer] | None = Field(default=None, exclude_if=lambda v: v is None)
     in_: Transition | None = Field(default=None, alias="in")
@@ -1060,6 +1091,14 @@ def parse_wh(raw: str, path: str, errors: list[str], *, even: bool = False) -> t
     return w, h
 
 
+def _shot_effects(sh: Shot, i: int) -> list[tuple[str, Effect]]:
+    """(path, effect) for the shot's effects, then each layer's."""
+    out = [(f"shots[{i}].effects[{j}]", fx) for j, fx in enumerate(sh.effects or ())]
+    for k, layer in enumerate(sh.layers or ()):
+        out.extend((f"shots[{i}].layers[{k}].effects[{j}]", fx) for j, fx in enumerate(layer.effects or ()))
+    return out
+
+
 def _duration_fields(spec: Spec) -> list[tuple[str, str]]:
     out: list[tuple[str, str]] = []
     if spec.video.intro:
@@ -1086,6 +1125,12 @@ def _duration_fields(spec: Spec) -> list[tuple[str, str]]:
                               ("in.dur", layer.in_ and layer.in_.dur), ("out.dur", layer.out and layer.out.dur)):
                 if raw is not None:
                     out.append((f"shots[{i}].layers[{k}].{name}", raw))
+        for path, fx in _shot_effects(sh, i):
+            if fx.dur is not None:
+                out.append((f"{path}.dur", fx.dur))
+            if isinstance(fx.amount, list):
+                for k, key in enumerate(fx.amount):
+                    out.append((f"{path}.amount[{k}].t", key.t))
         if sh.wall is not None:
             for k, key in enumerate(sh.wall.camera.pos):
                 out.append((f"shots[{i}].wall.camera.pos[{k}].t", key.t))
@@ -1166,6 +1211,8 @@ def _time_strings(spec: Spec) -> list[str]:
     for fx in spec.fx:
         if isinstance(fx.at, str):
             out.append(fx.at)
+    for i, sh in enumerate(spec.shots):
+        out.extend(fx.at for _, fx in _shot_effects(sh, i) if isinstance(fx.at, str))
     for block in spec.text:
         out.extend([block.from_, block.to])
         if block.fade_in:
@@ -2285,11 +2332,85 @@ def _validate_custom_shot(sh: Shot, i: int, spec_dir: Path | None, errors: list[
     elif sh.params is not None:
         errors.append(_line(f"shots[{i}].params", "params needs custom", "add custom: fx/name.py"))
     for j, fx in enumerate(sh.effects or ()):
-        _check_custom_file(f"shots[{i}].effects[{j}].custom", fx.custom, spec_dir, errors)
+        if fx.custom is not None:
+            _check_custom_file(f"shots[{i}].effects[{j}].custom", fx.custom, spec_dir, errors)
     if sh.effects is not None and not sh.effects:
-        errors.append(_line(f"shots[{i}].effects", "empty list", "remove effects or add {custom: fx/name.py}"))
+        errors.append(_line(f"shots[{i}].effects", "empty list", "remove effects or add {type: blur} or {custom: fx/name.py}"))
     if sh.blank and sh.effects:
         errors.append(_line(f"shots[{i}].effects", "not used on a blank shot", "use a custom shot"))
+
+
+# Upper bounds that keep a typo from costing minutes a frame.
+_EFFECT_MAX = {"shake": 200.0, "blur": 200.0, "bloom": 4.0, "chroma": 4.0, "trails": 1.0}
+_TRAIL_FRAMES = 16
+
+
+def _fmt_g(v: float) -> str:
+    """`200`, not `200.0`: effect ranges read like the YAML they came from."""
+    return f"{v:g}" if math.isfinite(v) else _fmt_num(v)
+
+
+def _validate_effects(sh: Shot, i: int, markers: dict[str, float], fps: int,
+                      bpm: float | None, beat0: float, parsed: dict[str, int], errors: list[str]) -> None:
+    """Built-in effects (#38): one of custom/type, knobs that fit the type, finite ranges.
+
+    `at` is parsed here (it may name a marker) into `parsed[<path>.at]`, film frames.
+    """
+    for k, layer in enumerate(sh.layers or ()):
+        if layer.effects is not None and not layer.effects:
+            errors.append(_line(f"shots[{i}].layers[{k}].effects", "empty list", "remove effects or add {type: blur}"))
+    for path, fx in _shot_effects(sh, i):
+        on_layer = ".layers[" in path
+        if (fx.custom is None) == (fx.type is None):
+            errors.append(_line(path, "need exactly one of custom or type", f"set type: {_choices(EFFECT_TYPES)}, or custom: fx/name.py"))
+            continue
+        if fx.custom is not None:
+            if on_layer:
+                errors.append(_line(f"{path}.custom", "custom effects run on a shot's picture", "move it to shots[].effects"))
+            for name in ("amount", "at", "dur", *sorted({n for ks in EFFECT_KNOBS.values() for n in ks})):
+                if getattr(fx, name) is not None:
+                    errors.append(_line(f"{path}.{name}", "is for a built-in type", "pass it in params"))
+            continue
+        if fx.type not in EFFECT_TYPES:
+            errors.append(_line(f"{path}.type", f"unknown {fx.type!r}", f"use {_choices(EFFECT_TYPES)}"))
+            continue
+        if fx.params is not None:
+            errors.append(_line(f"{path}.params", "params is for custom", "set the effect's fields directly"))
+        knobs = EFFECT_KNOBS[fx.type]
+        for name in sorted({n for ks in EFFECT_KNOBS.values() for n in ks} - set(knobs)):
+            if getattr(fx, name) is not None:
+                errors.append(_line(f"{path}.{name}", f"not used by {fx.type}",
+                                    f"{fx.type} takes amount, at, dur" + "".join(f", {n}" for n in knobs)))
+        top = _EFFECT_MAX[fx.type]
+        values = fx.amount if isinstance(fx.amount, list) else [] if fx.amount is None else [EffectKey(t="0f", v=fx.amount)]
+        if isinstance(fx.amount, list) and not fx.amount:
+            errors.append(_line(f"{path}.amount", "empty keyframe list", "use a number or [{t: 0f, v: 1}, ...]"))
+        for key in values:
+            if not math.isfinite(key.v) or not 0 <= key.v <= top:
+                errors.append(_line(f"{path}.amount", f"must be 0 to {_fmt_g(top)}, got {_fmt_g(key.v)}",
+                                    "0 is off"))
+                break
+        if isinstance(fx.amount, list):
+            ts = [parsed.get(f"{path}.amount[{k}].t") for k in range(len(fx.amount))]
+            if None not in ts and any(b <= a for a, b in zip(ts, ts[1:])):
+                errors.append(_line(f"{path}.amount", "keyframe times must increase", "sort the keys by t"))
+        if fx.dur is not None and fx.at is None:
+            errors.append(_line(f"{path}.dur", "dur needs at", "add at: a time or marker"))
+        d = parsed.get(f"{path}.dur")
+        if d is not None and d <= 0:
+            errors.append(_line(f"{path}.dur", f"must be > 0, got {d}f", "lengthen dur"))
+        if fx.at is not None:
+            at_f = _parse_time(fx.at, markers, fps, bpm, f"{path}.at", errors, beat0=beat0)
+            if at_f is not None:
+                parsed[f"{path}.at"] = round_frame(at_f)
+        if fx.threshold is not None and (not math.isfinite(fx.threshold) or not 0 <= fx.threshold < 1):
+            errors.append(_line(f"{path}.threshold", f"must be 0 to below 1, got {_fmt_g(fx.threshold)}", "use 0.75"))
+        if fx.radius is not None and (not math.isfinite(fx.radius) or not 0 < fx.radius <= 400):
+            errors.append(_line(f"{path}.radius", f"must be > 0 and at most 400, got {_fmt_g(fx.radius)}", "design px, use 24"))
+        if fx.frames is not None and not 1 <= fx.frames <= _TRAIL_FRAMES:
+            errors.append(_line(f"{path}.frames", f"must be 1 to {_TRAIL_FRAMES}, got {fx.frames}", "use 4"))
+        if fx.decay is not None and (not math.isfinite(fx.decay) or not 0 < fx.decay <= 1):
+            errors.append(_line(f"{path}.decay", f"must be above 0 and at most 1, got {_fmt_g(fx.decay)}", "use 0.6"))
 
 
 def _check_ease(path: str, ease: str, errors: list[str]) -> None:
@@ -2470,6 +2591,7 @@ def validate_spec(
                 _line(f"shots[{i}]", "need photo, wall, clip, blank, sequence, card, custom or layers", "add one")
             )
         _validate_custom_shot(sh, i, spec_dir, errors)
+        _validate_effects(sh, i, markers, fps, bpm, beat0, parsed, errors)
         if sh.card is not None:
             _validate_card(sh.card, i, fps, bpm, errors)
         if sh.layers is not None:

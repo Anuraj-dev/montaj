@@ -112,7 +112,7 @@ def scene_custom_files(scene: object, shots) -> set[str]:
             out.add(scene.src)
         return out
     sh = shots[scene.shot]
-    out = {fx.custom for fx in sh.effects or ()}
+    out = {fx.custom for fx in sh.effects or () if fx.custom is not None}
     if isinstance(scene, Custom) and sh.custom is not None:
         out.add(sh.custom)
     return out

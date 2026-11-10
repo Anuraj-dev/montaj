@@ -21,6 +21,7 @@ from montaj.spec import (
     INCOMING_TRANS,
     WALL_PULLBACK_ZOOM,
     WAVEFORM_BARS,
+    Effect,
     Layer,
     Shot,
     Spec,
@@ -526,6 +527,36 @@ def _shot_with_frame_keys(sh: Shot, i: int, parsed: dict[str, int]) -> Shot:
     if sh.sequence is not None and every is not None:
         sh = sh.model_copy(update={"sequence": sh.sequence.model_copy(update={"every": every})})
     return sh
+
+
+def _effect_with_frames(fx: Effect, at: str, parsed: dict[str, int], start: int) -> Effect:
+    """A built-in effect's `at` (film time) as frames from the shot start; `dur` and keyframe `t` as frames."""
+    update: dict = {}
+    if fx.at is not None:
+        update["at"] = parsed[f"{at}.at"] - start
+    if fx.dur is not None:
+        update["dur"] = parsed[f"{at}.dur"]
+    if isinstance(fx.amount, list):
+        update["amount"] = [key.model_copy(update={"t": parsed[f"{at}.amount[{k}].t"]})
+                            for k, key in enumerate(fx.amount)]
+    return fx.model_copy(update=update) if update else fx
+
+
+def _shot_effects_with_frames(sh: Shot, i: int, parsed: dict[str, int]) -> Shot:
+    """Effect times on the shot and its layers become shot-clock frames (#38). No effects, no copy."""
+    start = parsed[f"shots[{i}].start"]
+    update: dict = {}
+    if sh.effects:
+        update["effects"] = [_effect_with_frames(fx, f"shots[{i}].effects[{j}]", parsed, start)
+                             for j, fx in enumerate(sh.effects)]
+    if sh.layers and any(layer.effects for layer in sh.layers):
+        update["layers"] = [
+            layer.model_copy(update={"effects": [
+                _effect_with_frames(fx, f"shots[{i}].layers[{k}].effects[{j}]", parsed, start)
+                for j, fx in enumerate(layer.effects)]}) if layer.effects else layer
+            for k, layer in enumerate(sh.layers)
+        ]
+    return sh.model_copy(update=update) if update else sh
 
 
 def _layer_with_frames(layer: Layer, at: str, parsed: dict[str, int]) -> Layer:
@@ -1061,9 +1092,9 @@ def resolve(spec: Spec, spec_dir: Path) -> Timeline:
                 start=start,
                 end=end,
                 kind=_shot_kind(sh),
-                spec=_materialize_transition(
-                    _shot_with_frame_keys(_with_picked_clip_in(sh, clip_ins.get(i)), i, parsed)
-                ),
+                spec=_materialize_transition(_shot_effects_with_frames(
+                    _shot_with_frame_keys(_with_picked_clip_in(sh, clip_ins.get(i)), i, parsed), i, parsed
+                )),
             )
         )
     n_frames = resolved[-1].end if resolved else 0
