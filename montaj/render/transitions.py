@@ -70,9 +70,15 @@ def rgb(raw: str) -> tuple[float, float, float]:
     return ((n >> 16) & 255) / 255.0, ((n >> 8) & 255) / 255.0, (n & 255) / 255.0
 
 
-def dip(cv, a, b, x: float, color: str = "#000000"):
-    """a settles into a flat colour on the first half, b emerges from it on the second."""
-    col = torch.tensor(rgb(color), device=cv.device, dtype=torch.float32)[:, None, None]
+def dip(cv, a, b, x: float, color: str = "#000000", linear: bool = False):
+    """a settles into a flat colour on the first half, b emerges from it on the second.
+
+    `linear`: a and b are linear light (#43), so the sRGB colour is linearised to match.
+    """
+    c = rgb(color)
+    if linear:
+        c = tuple(v / 12.92 if v <= 0.04045 else ((v + 0.055) / 1.055) ** 2.4 for v in c)
+    col = torch.tensor(c, device=cv.device, dtype=torch.float32)[:, None, None]
     if x < 0.5:
         p = smooth(x * 2)
         return a * (1 - p) + col * p

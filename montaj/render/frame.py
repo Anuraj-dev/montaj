@@ -27,6 +27,7 @@ from montaj.matte import find_matte
 from montaj.project import find_photo, matte_source, resolve_clip, shot_clips, shot_mattes
 from montaj.render.canvas import Canvas
 from montaj.render.clip import ClipSource, window_key
+from montaj.render.color import grade, to_display, to_linear
 from montaj.render.core import Photo, fit_s, sine, still
 from montaj.render.custom import CustomRunner
 from montaj.render import effects as fxlib
@@ -331,6 +332,8 @@ class Renderer:
         video = tl.spec.video
         beat0 = _parse_beat0(video.beat0, tl.fps, []) if video.beat0 is not None else None
         self._custom = CustomRunner(self._dir, cv.W, cv.H, cv.device, tl.fps, video.bpm, beat0 or 0.0, log=log)
+        # #43: shots, effects, transitions and the shutter average run in linear light; finish gets display.
+        self._linear = video.color is not None and video.color.working == "linear"
 
     def begin_segment(self, shots) -> None:
         """Drop cached resources this segment's frames cannot read.
@@ -1212,7 +1215,27 @@ class Renderer:
                                 fx.frames or fxlib.TRAIL_FRAMES, decay)
         return fxlib.frame_effect(self.cv, self._effect_chain(scene, shot, t, n - 1), fx, local, self.tl.fps)
 
-    def _eval(self, scene: Scene, t: float, effects: bool = True) -> torch.Tensor:
+    def _color(self, scene: Scene, img: torch.Tensor) -> torch.Tensor:
+        """Input transform and primary grade on one shot's picture, before its effects (#43)."""
+        g = None if isinstance(scene, Blank) else self.tl.shots[scene.shot].spec.grade
+        if g is None and not self._linear:
+            return img  # display mode, no grade: untouched, so existing films stay bit-identical
+        self._seam_grade("primary grade" if g is not None else "linear transform")
+        lin = to_linear(img) if g is None else grade(to_linear(img), g)
+        return lin if self._linear else to_display(lin)
+
+    def _seam_grade(self, what: str) -> None:
+        if self._policy is None:
+            return
+        if torch.device(self.cv.device).type == "cuda":
+            self._policy.gpu("grade")
+        else:
+            self._policy.cpu("grade", what, "render on a CUDA device")
+
+    def _eval(self, scene: Scene, t: float, effects: bool = True, color: bool = True) -> torch.Tensor:
+        if color and not isinstance(scene, Trans) and (
+                isinstance(scene, Blank) or not (effects and self.tl.shots[scene.shot].spec.effects)):
+            return self._color(scene, self._eval(scene, t, effects, color=False))
         if isinstance(scene, Blank):
             return self._background()
         if effects and not isinstance(scene, Trans) and self.tl.shots[scene.shot].spec.effects:
@@ -1252,7 +1275,7 @@ class Renderer:
         if scene.kind == "push":
             return push(self.cv, a, b, x, scene.axis)
         if scene.kind == "dip":
-            return dip(self.cv, a, b, x, scene.dip_color)
+            return dip(self.cv, a, b, x, scene.dip_color, linear=self._linear)
         if scene.kind == "zoom":
             return zoom(self.cv, a, b, x, scene.strength)
         if scene.kind == "glitch":
@@ -1304,6 +1327,8 @@ class Renderer:
                     sample = self._eval(plan.scene, t)
                     acc = sample if acc is None else acc + sample
                 acc = acc / n
+            if self._linear:  # output transform: the look, overlays and text are display-referred
+                acc = to_display(acc)
             # Plain overlays are graded with the picture. `above_finish` ones skip the look but
             # still land under text and fade with the picture.
             ovs = [self.tl.overlays[i] for i in plan.overlays]
