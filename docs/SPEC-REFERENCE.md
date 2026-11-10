@@ -167,6 +167,7 @@ Photo fields (`crop`, `focus`, swirl `center`, wall `at`) are source-image pixel
 - `text[].lines[].box` — `none` or `chip`, default `none` — `chip` draws a rounded translucent pill behind the line, revealed with its first unit.
 - `text[].lines[].box_color` — `cream`, `gold`, `ink` or `#rrggbb`, default dark translucent — chip fill; needs `box: chip`.
 - `text[].lines[].dot` — `cream`, `gold`, `ink` or `#rrggbb`, default none — status dot before the text inside the chip; needs `box: chip`.
+- `text[].lines[].engine` — `chromium` or `gpu`, default the style's engine (`montaj doctor` lists it; all `chromium` today) — `gpu` shapes with HarfBuzz and draws distance-field glyphs on the GPU, no browser; rejects `gold`, `box`, `cursor`, card lines and characters the style's fonts lack.
 - `text[].lower_third` — `{title, subtitle?, at?, side?, y?}`, replaces `lines` — sugar for a bold sans title chip with a gold dot and a sans subtitle 110 design px below. `at` default the block `from`, `side` `left` or `right` default `left`, `y` default `1500` (design px, title top). `fade_in`/`fade_out` default `0.4s`. No bar or slide yet.
 - `subs` — list, default none — lyric subtitles, one fixed style.
 - `subs[].from` — time expression, required — subtitle window start.

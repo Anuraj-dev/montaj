@@ -81,6 +81,8 @@ def doctor() -> list[str]:
     chrome = next((c for c in CHROMIUM_CANDIDATES if shutil.which(c)), None)
     lines.append(f"OK chromium: {chrome}" if chrome else "FAIL chromium: not found")
 
+    lines.append(text_engine_line())
+
     vram = free_vram()
     lines.append(f"OK vram: {vram[0]} MiB free of {vram[1]} MiB" if vram else "WARN vram: nvidia-smi unavailable")
 
@@ -88,6 +90,19 @@ def doctor() -> list[str]:
 
     lines.extend(TRAPS)
     return lines
+
+
+def text_engine_line() -> str:
+    """Which engine draws each text style by default, and whether the gpu engine can shape."""
+    from montaj.render.glyphs import STYLE_ENGINE
+
+    styles = ", ".join(f"{s} {e}" for s, e in STYLE_ENGINE.items())
+    try:
+        import fontTools
+        import uharfbuzz
+    except ImportError as exc:
+        return f"FAIL text-engine: {styles}; gpu unavailable ({exc.name} missing: uv sync)"
+    return f"OK text-engine: {styles}; gpu opt-in per line (engine: gpu), harfbuzz {uharfbuzz.version_string()}, fonttools {fontTools.version}"
 
 
 def _exists_line(name: str, path: str) -> str:

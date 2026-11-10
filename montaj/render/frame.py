@@ -53,6 +53,7 @@ from montaj.render.text import (
     raster_subs,
 )
 from montaj.render.overlay import draw_overlays
+from montaj.render.type import GlyphAtlas, GlyphLine, css_style
 from montaj.render.transitions import burn_white, dip, fade, glitch, push, swirl, wall_pullback, whip, zoom
 from montaj.render.wall import build_wall, wall_camera, wall_frame
 from montaj.spec import _dur_frames
@@ -716,8 +717,15 @@ class Renderer:
         cache = self._dir / "build" / "text"
         blocks = []
         flat: list[TextLine] = []
+        glyph_lines: dict[int, GlyphLine] = {}  # flat index -> gpu-engine line; the rest go to Chromium
+        atlas = None
         for block in self.tl.texts:
             lines = tuple(self._line(ln) for ln in block.lines)
+            for j, ln in enumerate(block.lines):
+                if ln.glyphs is not None:
+                    atlas = atlas or GlyphAtlas(self._dir / "build" / "glyphs", self.cv.device)
+                    glyph_lines[len(flat) + j] = GlyphLine(
+                        ln.glyphs, css_style(ln.style, ln.color, ln.shadow), atlas)
             flat.extend(lines)
             blocks.append(
                 TextBlock(
@@ -728,8 +736,11 @@ class Renderer:
         subs = tuple(Sub(s.from_, s.to, s.text, size=s.size, color=s.color) for s in self.tl.subs)
         device = self.cv.device
         scale = float(self.cv.k)
-        everything = (*flat, *card_lines)
-        rasters = tuple(_move_line(ln, device) for ln in raster_lines(everything, scale=scale, cache_dir=cache)) if everything else ()
+        chromium = [ln for i, ln in enumerate(flat) if i not in glyph_lines]
+        everything = (*chromium, *card_lines)
+        drawn = iter(tuple(_move_line(ln, device) for ln in raster_lines(everything, scale=scale, cache_dir=cache)) if everything else ())
+        # Back in flat order: gpu lines take their GlyphLine slot, so an all-gpu film starts no browser.
+        rasters = tuple(glyph_lines[i] if i in glyph_lines else next(drawn) for i in range(len(flat))) + tuple(drawn)
         sub_r = tuple(_move_image(im, device) for im in raster_subs(subs, scale=scale, cache_dir=cache)) if subs else ()
         self._blocks = tuple(blocks)
         self._subs = subs
