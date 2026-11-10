@@ -2,18 +2,16 @@
 > Agent-native video harness: YAML spec in, finished video out, zero-token re-render/review · Last checkpoint: 2026-11-10
 
 ## Issue status (source of truth; 2026-11-10)
-- **Closed** (merged to `main`, closed on GitHub with merge sha): #1–34, #37, #39, #40, #42, #46, and the M5 gate fix
-  (`fix/caption-safe-rate`, 8d974ef). Do not reopen or re-implement these.
-- **In progress** (label `in-progress`; a worker owns each worktree): #35 `i35`, #36 `i36`, #38 `i38`.
-  Do not touch another worker's worktree. Driver merges.
-- **Open, not started:** #41 (after #35, #38), #43, #44 (after #43, #36), #45 (after #43), #47, #48.
-- Tracker #49 checkboxes match this list. `main` is 80+ merges ahead of `origin/main` (not pushed).
-- M5 7/7 · M6 3/3 · M7 4/4 · M8 2/5 · M9 3/4 · M10 1/4 · M11 0/2. Tests on main a781c41: CPU 937, GPU 107 passed.
-- Follow-ups found while merging (no issue yet):
-  - `recipes/captions-short.yaml` renders with `INFO no audio`: a captioned voice film loses the voice.
-  - Strict mode refuses the wall's print shadows (PIL GaussianBlur on the CPU), so `birthday-short` can't run strict.
-  - `montaj cut` splits only on word-timing gaps, so continuous speech gives one span.
-  - `check` without `--video` ignores `out/<target>.mp4` from `export`.
+- **Closed** (merged to `main`, closed on GitHub with merge sha): #1–34, #36, #37, #38, #39, #40, #42, #46, and the M5
+  gate fix (`fix/caption-safe-rate`, 8d974ef). Do not reopen or re-implement these.
+- **Open, partly done:** #35 (part 1 keyframes+easing merged d87e2b3; rest listed in its last comment).
+- **Open, not started:** #41 (after #35), #43, #44 (after #43), #45 (after #43), #47, #48, #50, #51.
+- Tracker #49 checkboxes match this list. `main` is 85+ merges ahead of `origin/main` (not pushed).
+- M5 7/7 · M6 3/3 · M7 4/4 · M8 4/5 · M9 3/4 · M10 1/4 · M11 0/2. Tests on main 67603ac: CPU 1007, GPU 115 passed.
+- Follow-ups: #50 strict wall print shadow (PIL blur), #51 `montaj cut` ignores pauses inside word timings.
+  #36 gaps (in its close comment): layers above the subject don't hide it in behind-text; only fade blends the
+  matte; no mattes on photo shots; behind-text ignores layer shake; DeepLab edges coarse (matting model = decision).
+  Stale hint: `mix.check_links` says "add audio: {track: ...}" but `track` is optional.
 
 ## 🚧 In progress / next
 - Next: `docs/ROADMAP.md` (M5–M11, issues #20–#48, tracker #49). Caption design contract: `docs/CAPTIONS.md`.
