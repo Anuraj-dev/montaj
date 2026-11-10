@@ -1,17 +1,15 @@
 # Montaj — State
-> Agent-native video harness: YAML spec in, finished video out, zero-token re-render/review · Last checkpoint: 2026-11-10
+> Agent-native video harness: YAML spec in, finished video out, zero-token re-render/review · Last checkpoint: 2026-11-11
 
 ## 🚧 In progress / next
-- **Next: #47 fresh-agent benchmark.** In a fresh session, an agent uses only the `make-video` skill to make a 20 s
-  fast-paced, MrBeast-style, motion-designed launch short for Auren from the screen recordings in
-  `~/Videos/auren-launch/raw/` (`take{A,B,B2,C3,H}.mp4` + `.events.json`; SFX `~/Videos/auren-launch-v2/sfx/`;
-  mascot frames `~/Videos/auren-launch-v2/mascots/auren/`). Copy, never modify, the originals; project under
-  `~/Projects/media/montaj-projects/auren-short/`. Record tokens, turns, cost and a human quality score in
-  `docs/BENCHMARK.md`; token targets are in `docs/ROADMAP.md`. Then close #47 and the tracker #49 item.
-- Open: #47 (above), #51 (`montaj cut` real pauses; merged, needs the real 18.5 s clip, not on this machine),
-  tracker #49. Everything else (#1–46, #48, #50, #52–55) is merged and closed with its merge sha.
-- `main` 91c6955 is 134 commits ahead of `origin/main`; **not pushed** (Raja hasn't asked). Tests on 91c6955:
-  CPU 1238, GPU 138 passed.
+- **#47 benchmark run done, scored 2/5** (row in `docs/BENCHMARK.md`): Auren 20 s 16:9 launch short,
+  `~/Projects/media/montaj-projects/auren-short/out/final.mp4`, `OK check`, but 1.09M input-eq (target 0.3M), 270
+  spec lines, 58k start ctx (not a clean fresh start). Raja: "not really good to the human eye; we don't need
+  standard captions; we need good music with good visuals." Known defect: "SENTENCE." covers "ONE" ~9.05 s (#56).
+- **Next (overnight driver session):** fix #56–#65 (filed 2026-11-10 by a Fable review of that run; each has
+  root cause file:line), then redo the Auren film as a genuinely fresh benchmark run aiming at ≥ 4/5.
+- Open: #47, #49 tracker, #51 (needs the real 18.5 s clip), #56–#65.
+- `main` is ~137 commits ahead of `origin/main`; **not pushed** (Raja hasn't asked).
 - Leave alone: `montaj-wt/launch-film` (`feat/engine-launch-film`), `montaj-wt/export-wa-audio`
   (`fix/export-whatsapp-audio-copy`): uncommitted, 6b1caaf base, far behind main; expect conflicts.
 - Follow-ups (not filed): #36 matte gaps (in its close comment); `mix.check_links` hint says `track` is required
@@ -23,7 +21,7 @@
 - M1–M4.5 and the issue batch pushed to origin/main. `wip/*` branches stay local only.
 - M1 engine (Vidyut parity on raw frames). M2: text cards, subtitles, Ken Burns, frame cards, morph, clips,
   golden-film, markers, music gen/analyze, two-pass loudnorm. M3: `review` page, `watch`, `taste`. M4: skill
-  `skills/make-video/SKILL.md` (v4: reads `montaj spec <topic>`, recipes via `montaj new --list`) linked into `~/.claude/skills` and `~/.codex/skills`.
+  `skills/make-video/SKILL.md` (v4: reads `montaj spec <topic>`, recipes via `montaj new --list`) linked into `~/.claude/skills` and `~/.codex/skills` (link dangles since the repo moved: #61).
 - M4.5 (waves 8–9, `docs/BENCHMARK.md`):
   - Contract: `validate` rejects unknown `look`/`intro`/`outro`, non-integer `fx.burst`; `subs[].size`/`color`.
   - Music: `montaj music compose music/compose.py` runs an agent-written numpy synth → wav, checks length/peak/LUFS;
