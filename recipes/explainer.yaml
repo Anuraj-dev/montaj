@@ -1,0 +1,117 @@
+# 16:9 explainer, 45 s, 96 BPM (1 beat = 0.625 s, 72 beats). Integration recipe for code-drawn diagram shots
+# (`custom:`), kinetic type (gpu text with entries, emphasis, idle and exits), lower thirds, a custom transition,
+# a composed score and explainer pacing targets. Example topic: why queues blow up near full utilisation.
+#   Hook     0b-8b    drifting grid, the question slams in word by word
+#   Load     8b-20b   bar chart grows in, a capacity line slides across; lower third "Part 1"
+#   Waiting  20b-40b  wait-time curve draws itself, then the danger zone lights up; lower third "Part 2"
+#   Fix      40b-60b  queue diagram backs up with one server, drains with two; lower third "Part 3"
+#   Takeaway 60b-72b  grid again, the rule of thumb, fade to black
+# Demo assets (no private footage): montaj new <project> --recipe explainer. Slots and retargeting: explainer.md.
+video:
+  size: 1920x1080
+  fps: 30
+  bpm: 96
+  look: clean
+  background: "#0b1020"
+  outro: {type: fade, dur: 1s}
+assets: assets
+markers: {load: 8b, wait: 20b, zone: 32b, fix: 40b, two: 52b, takeaway: 60b, end: 72b}
+shots:
+  # Every picture is drawn by recipes/explainer/*.py (copied next to montaj.yaml by the demo script).
+  - {custom: explainer/grid.py, hold: 8b}
+  - custom: explainer/bars.py
+    hold: 12b
+    params: {values: [0.35, 0.5, 0.62, 0.78, 0.94], highlight: 4, cap: 0.8, cap_at: 2.4, start: 0.6}
+    in: {type: fade, dur: 9f}
+  - custom: explainer/curve.py
+    hold: 12b
+    params: {start: 0.6, draw: 4.5}
+    in: {type: custom, src: explainer/wipe.py, dur: 15f}
+  - custom: explainer/curve.py
+    hold: 8b
+    params: {drawn: 1, zone: 0.8, zone_at: 0.3}
+  - custom: explainer/flow.py
+    hold: 12b
+    params: {servers: 1, backlog: [1, 6], span: 5.0, rate: 1.6}
+    in: {type: custom, src: explainer/wipe.py, dur: 15f, params: {angle: -20}}
+  - custom: explainer/flow.py
+    hold: 8b
+    params: {servers: 2, backlog: [6, 1], span: 3.5, rate: 1.6, start: 0}
+    in: {type: push, dur: 9f, axis: y}
+  - {custom: explainer/grid.py, hold: 12b, params: {accent: "#4dd6ff"}, in: {type: fade, dur: 12f}}
+text:
+  # ---- Hook: kinetic type, the key word slams and shakes ----
+  - from: 0.2s
+    to: load
+    lines:
+      - {text: "Why does the line", style: sans, weight: 700, size: 64, y: 190, at: 0.25s, in: {type: slam, by: word, stagger: 0.12s}}
+      - text: "*explode* at 90% busy?"
+        style: sans
+        font: anton
+        size: 92
+        y: 270
+        at: 1.1s
+        in: {type: pop, by: word, stagger: 0.14s}
+        emphasis: {color: "#ffb84d", scale: 1.15, shake: 8}
+        idle: {type: pulse, amount: 3}
+        out: {type: slide, to: left, stagger: 0.05s}
+  # ---- Part 1: headline + lower third ----
+  - from: load+0.3s
+    to: wait
+    fade_out: 0.3s
+    lines:
+      - {text: "Demand creeps toward *capacity*", style: sans, weight: 700, size: 46, y: 36, at: load+0.3s, in: {type: slide, from: left}, emphasis: {color: "#ffb84d"}}
+  - from: load+0.8s
+    to: load+5.5s
+    lower_third: {title: "Part 1 · Load", subtitle: "arrivals per hour, five busy hours", y: 410}
+  # ---- Part 2 ----
+  - from: wait+0.4s
+    to: zone
+    fade_out: 0.3s
+    lines:
+      - {text: "Wait time = ρ / (1 − ρ)", style: mono, weight: 700, size: 40, y: 36, at: wait+0.4s, reveal: type, cursor: true}
+  - from: wait+0.9s
+    to: wait+5.5s
+    lower_third: {title: "Part 2 · Waiting", subtitle: "x: utilisation  ·  y: average wait", y: 410}
+  - from: zone+0.2s
+    to: fix
+    fade_out: 0.3s
+    lines:
+      - {text: "Past 80%, waits *explode*", style: sans, weight: 700, size: 52, y: 36, at: zone+0.3s, in: {type: drop, by: word, stagger: 0.1s}, emphasis: {color: "#ffb84d", shake: 6}}
+  # ---- Part 3 ----
+  - from: fix+0.4s
+    to: two
+    fade_out: 0.3s
+    lines:
+      - {text: "One server: the queue backs up", style: sans, weight: 700, size: 46, y: 36, at: fix+0.4s, in: {type: slide, from: left}}
+  - from: fix+0.9s
+    to: fix+5.5s
+    lower_third: {title: "Part 3 · The fix", subtitle: "add slack, not speed", y: 410}
+  - from: two+0.2s
+    to: takeaway
+    fade_out: 0.3s
+    lines:
+      - {text: "Two servers: it *drains*", style: sans, weight: 700, size: 46, y: 36, at: two+0.3s, in: {type: pop, by: word}, emphasis: {color: "#4dd6ff", scale: 1.1}}
+  # ---- Takeaway ----
+  - from: takeaway+0.3s
+    to: end
+    fade_out: 0.8s
+    lines:
+      - {text: "Rule of thumb", style: caps, size: 26, y: 200, at: takeaway+0.4s}
+      - text: "Keep busy under *80%*"
+        style: sans
+        font: montserrat-black
+        size: 66
+        y: 240
+        at: takeaway+0.8s
+        in: {type: scale-in, by: word, stagger: 0.12s}
+        emphasis: {color: "#ffb84d", scale: 1.2, shake: 10}
+        idle: float
+audio:
+  track: music/song.wav
+  fade_out: 1s
+  clips:
+    - {src: "synth:whoosh", at: [wait, fix], offset: -0.15s, gain: -16dB}
+    - {src: "synth:tick", at: [load+0.3s, zone+0.3s, two+0.3s], gain: -18dB}
+check:
+  pacing: {max_shot: 8s, min_per10s: 1, hook_text_by: 0.5s}
