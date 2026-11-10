@@ -1,0 +1,106 @@
+# 16:9 travel/day-in-the-life vlog montage, 60 s, 100 BPM (1 beat = 0.6 s, 100 beats), three chapters.
+# Integration recipe for beat-cut clips, speed ramps, linked clip audio with L cuts into music, chapter titles,
+# per-shot grades in linear light and a film look.
+#   Ch1 Morning      0b-32b   opening shot plays its own sound, L cut into the music; 2b/4b cuts, one ramp
+#   Ch2 The Road     32b-64b  dip in, linked shot + L cut, faster 2b cuts, a 1→3.5→0.5 speed ramp, a whip
+#   Ch3 Golden Hour  64b-100b music breakdown under a linked shot, ramps, slow-motion close, fade to black
+# Demo assets (no private footage): montaj new <project> --recipe vlog-montage. Slots and retargeting: vlog-montage.md.
+video:
+  size: 1920x1080
+  fps: 30
+  bpm: 100
+  look: warm-film
+  color: {working: linear}
+  outro: {type: fade, dur: 1s}
+assets: assets
+markers: {ch1: 0b, ch2: 32b, ch3: 64b, sign_off: 96b, end: 100b}
+grades:
+  dawn: {exposure: 0.15, temp: 900, tint: 6, contrast: 0.95, lift: 0.04, saturation: 0.9}
+  day: {temp: 200, contrast: 1.12, saturation: 1.1, vibrance: 0.15}
+  road: {exposure: -0.1, temp: -700, contrast: 1.18, lift: [0.0, 0.02, 0.04], saturation: 0.95}
+  golden: {exposure: 0.1, temp: 1600, contrast: 1.08, gain: [1.06, 1.0, 0.9], saturation: 1.15}
+  dusk: {exposure: -0.3, temp: 600, tint: 10, contrast: 1.15, curves: {luma: [[0, 0.03], [0.5, 0.48], [1, 0.97]]}}
+shots:
+  # ---- Ch1 Morning (0b-32b) ----
+  # Opening: the clip's own sound, no music under it; its last 2 beats carry over shot 1 (L cut into the music).
+  - {clip: c1, hold: 8b, grade: dawn, audio: true, id: scene, audio_tail: 2b, in: {type: fade, dur: 12f}}
+  - {clip: c2, clip_in: 1s, hold: 4b, grade: day}
+  - {clip: c3, clip_in: 2s, hold: 2b, grade: day}
+  - clip: c4
+    hold: 2b
+    grade: day
+    speed: [{t: 0f, v: 1}, {t: 1b, v: 3, ease: cubic}, {t: 2b, v: 1, ease: cubic}]
+  - {clip: c5, hold: 4b, grade: day}
+  - {clip: c1, clip_in: 4s, hold: 4b, grade: dawn}
+  - {clip: c2, clip_in: 5s, hold: 4b, grade: day, speed: 0.5}
+  - {clip: c3, clip_in: 6s, hold: 4b, grade: day}
+  # ---- Ch2 The Road (32b-64b) ----
+  - {clip: c6, hold: 6b, grade: road, audio: true, id: scene, gain: -2dB, audio_tail: 2b, in: {type: dip, dur: 9f}}
+  - {clip: c7, hold: 2b, grade: road}
+  - clip: c4
+    clip_in: 1s
+    hold: 4b
+    grade: road
+    speed: [{t: 0f, v: 1}, {t: 1.5b, v: 3.5, ease: cubic}, {t: 4b, v: 0.5, ease: outc}]
+  - {clip: c5, clip_in: 5s, hold: 2b, grade: road}
+  - {clip: c8, hold: 2b, grade: road}
+  - {clip: c2, clip_in: 2s, hold: 2b, grade: road, in: {type: whip, dur: 8f}}
+  - {clip: c6, clip_in: 4s, hold: 4b, grade: road}
+  - {clip: c7, clip_in: 3s, hold: 4b, grade: road}
+  - {clip: c3, hold: 2b, grade: road}
+  - {clip: c1, clip_in: 6s, hold: 4b, grade: road}
+  # ---- Ch3 Golden Hour (64b-100b) ----
+  - {clip: c8, hold: 8b, grade: golden, audio: true, id: scene, audio_tail: 2b, in: {type: fade, dur: 12f}}
+  - {clip: c6, clip_in: 6s, hold: 4b, grade: golden}
+  - clip: c4
+    clip_in: 5s
+    hold: 2b
+    grade: golden
+    speed: [{t: 0f, v: 0.6}, {t: 2b, v: 2.5, ease: inc}]
+  - {clip: c5, hold: 2b, grade: golden}
+  - {clip: c7, clip_in: 6s, hold: 2b, grade: dusk}
+  - {clip: c2, clip_in: 7s, hold: 4b, grade: golden}
+  - clip: c3
+    clip_in: 3s
+    hold: 4b
+    grade: golden
+    speed: [{t: 0f, v: 2}, {t: 2b, v: 0.4, ease: outc}]
+  - {clip: c1, hold: 2b, grade: dusk}
+  - {clip: c8, clip_in: 5s, hold: 8b, grade: dusk, speed: 0.5, in: {type: fade, dur: 9f}}
+fx:
+  - {leak: 0.5, at: ch2, dir: 1}
+  - {leak: 0.6, at: ch3, dir: -1}
+text:
+  # Chapter titles: a small caps kicker and a serif title, centred on the 607-px-tall design frame.
+  - from: 0.3s
+    to: 4.2s
+    fade_in: 0.3s
+    lines:
+      - {text: Chapter one, style: caps, size: 26, y: 230, at: 0.4s}
+      - {text: Morning, style: serif, italic: true, size: 110, y: 262, at: 0.7s}
+  - from: ch2+0.2s
+    to: ch2+3.4s
+    fade_in: 0.3s
+    lines:
+      - {text: Chapter two, style: caps, size: 26, y: 230, at: ch2+0.3s}
+      - {text: The Road, style: serif, italic: true, size: 110, y: 262, at: ch2+0.6s}
+  - from: ch3+0.3s
+    to: ch3+4.2s
+    fade_in: 0.3s
+    lines:
+      - {text: Chapter three, style: caps, size: 26, y: 230, at: ch3+0.4s}
+      - {text: Golden Hour, style: serif, italic: true, size: 110, y: 262, at: ch3+0.7s}
+  - from: sign_off
+    to: end
+    fade_in: 0.4s
+    fade_out: 0.6s
+    lines:
+      - {text: See you on the next one, style: serif, italic: true, size: 64, y: 270, at: sign_off+0.2s}
+audio:
+  track: music/song.wav
+  fade_out: 1s
+  clips:
+    - {src: "synth:whoosh", at: 48b, offset: -0.12s, gain: -16dB}
+  duck: {under: [scene], depth: -12dB, attack: 80ms, release: 400ms}
+check:
+  pacing: {max_shot: 5s, min_per10s: 3, hook_text_by: 1s}
