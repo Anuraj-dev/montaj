@@ -200,3 +200,21 @@ Merged in order: #17, #19, #15, #9, #2, #14, #11, #13, #12, #18, #7, #3, #5 shap
   `NameError` in `render/frame.py`) after merge. Sol's reviews on the #5 waveform led to removing its windowed decode
   and fixing a fade start that was off by one sample.
 - **Process gap:** a batch this size needs one results file per dispatch, kept outside `/tmp`, so this table can be filled.
+
+## Fresh-agent benchmark #47 (M11, 2026-11-10)
+Skill v4, Opus 5.5, interactive session (one brief round), `make-video` skill from the repo: a 20 s 16:9 MrBeast-style
+launch short for Auren from 5 screen recordings, SFX and a mascot PNG sequence; music = ACE-Step take + a composed
+layer. Measured with `tools/token-report.py`; wall from the first prompt to `OK check` on the final render.
+
+| Run | Skill rev | Model | Wall | Turns | Start ctx | Images | Input-eq | Spec lines | Human score | Result |
+|---|---|---|---|---|---|---|---|---|---|---|
+| 47 | v4 | Opus 5.5 | ~30m | 61 | 58k* | 3 | 1.09M | 270 | 2/5 | `OK check` on 1080p final; 20 cuts on grid, 36 SFX, slam text, mascot + logo payoff, black end |
+
+*Not a clean fresh start: the session carried a continuation summary (protocol is 25–28k); that baseline alone is
+~0.31M. Input-eq includes ~0.1M of post-`OK check` bookkeeping.
+
+- **Targets (ROADMAP):** input-eq ≤ 0.3M ❌ (3.6×), spec ≤ 60 lines ❌, images ≤ 4 ✅, human score ≥ 4 ❌ (2: did not
+  meet expectations). Not the target shape either: a launch short with slam titles, not a captioned 30 s talking short.
+- **Known defect in the final:** "SENTENCE." still covers "ONE" for ~0.15 s at 9.05 s; `inspect --problems` reported 0 (#56).
+- **Follow-ups filed:** #56–#65 (overlap check, caption-rate attribution, black card, image-sequence layer, inherited
+  emphasis, skill link, token cost, luma-jump scenes, mix-peak detail, quiet output). #47 stays open.
