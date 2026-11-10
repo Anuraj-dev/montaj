@@ -27,6 +27,7 @@ class Composition:
     channels: int
     peak_dbfs: float
     lufs: float
+    scaled_db: float = 0.0  # gain applied to fit `headroom_db` (<= 0)
 
 
 def compose(
@@ -36,8 +37,13 @@ def compose(
     root: Path | str,
     timeout: float = 600.0,
     log: Path | str | None = None,
+    headroom_db: float | None = None,
 ) -> Composition:
-    """Run ``script`` with Montaj's interpreter, then inspect its audio with ffmpeg."""
+    """Run ``script`` with Montaj's interpreter, then inspect its audio with ffmpeg.
+
+    With ``headroom_db``, a bed peaking above it is turned down to it (one clean gain, same format), so
+    voice and SFX placed on top have room before the mixer's ceiling.
+    """
     if timeout <= 0:
         raise ComposeError(f"timeout must be positive, got {timeout:g} (see build/music.log)")
     root_path = Path(root).expanduser().resolve()
@@ -91,12 +97,17 @@ def compose(
             peak = _peak_dbfs(out_path, log_path)
             if peak < -60.0:
                 raise ComposeError(f"output WAV is silent (peak {format_db(peak)} dBFS) (see build/music.log)")
+            scaled = 0.0
+            if headroom_db is not None and peak > headroom_db:
+                scaled = headroom_db - peak
+                _apply_gain(out_path, scaled, log_path)
+                peak = _peak_dbfs(out_path, log_path)
             measured_lufs = loudness(out_path, log=log_path)
         except EncodeError as exc:
             raise ComposeError(f"output WAV unreadable: {_last_line(str(exc))} (see build/music.log)") from None
         if measured_lufs is None:
             raise ComposeError(f"output WAV has no measurable loudness (see build/music.log)")
-        result = Composition(out_path, duration, sample_rate, channels, peak, measured_lufs)
+        result = Composition(out_path, duration, sample_rate, channels, peak, measured_lufs, scaled)
     except Exception:
         _restore_old_output(out_path, backup)
         raise
@@ -158,6 +169,24 @@ def _probe_audio(path: Path, log: Path) -> tuple[float, int, int]:
     if duration <= 0 or sample_rate <= 0 or channels <= 0:
         raise EncodeError("ffprobe returned incomplete audio metadata")
     return duration, sample_rate, channels
+
+
+def _apply_gain(path: Path, gain_db: float, log: Path) -> None:
+    """Scale ``path`` by ``gain_db`` in place, keeping its sample format."""
+    cmd = [FFPROBE, "-v", "error", "-select_streams", "a:0", "-show_entries", "stream=codec_name",
+           "-of", "csv=p=0", str(path)]
+    proc = subprocess.run(cmd, capture_output=True, text=True, check=False)
+    append_log(log, cmd, proc.stdout, proc.stderr)
+    codec = proc.stdout.strip() or "pcm_f32le"
+    tmp = path.with_name(f".{path.name}.gain.wav")
+    cmd = [FFMPEG, "-hide_banner", "-loglevel", "error", "-y", "-i", str(path), "-vn", "-af",
+           f"volume={gain_db:.4f}dB", "-c:a", codec, str(tmp)]
+    proc = subprocess.run(cmd, capture_output=True, text=True, check=False)
+    append_log(log, cmd, proc.stdout, proc.stderr)
+    if proc.returncode != 0:
+        tmp.unlink(missing_ok=True)
+        raise EncodeError(f"ffmpeg gain failed ({proc.returncode})", _last_line(proc.stderr))
+    os.replace(tmp, path)
 
 
 def _number(value: object) -> float:

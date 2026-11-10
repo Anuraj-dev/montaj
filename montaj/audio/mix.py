@@ -127,6 +127,9 @@ class MixStats:
     clips: int  # placements mixed in
     duck_db: float  # deepest reduction applied to the music (<= 0)
     hash: str = ""
+    peak_s: float | None = None  # film time of the peak; None in stats written before #64
+    peak_parts: tuple = ()  # ((label, dBFS), …) what each source adds at the peak sample, loudest first
+    fix: tuple = ()  # when clipped: (label, dB) — lowering that source by dB keeps the whole mix under the ceiling
 
 
 def _span_s(raw: object, fps: int, bpm: float | None, path: str, errors: list[str],
@@ -995,16 +998,84 @@ def _mix_parts(plan: MixPlan, cache: dict, log: Path | None) -> tuple[np.ndarray
     return bed, placed, duck_db
 
 
+def _label(c: Placed | Linked) -> str:
+    """How a check line names a placement: its id, else its file stem (`synth:hit` as is)."""
+    return c.id or (c.src if c.src.startswith("synth:") else Path(c.src).stem)
+
+
+def _db_of(v: float) -> float:
+    return 20 * math.log10(abs(v)) if v else -120.0
+
+
+def _max_scale(other: np.ndarray, part: np.ndarray) -> float | None:
+    """Largest factor `g` in (0, 1] with `|other + g*part| <= PEAK_CEILING` on every sample, else None.
+
+    Each sample bounds `g` to an interval holding 0 (once `other` alone fits), so the bounds intersect
+    to `[0, H]` and any cut of at least `-20 log10 H` dB clears the whole mix, not just the peak.
+    """
+    if not len(other) or float(np.max(np.abs(other))) > PEAK_CEILING:
+        return None
+    nz = part != 0
+    o, p = other[nz].astype(np.float64), part[nz].astype(np.float64)
+    if not len(p):
+        return None
+    h = float(np.min(np.where(p > 0, (PEAK_CEILING - o) / p, (-PEAK_CEILING - o) / p)))
+    return min(1.0, h) if h > 0 else None
+
+
+def _peak_fix(full: np.ndarray, placed: list, plan: MixPlan, order: list[str]) -> tuple:
+    """`(label, dB)`: the smallest single-source cut that keeps `full` under the ceiling everywhere.
+
+    Candidates are the sources pushing the peak (`order`) and the music, minus duck sources (a quieter
+    voice moves the duck); the smallest cut wins. None clears it alone: every source by the overshoot.
+    """
+    ducked = set(plan.duck.under) if plan.duck is not None else set()
+    best: tuple = ()
+    for label in [n for n in order if n != "music" and n not in ducked] + ["music"]:
+        part = np.zeros_like(full)
+        for c, s, x in placed:
+            if label == "music" or _label(c) == label:
+                part[s : s + len(x)] += x
+        if label == "music":
+            part = full - part  # the bed: everything that is not a placement
+        h = _max_scale(full - part, part)
+        if h is None:
+            continue
+        cut = math.ceil((-20 * math.log10(h) + 0.005) * 10) / 10  # round up so the printed cut clears it
+        if not best or cut < best[1]:
+            best = (label, cut)
+    if not best:
+        peak = float(np.max(np.abs(full)))
+        best = ("all", math.ceil((20 * math.log10(peak / PEAK_CEILING) + 0.005) * 10) / 10)
+    return best
+
+
 def mix_audio(plan: MixPlan, *, log: Path | None = None) -> tuple[np.ndarray, MixStats]:
     bed, placed, duck_db = _mix_parts(plan, {}, log)
     for _, s, x in placed:
         bed[s : s + len(x)] += x
     peak = float(np.max(np.abs(bed))) if len(bed) else 0.0
     clipped = peak > PEAK_CEILING
-    if clipped:
-        bed *= np.float32(PEAK_CEILING / peak)
+    peak_s: float | None = None
+    parts: list[tuple[str, float]] = []
+    fix: tuple = ()
+    if peak > 0:
+        i, ch = divmod(int(np.argmax(np.abs(bed))), bed.shape[1])
+        peak_s = i / SR
+        at: dict[str, float] = {}
+        for c, s, x in placed:
+            if s <= i < s + len(x):
+                at[_label(c)] = at.get(_label(c), 0.0) + float(x[i - s, ch])
+        at = {"music": float(bed[i, ch]) - sum(at.values()), **at}
+        parts = sorted(((n, v) for n, v in at.items() if abs(v) > 1e-3), key=lambda nv: -abs(nv[1]))
+        if clipped:
+            sign = math.copysign(1.0, float(bed[i, ch]))
+            fix = _peak_fix(bed, placed, plan, [n for n, v in parts if v * sign > 0])
+        if clipped:
+            bed *= np.float32(PEAK_CEILING / peak)
     peak_db = 20 * math.log10(peak) if peak > 0 else -120.0
-    return bed, MixStats(len(bed) / SR, peak_db, clipped, len(placed), duck_db)
+    return bed, MixStats(len(bed) / SR, peak_db, clipped, len(placed), duck_db, "", peak_s,
+                         tuple((n, round(_db_of(v), 2)) for n, v in parts), fix)
 
 
 def source_window(plan: MixPlan, source: str, s0: int, s1: int, *, cache: dict | None = None) -> np.ndarray:
@@ -1069,8 +1140,10 @@ def render_mix(plan: MixPlan, build_dir: Path, *, log: Path | None = None) -> tu
     digest = plan_hash(plan)
     wav = build_dir / "audio" / f"{digest}.wav"
     meta = wav.with_suffix(".json")
-    if wav.is_file() and meta.is_file():
-        stats = MixStats(**json.loads(meta.read_text()))
+    cached = json.loads(meta.read_text()) if wav.is_file() and meta.is_file() else {}
+    if "peak_s" in cached:  # stats from before #64 lack the peak detail: mix again (same samples)
+        parts = tuple(map(tuple, cached["peak_parts"]))
+        stats = MixStats(**{**cached, "peak_parts": parts, "fix": tuple(cached["fix"])})
     else:
         audio, stats = mix_audio(plan, log=log)
         stats = MixStats(**{**asdict(stats), "hash": digest})
@@ -1087,7 +1160,21 @@ def check_lines(stats: dict) -> list[str]:
         parts.append(f"duck {stats['duck_db']:.1f} dB")
     lines = [f"OK audio-mix {', '.join(parts)}, peak {stats['peak_dbfs']:+.1f} dBFS"]
     if stats["clipped"]:
-        lines.append(f"WARN clip clipped (mix peak {stats['peak_dbfs']:+.1f} dBFS, scaled to -0.2 dBFS)")
+        # INFO, not WARN: the ceiling scale is one clean gain on the whole mix (no distortion) and
+        # loudnorm at mux sets the level anyway. The line says where the stack is and how to avoid it.
+        scale = 20 * math.log10(PEAK_CEILING) - stats["peak_dbfs"]
+        line = f"INFO clip mix peak {stats['peak_dbfs']:+.1f} dBFS"
+        if stats.get("peak_s") is not None:
+            srcs = [f"{n} {v:+.1f}" for n, v in stats.get("peak_parts", ())]
+            more = f", +{len(srcs) - 4} more" if len(srcs) > 4 else ""
+            line += f" at {stats['peak_s']:.2f}s = {', '.join(srcs[:4])}{more}"
+        line += f"; whole mix scaled {scale:.1f} dB, clean"
+        fix = stats.get("fix") or ()
+        if fix:
+            who = "music and every clip" if fix[0] == "all" else "the music bed" if fix[0] == "music" \
+                else f"{fix[0]} gain"
+            line += f" (to skip the scale lower {who} by {fix[1]:.1f} dB)"
+        lines.append(line)
     return lines
 
 

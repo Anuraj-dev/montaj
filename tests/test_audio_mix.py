@@ -166,7 +166,7 @@ def test_clip_past_the_music_extends_and_hot_mix_is_scaled(tmp_path: Path) -> No
     audio, stats = mix.mix_audio(plan)
     assert len(audio) == round(1.0 * SR) and stats.clipped and stats.peak_dbfs > 0
     assert np.max(np.abs(audio)) <= mix.PEAK_CEILING + 1e-6
-    assert any(line.startswith("WARN clip clipped") for line in mix.check_lines(stats.__dict__))
+    assert any(line.startswith("INFO clip mix peak") for line in mix.check_lines(stats.__dict__))
 
 
 def test_synth_is_deterministic_and_all_names_exist() -> None:

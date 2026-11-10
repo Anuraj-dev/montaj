@@ -1180,7 +1180,34 @@ def _cmd_cut(ns: argparse.Namespace, root: Path) -> list[str]:
             f"silence>{silence:g}s removed  fillers={plan['fillers']}"]
 
 
+BED_HEADROOM_DB = -6.0  # a composed bed's peak when the spec puts voice or SFX on top (#64)
+
+
+def _spec_has_clips(root: Path) -> bool:
+    """`montaj.yaml` in `root` places sound over the music: clips, linked clip audio, emphasis or `sfx: auto`.
+
+    Raw YAML, not `load_spec`: the spec usually names the track this command is about to write, so it
+    would not validate yet.
+    """
+    try:
+        raw = yaml.safe_load((root / "montaj.yaml").read_text())
+    except (OSError, yaml.YAMLError):
+        return False
+    if not isinstance(raw, dict):
+        return False
+    audio = raw.get("audio") if isinstance(raw.get("audio"), dict) else {}
+
+    def linked(node: object) -> bool:  # any shot, layer or component with `audio: true`
+        if isinstance(node, dict):
+            return node.get("audio") is True or any(linked(v) for v in node.values())
+        return isinstance(node, list) and any(linked(v) for v in node)
+
+    return bool(raw.get("emphasis") or audio.get("clips") or audio.get("sfx")
+                or linked(raw.get("shots")) or linked(raw.get("components")))
+
+
 def _cmd_music_compose(ns: argparse.Namespace, root: Path) -> list[str]:
+    headroom = BED_HEADROOM_DB if _spec_has_clips(root) else None
     try:
         result = compose_audio.compose(
             _at(root, ns.script),
@@ -1188,6 +1215,7 @@ def _cmd_music_compose(ns: argparse.Namespace, root: Path) -> list[str]:
             root=root,
             timeout=ns.timeout,
             log=root / "build" / "music.log",
+            headroom_db=headroom,
         )
     except compose_audio.ComposeError as exc:
         return [f"ERR music compose: {exc}"]
@@ -1197,6 +1225,7 @@ def _cmd_music_compose(ns: argparse.Namespace, root: Path) -> list[str]:
     lines.append(
         f"OK {_rel(root, result.path)} {result.duration:.2f}s {result.sample_rate}Hz {result.channels}ch "
         f"peak {compose_audio.format_db(result.peak_dbfs)}dBFS {result.lufs:.1f}LUFS"
+        + (f" (scaled {result.scaled_db:.1f} dB: headroom for the spec's voice/SFX)" if result.scaled_db < 0 else "")
     )
     return lines
 
