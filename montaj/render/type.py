@@ -11,7 +11,7 @@ Blur radii follow CSS: σ = radius / 2.
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from types import MappingProxyType
 
@@ -54,6 +54,7 @@ class TextStyle:
     stroke_color: tuple[float, float, float] = (0.0, 0.0, 0.0)
     shadows: tuple[Shadow, ...] = ()
     glow: tuple[Shadow, ...] = ()
+    emphasis_fill: tuple[float, float, float] | None = None  # glyphs with `emph` > 0; None = `fill`
 
 
 @dataclass(frozen=True)
@@ -95,6 +96,32 @@ def css_style(style: str, color: str | None = None, shadow: bool = True) -> Text
     return TextStyle(
         fill=rgb(color or _CSS_FILL.get(style, "cream")),
         shadows=CSS_SHADOWS.get(style, ()) if shadow else (),
+    )
+
+
+# `glow: g` is one unshifted halo in the fill colour: blur radius GLOW_BLUR × size, opacity g.
+GLOW_BLUR = 0.25
+
+
+def line_style(ln) -> TextStyle:
+    """A resolved gpu line's paint (timeline.ResolvedLine): the style's text.css look, then the
+    line's own colour, stroke, shadow, glow and emphasis colour on top."""
+    base = css_style(ln.style, ln.color, bool(ln.shadow))
+    shadows = base.shadows
+    sh = ln.shadow
+    if not isinstance(sh, bool):  # spec.TextShadow
+        shadows = (Shadow(float(sh.x), float(sh.y), float(sh.blur), rgb(sh.color), float(sh.opacity)),)
+    stroke = getattr(ln, "stroke", None)
+    glow = getattr(ln, "glow", None)
+    emph = getattr(ln, "emphasis", None)
+    size = ln.glyphs.size if ln.glyphs is not None else 0.0
+    return TextStyle(
+        fill=base.fill,
+        stroke_width=float(stroke.width) if stroke is not None else 0.0,
+        stroke_color=rgb(stroke.color) if stroke is not None else (0.0, 0.0, 0.0),
+        shadows=shadows,
+        glow=(Shadow(0.0, 0.0, GLOW_BLUR * size, base.fill, float(glow)),) if glow else (),
+        emphasis_fill=rgb(emph.color) if emph is not None else None,
     )
 
 
@@ -163,12 +190,18 @@ def _over(top: torch.Tensor, below: torch.Tensor) -> torch.Tensor:
     return top + below * (1 - top[3:4])
 
 
-def _corners(box, cx, cy, s, rot, tx, ty):
+def _corners(box, cx, cy, s, rot, tx, ty, line=None):
+    """Device-px corners of `box` after the glyph pose, then the line rotation `line` = (px, py, rad)."""
     x0, y0, x1, y1 = box
     c, sn = math.cos(rot), math.sin(rot)
     for x, y in ((x0, y0), (x1, y0), (x0, y1), (x1, y1)):
         u, v = (x - cx) * s, (y - cy) * s
-        yield cx + tx + u * c - v * sn, cy + ty + u * sn + v * c
+        qx, qy = cx + tx + u * c - v * sn, cy + ty + u * sn + v * c
+        if line is not None:
+            px, py, lr = line
+            lc, ls = math.cos(lr), math.sin(lr)
+            qx, qy = px + (qx - px) * lc - (qy - py) * ls, py + (qx - px) * ls + (qy - py) * lc
+        yield qx, qy
 
 
 def draw_run_crop(cv, run: G.GlyphRun, style: TextStyle, per_glyph_xform=None, *,
@@ -183,13 +216,20 @@ def draw_run_crop(cv, run: G.GlyphRun, style: TextStyle, per_glyph_xform=None, *
     xs = list(per_glyph_xform) if per_glyph_xform is not None else [None] * len(run.glyphs)
     if len(xs) != len(run.glyphs):
         raise ValueError(f"{len(xs)} xforms for {len(run.glyphs)} glyphs")
-    ppem = run.size * k  # device px per em
     sw = max(0.0, float(style.stroke_width)) * k
+    # The whole line turns about its box centre after every per-glyph pose (so a rise is along the
+    # line's own up). None when unrotated: the sampling below then skips the extra mapping.
+    line_rot = None
+    if abs(run.rotate) > 1e-9:
+        pvx, pvy = run.pivot
+        line_rot = (pvx * k, pvy * k, math.radians(run.rotate))
 
     # Visible glyphs with their cells and device-space boxes, grouped by xform.
     groups: dict[GlyphXform, list] = {}
     for g, x in zip(run.glyphs, xs):
         x = x or IDENTITY
+        if g.emph and style.emphasis_fill is not None and x.fill is None:
+            x = replace(x, fill=style.emphasis_fill)
         if x.opacity <= 1e-4 or x.scale <= 1e-6:
             continue
         ref = run.fonts[g.font]
@@ -197,7 +237,7 @@ def draw_run_crop(cv, run: G.GlyphRun, style: TextStyle, per_glyph_xform=None, *
         if cell is None:
             continue
         sdf, ox, oy = cell
-        s = ppem / G.SDF_EM  # device px per cell px
+        s = run.size * g.scale * k / G.SDF_EM  # device px per cell px
         gx, gy = g.x * k, g.y * k
         cbox = (gx + ox * s, gy + oy * s, gx + (ox + sdf.shape[-1]) * s, gy + (oy + sdf.shape[-2]) * s)
         ink = g.ink if g.ink[2] > g.ink[0] else (g.x, g.y, g.x, g.y)
@@ -213,7 +253,7 @@ def draw_run_crop(cv, run: G.GlyphRun, style: TextStyle, per_glyph_xform=None, *
     gboxes = {}
     for x, items in groups.items():
         rot = math.radians(x.rotate)
-        pts = [p for it in items for p in _corners(it[6], it[7], it[8], x.scale, rot, x.dx * k, x.dy * k)]
+        pts = [p for it in items for p in _corners(it[6], it[7], it[8], x.scale, rot, x.dx * k, x.dy * k, line_rot)]
         m = sw * x.scale + 3 * (x.blur / 2) * k + 2
         gboxes[x] = grow((min(p[0] for p in pts), min(p[1] for p in pts),
                           max(p[0] for p in pts), max(p[1] for p in pts)), m)
@@ -246,6 +286,11 @@ def draw_run_crop(cv, run: G.GlyphRun, style: TextStyle, per_glyph_xform=None, *
         py = torch.arange(by0, by1, device=dev, dtype=dt) + 0.5
         px = torch.arange(bx0, bx1, device=dev, dtype=dt) + 0.5
         yy, xx = torch.meshgrid(py, px, indexing="ij")
+        if line_rot is not None:  # undo the line rotation first: screen px -> the line's own frame
+            lpx, lpy, lr = line_rot
+            lc, ls = math.cos(lr), math.sin(lr)
+            ex, ey = xx - lpx, yy - lpy
+            xx, yy = lpx + ex * lc + ey * ls, lpy - ex * ls + ey * lc
         for sdf, s, gx, gy, ox, oy, _cbox, cx, cy in items:
             # Inverse pose: screen px -> untransformed device px -> cell px.
             u, v = xx - cx - x.dx * k, yy - cy - x.dy * k

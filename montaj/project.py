@@ -122,7 +122,12 @@ def _lookup_sha(asset_sha: dict[str, str], stem: str, kind: str) -> str:
 
 # Faces and licence files added after the first release, by the style that needs them. They are
 # left out of the base digest so films that use none of them keep their cached segments.
-_EXT_FONT_STYLE = {"inter-latin-600": "sans", "inter-latin-700": "sans", "jetbrains-mono-": "mono"}
+# Display faces for `font:` map to "": only the gpu engine draws them, and their bytes reach the hash
+# through the line's glyph run (FontRef.sha), never through the Chromium digest.
+_EXT_FONT_STYLE = {
+    "inter-latin-600": "sans", "inter-latin-700": "sans", "jetbrains-mono-": "mono",
+    **{p: "" for p in ("montserrat-", "anton-", "bebas-neue-", "poppins-", "bangers-", "archivo-black-", "mukta-")},
+}
 
 
 def _ext_font_style(name: str) -> str | None:
@@ -210,6 +215,20 @@ def _overlay_payload(ov) -> dict:
     return raw
 
 
+def _run_payload(run) -> dict:
+    """A GlyphRun for the hash. Fields added after #20 are dropped at their defaults so a run that
+    uses none of them hashes as it did before they existed."""
+    raw = asdict(run)
+    if raw.get("rotate") == 0.0:
+        raw.pop("rotate")
+    for g in raw["glyphs"]:
+        if g.get("emph") == 0:
+            g.pop("emph")
+        if g.get("scale") == 1.0:
+            g.pop("scale")
+    return raw
+
+
 def segment_hash(
     tl: Timeline,
     seg: Segment,
@@ -259,7 +278,7 @@ def segment_hash(
         # gpu-engine lines: the materialised layout (glyph ids, positions, font shas, cell params).
         # Only present when a line uses it, so every older film keeps its hash.
         runs = {
-            f"{i}.{j}": asdict(line.glyphs)
+            f"{i}.{j}": _run_payload(line.glyphs)
             for i in sorted(text_ids)
             for j, line in enumerate(tl.texts[i].lines)
             if line.glyphs is not None

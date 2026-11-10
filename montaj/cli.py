@@ -35,7 +35,7 @@ from montaj.sheet import (
     BASE_DIR, MAX_TILES, every_times, motion_sheet, pick_times, sheet, sheets, step_frames, strip_row,
     transition_rows,
 )
-from montaj.spec import INCOMING_TRANS, SpecError, _dur_frames, load_spec
+from montaj.spec import INCOMING_TRANS, SpecError, _dur_frames, load_spec, text_warnings
 from montaj.timeline import Blank, Card, Sequence, Still, Wall, resolve, sequence_index, wall_static_spans
 from montaj.watch import watch
 
@@ -346,7 +346,7 @@ def _cmd_validate(root: Path) -> list[str]:
     tl = resolve(spec, root)
     seconds = tl.n_frames / tl.fps
     n_shots, n_segs = len(tl.shots), len(tl.segments)
-    return [f"OK montaj.yaml {tl.n_frames}f {seconds:.2f}s {n_shots} shots {n_segs} segments"]
+    return [*text_warnings(spec), f"OK montaj.yaml {tl.n_frames}f {seconds:.2f}s {n_shots} shots {n_segs} segments"]
 
 
 def _cmd_render(ns: argparse.Namespace, root: Path) -> list[str]:

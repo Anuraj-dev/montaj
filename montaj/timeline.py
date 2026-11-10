@@ -7,8 +7,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from montaj.render.core import EASE as EASE_FN, key as eval_key
-from montaj.render.glyphs import STYLE_ENGINE, FontBook, GlyphRun, layout_line, plan_text
+from montaj.render.glyphs import FontBook, GlyphRun, layout_line, parse_emphasis, plan_text
 from montaj.spec import (
+    TextEmphasis,
+    TextShadow,
+    TextStroke,
+    line_engine,
     INCOMING_TRANS,
     WALL_PULLBACK_ZOOM,
     WAVEFORM_BARS,
@@ -147,13 +151,17 @@ class ResolvedLine:
     rise: float
     reveal: str
     sweep: tuple[float, float]
-    shadow: bool
+    shadow: bool | TextShadow
     indent: float = 0.0
     align: str = "center"
     box: str = "none"
     box_color: str | None = None
     dot: str | None = None
     cursor: bool = False
+    # gpu-engine paint (#21); layout-side fields (font, case, pos, rotate, emphasis scale) live in `glyphs`.
+    stroke: TextStroke | None = None
+    glow: float | None = None
+    emphasis: TextEmphasis | None = None
     # `engine: gpu` lines only: the HarfBuzz layout, fixed here so the renderer never shapes and the
     # segment hash sees every glyph id, position and font identity (project.segment_hash).
     glyphs: GlyphRun | None = None
@@ -549,8 +557,26 @@ def _visible_span(resolved: list[ResolvedShot], i: int, parsed: dict[str, int]) 
     return (round_frame(v0), round_frame(v1))
 
 
-def _line_engine(line) -> str:
-    return line.engine or STYLE_ENGINE.get(line.style, "chromium")
+def _turn_stack(book: FontBook, line, pieces: list, rotate: float, escale: float, by: str) -> list:
+    """A wrapped, rotated line turns as one block: each piece's centre turns about the centre of the
+    unturned stack, then the piece turns about its own centre there (layout_line's `pos` + `rotate`)."""
+    runs = [
+        layout_line(book, text, style=line.style, y=y, size=size, weight=line.weight, italic=line.italic,
+                    tracking=line.tracking, line_height=line.line_height, align=line.align, indent=line.indent,
+                    by=by, font=line.font, case=line.case, emphasis_scale=escale, pos=pos)
+        for text, size, y, pos, _at in pieces
+    ]
+    x0 = min(r.box[0] for r in runs)
+    x1 = max(r.box[0] + r.box[2] for r in runs)
+    y0 = min(r.box[1] for r in runs)
+    y1 = max(r.box[1] + r.box[3] for r in runs)
+    px, py = (x0 + x1) / 2, (y0 + y1) / 2
+    c, s = math.cos(math.radians(rotate)), math.sin(math.radians(rotate))
+    out = []
+    for (text, size, _y, _pos, at), r in zip(pieces, runs):
+        dx, dy = r.pivot[0] - px, r.pivot[1] - py
+        out.append((text, size, None, (px + dx * c - dy * s, py + dx * s + dy * c), at))
+    return out
 
 
 def _resolve_texts(spec: Spec, times: dict[str, float], fps: int) -> list[ResolvedText]:
@@ -575,30 +601,45 @@ def _resolve_texts(spec: Spec, times: dict[str, float], fps: int) -> list[Resolv
                 sweep = (frm, to)
             by = "char" if typed else line.by
             at = times[f"text[{i}].lines[{j}].at"]
+            gpu = line_engine(line) == "gpu"
+            escale = line.emphasis.scale if line.emphasis is not None else 1.0
+            rotate = float(line.rotate or 0.0)
             # `fit` / `wrap: balance` become a size and one entry per broken line here, so the hash and the
             # renderer see plain sizes, texts and ys. A broken line's reveal continues where the last stopped.
-            pieces = [(line.text, line.size, line.y, at)]
+            # Each entry: (text, size, y, pos, at); every styling field applies to every entry.
+            pieces = [(line.text, line.size, line.y, line.pos, at)]
             if line.fit or line.wrap is not None:
                 book = book or FontBook()
                 plan = plan_text(
                     book, line.text, style=line.style, size=line.size, weight=line.weight, italic=line.italic,
                     tracking=line.tracking, line_height=line.line_height, fit=line.fit,
                     balance=line.wrap == "balance", max_width=line.max_width, max_lines=line.max_lines or 2,
+                    font=line.font, case=line.case, emphasis_scale=escale,
+                    stroke=line.stroke.width if line.stroke is not None else 0.0, rotate=rotate,
                 )
                 size = plan.size if line.fit else line.size
-                pieces, seen = [], 0
+                pieces, seen, n = [], 0, len(plan.lines)
                 for k, piece in enumerate(plan.lines):
-                    pieces.append((piece, size, line.y + k * plan.pitch, at + seen * stagger))
-                    seen += len(piece.split(" ")) if by == "word" else len(piece) + 1
-            for text, size, y, piece_at in pieces:
+                    if line.pos is not None:  # the stack is centred on `pos`
+                        y, pos = None, (line.pos[0], line.pos[1] + (k - (n - 1) / 2) * plan.pitch)
+                    else:
+                        y, pos = line.y + k * plan.pitch, None
+                    pieces.append((piece, size, y, pos, at + seen * stagger))
+                    plain = parse_emphasis(piece)[0] if gpu else piece
+                    seen += len(plain.split(" ")) if by == "word" else len(plain) + 1
+                if gpu and abs(rotate) > 1e-9 and n > 1:
+                    pieces = _turn_stack(book, line, pieces, rotate, escale, by)
+            for text, size, y, pos, piece_at in pieces:
                 run = None
-                if _line_engine(line) == "gpu":
+                if gpu:
                     book = book or FontBook()
                     run = layout_line(
                         book, text, style=line.style, y=y, size=size, weight=line.weight,
                         italic=line.italic, tracking=line.tracking, line_height=line.line_height,
-                        align=line.align, indent=line.indent, by=by,
+                        align=line.align, indent=line.indent, by=by, font=line.font, case=line.case,
+                        emphasis_scale=escale, pos=pos, rotate=rotate,
                     )
+                    y = run.box[1]  # `pos` lines: the laid-out top
                 lines.append(
                     ResolvedLine(
                         text=text,
@@ -626,6 +667,10 @@ def _resolve_texts(spec: Spec, times: dict[str, float], fps: int) -> list[Resolv
                         dot=line.dot,
                         cursor=line.cursor,
                         glyphs=run,
+                        stroke=line.stroke,
+                        glow=line.glow,
+                        # Marked words without an `emphasis:` mapping take its defaults.
+                        emphasis=line.emphasis if line.emphasis is not None or run is None or not run.spans else TextEmphasis(),
                     )
                 )
         out.append(
