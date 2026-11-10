@@ -83,7 +83,18 @@ class Inspector:
         out = describe(self.tl.plan(f), self.tl, self.layout)
         if not self.fast and out["text"]:
             self.add_contrast(f, out["text"])
+        if not self.fast:
+            out["scopes"] = self.scopes_at(f)
         return out
+
+    def scopes_at(self, f: int) -> dict | None:
+        """Scope numbers of the graded picture at `f` (#45); None on a transition or a blank."""
+        from montaj import scopes
+
+        pic = self.renderer.picture(f)
+        if pic is None:
+            return None
+        return scopes.as_dict(scopes.measure([pic], self.tl.plan(f).scene.shot))
 
     def add_contrast(self, f: int, elements: list[dict]) -> None:
         with torch.no_grad():

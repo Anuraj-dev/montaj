@@ -28,7 +28,7 @@ from montaj.encode import CODECS, TARGETS, MediaInfo, VideoSettings, export, pro
 from montaj.analysis import analyze_assets, describe_all
 from montaj.gpu_policy import GpuStrictError, load_policy
 from montaj.ingest import IngestError, ingest, ingest_rec
-from montaj import caption_check, inspector, pacing, taste
+from montaj import caption_check, inspector, pacing, scopes, taste
 from montaj.guards import content_guards
 from montaj.qa import BLACK_PIX_TH, FREEZE_MIN_S, Expect, check, clip_overruns, subtract, union
 from montaj.review.server import serve as serve_review
@@ -187,6 +187,11 @@ def _parser() -> argparse.ArgumentParser:
 
     wd = sub.add_parser("words")
     wd.add_argument("--grep", default=None, metavar="TEXT")
+
+    sc = sub.add_parser("scopes")
+    sc.add_argument("--image", action="store_true")
+    mt = sub.add_parser("match")
+    mt.add_argument("--to", type=int, required=True, metavar="SHOT")
     return p
 
 
@@ -921,12 +926,30 @@ def _cmd_check(ns: argparse.Namespace, root: Path, numbers: dict | None = None) 
                               fps=tl.fps, bpm=tl.spec.video.bpm)
         lines += caption_check.lines(tl, _video(root, ns.video), root / "build" / "captions-check",
                                      log=root / "build" / "qa.log")
+        lines += scopes.check_lines(root, spec)
     errs = sum(line.startswith("ERR") for line in lines)
     warns = sum(line.startswith("WARN") for line in lines)
     if errs:
         lines.append(f"ERR check: {errs} guard(s) unavailable")
     else:
         lines.append(f"WARN check: {warns} warnings" if warns else "OK check")
+    return lines
+
+
+def _cmd_scopes(ns: argparse.Namespace, root: Path, payload: dict | None = None) -> list[str]:
+    stats, sheet = scopes.scopes(root, image=ns.image)
+    if payload is not None:
+        payload["shots"] = [scopes.as_dict(s) for s in stats]
+    lines = [scopes.line(s) for s in stats]
+    tail = f" sheet {sheet}" if sheet is not None else ""
+    lines.append(f"OK scopes {len(stats)} shots{tail}")
+    return lines
+
+
+def _cmd_match(ns: argparse.Namespace, root: Path) -> list[str]:
+    rows, target = scopes.match(root, ns.to)
+    lines = [scopes.match_line(row, target) for row in rows]
+    lines.append(f"OK montaj.yaml: matched {len(rows)} shots to shot {ns.to}")
     return lines
 
 
@@ -1220,6 +1243,10 @@ def _dispatch(ns: argparse.Namespace, root: Path) -> list[str]:
         return _cmd_taste(ns)
     if ns.cmd == "capture":
         return _cmd_capture(ns, root)
+    if ns.cmd == "scopes":
+        return _cmd_scopes(ns, root)
+    if ns.cmd == "match":
+        return _cmd_match(ns, root)
     raise _Usage(f"cli: unknown command {ns.cmd!r}")
 
 
@@ -1251,6 +1278,11 @@ def main(argv: list[str] | None = None) -> int:
             numbers: dict = {}
             lines = _cmd_check(ns, root, numbers)
             print(json.dumps({"status": _status(lines), "lines": lines, "pacing": numbers}, ensure_ascii=False))
+            return 0 if _status(lines) != "ERR" else 1
+        if as_json and ns.cmd == "scopes":
+            shots: dict = {}
+            lines = _cmd_scopes(ns, root, shots)
+            print(json.dumps({"status": _status(lines), "lines": lines, **shots}, ensure_ascii=False))
             return 0 if _status(lines) != "ERR" else 1
         if ns.cmd == "inspect":
             lines = _cmd_inspect(ns, root, as_json)
