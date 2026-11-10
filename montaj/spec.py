@@ -39,6 +39,7 @@ from montaj.events import (
     compile_event_marker,
     format_seconds,
     is_event_marker,
+    is_shown_marker,
     load_events_file,
     match_event,
 )
@@ -76,7 +77,12 @@ _DUR = re.compile(r"^([+-]?(?:\d+(?:\.\d*)?|\.\d+))([fbs])$")
 _BARE = re.compile(r"^[+-]?(?:\d+(?:\.\d*)?|\.\d+)$")
 _WH = re.compile(r"^(\d+)x(\d+)$")
 _NAME = re.compile(r"^[a-z][a-z0-9_]*$")
-_MARKER = re.compile(r"^([a-z][a-z0-9_]*)([+-](?:\d+(?:\.\d*)?|\.\d+)[fbs])?$")
+_NUM = r"(?:\d+(?:\.\d*)?|\.\d+)"
+# A time expression: a marker name or an unsigned duration, then any number of signed offsets.
+_OFFSETS = rf"((?:[+-]{_NUM}[fbs])*)"
+_MARKER = re.compile(rf"^([a-z][a-z0-9_]*){_OFFSETS}$")
+_DUR_BASE = re.compile(rf"^({_NUM}[fbs]){_OFFSETS}$")
+_OFFSET = re.compile(rf"([+-])({_NUM}[fbs])")
 _WORD = re.compile(r"^word:(\d+)$")
 _HEX = re.compile(r"^#[0-9a-fA-F]{6}$")
 
@@ -1134,7 +1140,8 @@ def _parse_time(
     *,
     beat0: float = 0.0,
 ) -> float | None:
-    """Duration from film start, or `<marker>[±duration]`. Returns float frames.
+    """Duration from film start, or `<marker>`, then any number of `±duration` offsets
+    (`ch1+2b-3f`, `8b+0.5s`). Returns float frames.
 
     A plain beat duration (`8b`) is a grid time: beat0 + 8 beats. Offsets (`ch1+2b`)
     are spans and do not add beat0.
@@ -1158,22 +1165,28 @@ def _parse_time(
             return beat0 + frames
         return frames
     m = _MARKER.match(text)
-    if not m:
-        errors.append(_line(path, f"invalid time {text!r}", "use 12s, 360f, 16b or a marker"))
-        return None
-    name, off = m.group(1), m.group(2)
-    if name not in markers:
-        have = ", ".join(sorted(markers)) or "none"
-        errors.append(_line(path, f"unknown marker {name!r}", f"have: {have}"))
-        return None
-    base = markers[name]
-    if not off:
-        return base
-    sign = 1.0 if off[0] == "+" else -1.0
-    extra = _dur_frames(off[1:], fps, bpm, path, errors)
-    if extra is None:
-        return None
-    return base + sign * extra
+    if m:
+        name, off = m.group(1), m.group(2)
+        if name not in markers:
+            have = ", ".join(sorted(markers)) or "none"
+            errors.append(_line(path, f"unknown marker {name!r}", f"have: {have}"))
+            return None
+        base = markers[name]
+    else:
+        m = _DUR_BASE.match(text)
+        if not m:
+            errors.append(_line(path, f"invalid time {text!r}", "use 12s, 360f, 16b or a marker"))
+            return None
+        base = _parse_time(m.group(1), markers, fps, bpm, path, errors, beat0=beat0)
+        off = m.group(2)
+        if base is None:
+            return None
+    for sign, dur in _OFFSET.findall(off):  # spans: a beat offset never adds beat0
+        extra = _dur_frames(dur, fps, bpm, path, errors)
+        if extra is None:
+            return None
+        base += extra if sign == "+" else -extra
+    return base
 
 
 def parse_time(
@@ -1310,9 +1323,9 @@ def _expr_uses_beats(raw: str) -> bool:
     if m:
         return m.group(2) == "b"
     m = _MARKER.match(text)
-    if m and m.group(2):
-        return m.group(2)[-1] == "b"
-    return False
+    if m:
+        return "b" in m.group(2)
+    return bool(_DUR_BASE.match(text)) and "b" in text  # only digits, signs and units here
 
 
 def _time_strings(spec: Spec) -> list[str]:
@@ -2074,8 +2087,13 @@ def resolve_markers(
     markers_json: object | None = None,
     markers_loaded: bool = False,
     events: _Events | None = None,
+    shown: dict[str, float] | None = None,
 ) -> dict[str, float]:
-    """Resolve `markers` to float frames. Acyclic name→name refs are allowed."""
+    """Resolve `markers` to float frames. Acyclic name→name refs are allowed.
+
+    `shown:` markers depend on the shot layout: `validate_spec` resolves them (`_shown_markers`) and passes
+    their frames in `shown`; without it they and the markers built on them stay unresolved.
+    """
     uses_word = [
         (name, expr.strip())
         for name, expr in spec.markers.items()
@@ -2130,6 +2148,10 @@ def resolve_markers(
             else:
                 resolved[name] = word_s[i] * fps
             continue
+        if is_shown_marker(text):  # errors are `_shown_markers`'
+            if shown is not None and name in shown:
+                resolved[name] = shown[name]
+            continue
         if is_event_marker(text):
             compiled = compile_event_marker(text, path, errors)
             if compiled is not None and fps > 0:
@@ -2165,9 +2187,12 @@ def resolve_markers(
                 errors.extend(bag)
                 del pending[name]
 
+    on_shown = _on_shown(spec.markers)
     for name, expr in pending.items():
         m = _MARKER.match(expr)
         ref = m.group(1) if m else None
+        if ref in on_shown:
+            continue  # its shown: root already reported why it did not resolve
         if ref is not None and (ref in pending or ref in spec.markers) and ref not in resolved:
             errors.append(
                 _line(
@@ -2179,6 +2204,81 @@ def resolve_markers(
         else:
             _parse_time(expr, resolved, fps, bpm, f"markers.{name}", errors, beat0=beat0)
     return resolved
+
+
+def _on_shown(markers: dict[str, object]) -> set[str]:
+    """Marker names that are `shown:` or are built on one (`hit+2b`)."""
+    out = {n for n, e in markers.items() if isinstance(e, str) and is_shown_marker(e.strip())}
+    grew = True
+    while grew:
+        grew = False
+        for n, e in markers.items():
+            m = _MARKER.match(e.strip()) if isinstance(e, str) else None
+            if m and m.group(1) in out and n not in out:
+                out.add(n)
+                grew = True
+    return out
+
+
+def _shown_markers(
+    spec: Spec,
+    bounds: list[tuple[int, int] | None],
+    parsed: dict[str, int],
+    times: dict[str, float],
+    events: _Events,
+    errors: list[str],
+) -> dict[str, float]:
+    """`shown:<clip>/…` markers in film frames: the event mapped through the first shot (film order) whose
+    `at_event` picked it and that shows it, i.e. start + (event − clip_in)·fps / speed, before any freeze."""
+    fps = spec.video.fps
+    out: dict[str, float] = {}
+    if fps <= 0:
+        return out
+    for name, expr in spec.markers.items():
+        if not (isinstance(expr, str) and is_shown_marker(expr.strip()) and _NAME.match(name)):
+            continue
+        path = f"markers.{name}"
+        compiled = compile_event_marker(expr.strip(), path, errors)
+        if compiled is None:
+            continue
+        stem, sel = compiled
+        rows = events.get(stem, path)
+        if rows is None:
+            continue
+        if not rows:
+            errors.append(_line(path, f"no events in {stem}", "have: none"))
+            continue
+        found = match_event(rows, sel)
+        t = _event_seconds(found, stem, path, errors)
+        if t is None:
+            continue
+        for i, sh in enumerate(spec.shots):
+            if sh.at_event is None or sh.clip != stem or bounds[i] is None or sh.range is not None:
+                continue
+            scratch: list[str] = []  # the shot's own errors are reported by the shot checks
+            picked = compile_at_event(sh.at_event, f"shots[{i}].at_event", scratch)
+            if picked is None or getattr(match_event(rows, picked), "event", None) is not found.event:
+                continue
+            clip_in = _clip_in_from_event(sh, i, fps, times, events, scratch)
+            if clip_in is None:
+                continue
+            if isinstance(sh.speed, list):
+                errors.append(_line(path, f"shots[{i}] shows it at a keyed speed", "use a constant speed, or event: on the clip clock"))
+                break
+            speed = 1.0 if sh.speed is None else float(sh.speed)
+            if not math.isfinite(speed) or speed <= 0:
+                continue
+            into = (t - float(clip_in[:-1])) * fps / speed  # format_seconds: "<n>s"
+            start, end = bounds[i]
+            freeze = parsed.get(f"shots[{i}].freeze")
+            if into < -1e-9 or into > end - start or (freeze is not None and into > freeze):
+                continue
+            out[name] = start + max(0.0, into)
+            break
+        else:
+            body = expr.strip()[len("shown:"):].split("/", 1)[1]
+            errors.append(_line(path, f"event {body} in {stem} is not shown by any shot", "add a shot whose at_event picks it, or use event: for the clip clock"))
+    return out
 
 
 def _check_color(path: str, color: str | None, errors: list[str]) -> None:
@@ -2675,21 +2775,16 @@ def validate_spec(
         )
 
     events = _Events(_assets_dir(spec, spec_dir), errors)
-    markers = resolve_markers(
-        spec,
-        spec_dir,
-        fps,
-        bpm,
-        errors,
-        beat0=beat0,
-        markers_json=markers_json,
-        markers_loaded=markers_loaded,
-        events=events,
-    )
-    if spec.audio is not None:
-        from montaj.audio.mix import plan_audio
+    on_shown = _on_shown(spec.markers)
 
-        plan_audio(spec, spec_dir, markers, fps, bpm, beat0, errors)
+    def markers_with(shown: dict[str, float] | None, bag: list[str]) -> dict[str, float]:
+        return resolve_markers(
+            spec, spec_dir, fps, bpm, bag, beat0=beat0, markers_json=markers_json,
+            markers_loaded=markers_loaded, events=events, shown=shown,
+        )
+
+    # With `shown:` markers this first pass is for the layout only; the second pass reports.
+    markers = markers_with(None, [] if on_shown else errors)
 
     parsed: dict[str, int] = {}
     times: dict[str, float] = {}
@@ -2701,15 +2796,31 @@ def validate_spec(
             parsed[path] = n
             times[path] = float(n)
     for path, raw in _unrounded_durs(spec):
-        n = _dur_frames(raw, fps, bpm, path, errors)
+        if path.endswith("].pre") and isinstance(raw, str) and raw.strip().startswith("-"):
+            n = _dur_frames(raw.strip()[1:], fps, bpm, path, errors)  # start after the event
+            n = None if n is None else -n
+        else:
+            n = _dur_frames(raw, fps, bpm, path, errors)
         if n is not None:
             times[path] = n
 
     if not spec.shots:
         errors.append(_line("shots", "need at least one shot", "add a shot"))
 
-    bounds, until_times = layout_shots(spec, markers, fps, bpm, beat0, errors)
+    layout_errors: list[str] = []
+    bounds, until_times = layout_shots(spec, markers, fps, bpm, beat0, layout_errors)
+    for line in layout_errors:
+        m = re.match(r"^(shots\[\d+\]\.until): unknown marker '([^']+)'", line)
+        if m and m.group(2) in on_shown:  # a shot's length cannot hang on a shot's clock
+            line = _line(m.group(1), f"{m.group(2)!r} is on a shot's clock", "until needs a time from film start, not shown:")
+        errors.append(line)
     times.update(until_times)
+    if on_shown:
+        markers = markers_with(_shown_markers(spec, bounds, parsed, times, events, errors), errors)
+    if spec.audio is not None:
+        from montaj.audio.mix import plan_audio
+
+        plan_audio(spec, spec_dir, markers, fps, bpm, beat0, errors)
     holds: list[int | None] = []
     for i, span in enumerate(bounds):
         if span is None:
@@ -2795,6 +2906,11 @@ def validate_spec(
                 )
             else:
                 got = _clip_in_from_event(sh, i, fps, times, events, errors)
+                if got is not None and times.get(f"shots[{i}].pre", 0.0) < 0:  # after the event: inside the clip?
+                    info = _probe_clip(spec, spec_dir, sh.clip)
+                    if info is not None and float(got[:-1]) >= info[2]:
+                        errors.append(_line(f"shots[{i}].pre", f"{sh.pre} starts after the clip ends", f"clip is {info[2]:.6g}s, starts at {got}"))
+                        got = None
                 if got is not None:
                     clip_ins[i] = got
         if sh.pre is not None and sh.at_event is None:

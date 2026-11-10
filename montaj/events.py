@@ -173,18 +173,24 @@ def is_event_marker(text: str) -> bool:
     return text.startswith("event:")
 
 
+def is_shown_marker(text: str) -> bool:
+    """`shown:<clip>/…`: the event on the film clock, through the shot whose `at_event` picked it."""
+    return text.startswith("shown:")
+
+
 def compile_event_marker(text: str, path: str, errors: list[str]) -> tuple[str, Selector] | None:
     """`event:<clip>/<field>=<value>[,…][#n]`. `contains:<field>=<text>` or `field~=text` is a substring.
 
     Values are strings (numbers still match a numeric event field); `true`, `false`, `null` are JSON
-    literals and `"true"` in quotes is the string. `#n` defaults to 1.
+    literals and `"true"` in quotes is the string. `#n` defaults to 1. `shown:` takes the same body.
     """
     raw = text.strip()
-    hint = "use event:take/state=speaking#1"
-    if not raw.startswith("event:"):
+    prefix = "shown:" if is_shown_marker(raw) else "event:"
+    hint = f"use {prefix}take/state=speaking#1"
+    if not raw.startswith(prefix):
         errors.append(_line(path, f"invalid event marker {raw!r}", hint))
         return None
-    body = raw[len("event:") :]
+    body = raw[len(prefix) :]
     if "/" not in body:
         errors.append(_line(path, f"invalid event marker {raw!r}", hint))
         return None
@@ -227,7 +233,7 @@ def compile_event_marker(text: str, path: str, errors: list[str]) -> tuple[str, 
             errors.append(_line(path, f"invalid event marker {raw!r}", hint))
             return None
         if key == "nth":
-            errors.append(_line(path, "nth is the #N suffix", "use event:take/state=speaking#2"))
+            errors.append(_line(path, "nth is the #N suffix", f"use {prefix}take/state=speaking#2"))
             return None
         if substring:
             contains.append((key, val))
