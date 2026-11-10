@@ -79,7 +79,8 @@ def _parser() -> argparse.ArgumentParser:
     rec.add_argument("video")
     rec.add_argument("--events", default=None)
 
-    sub.add_parser("validate")
+    val = sub.add_parser("validate")
+    val.add_argument("--expand", action="store_true", help="print the spec with styles, defaults and components expanded")
 
     ren = sub.add_parser("render")
     group = ren.add_mutually_exclusive_group()
@@ -341,7 +342,17 @@ def _cmd_inspect(ns: argparse.Namespace, root: Path, as_json: bool) -> list[str]
     return inspector.lines(payload)
 
 
-def _cmd_validate(root: Path) -> list[str]:
+def _cmd_validate(root: Path, expand: bool = False) -> list[str]:
+    if expand:
+        from montaj.expand import ExpandError, expand_file
+        from montaj.spec import TEXT_STYLES
+
+        try:
+            data = expand_file(root / "montaj.yaml", TEXT_STYLES)
+        except ExpandError as e:
+            raise SpecError(e.lines((root / "montaj.yaml").read_text())) from e
+        body = yaml.safe_dump(data, sort_keys=False, allow_unicode=True).rstrip("\n").split("\n")
+        return [*body, "OK montaj.yaml expanded (not validated; run validate)"]
     spec = load_spec(root / "montaj.yaml")
     tl = resolve(spec, root)
     seconds = tl.n_frames / tl.fps
@@ -886,7 +897,7 @@ def _dispatch(ns: argparse.Namespace, root: Path) -> list[str]:
     if ns.cmd == "ingest-rec":
         return _cmd_ingest_rec(ns, root)
     if ns.cmd == "validate":
-        return _cmd_validate(root)
+        return _cmd_validate(root, ns.expand)
     if ns.cmd == "render":
         return _cmd_render(ns, root)
     if ns.cmd == "sheet":
