@@ -12,7 +12,7 @@ check and review round after that is a `montaj` command that costs no tokens. Ru
 
 ## Budget
 - Look only at Montaj contact sheets (`build/*.jpg`), at most 2 images per iteration. The photos stay on disk.
-- Read `~/Anuraj-dev/montaj/docs/SPEC-REFERENCE.md` (every spec field, one line each) and one recipe. Engine
+- Read `~/Projects/active/montaj/docs/SPEC-REFERENCE.md` (every spec field, one line each) and one recipe. Engine
   source is out of scope: on an engine bug, report the command and its `ERR` line to the user and stop.
 - A 30 s film renders in under a minute (preview ~10–30 s, final ~40 s): run `render` and `check` in the
   foreground. Finals of several minutes and `music gen` take minutes: run them in the background and wait for
@@ -25,7 +25,7 @@ check and review round after that is a `montaj` command that costs no tokens. Ru
    track / a generated song / music you compose). Done when each question has an answer or a default you stated.
 
 2. **Project.** `montaj new <project> --recipe <recipe> --photos <folder>`, then look at
-   `<project>/build/ingest-sheet.jpg` once. Recipes (`~/Anuraj-dev/montaj/recipes/`):
+   `<project>/build/ingest-sheet.jpg` once. Recipes (`~/Projects/active/montaj/recipes/`):
    - `birthday-short` — 28 s photo montage: cuts, fades and swirls on a beat grid, a photo wall, warm-film.
    - `birthday-song-film` — 165 s lyric film: text cards, subtitles, song markers, Ken Burns, golden-film.
    - `tech-launch` — 14 s 16:9 product/app launch on screen recordings: HUD boot, four feature punch-ins, glitch
@@ -45,7 +45,7 @@ check and review round after that is a `montaj` command that costs no tokens. Ru
      to `hi`. The user picks a candidate by ear; analyze it with the same `--lang`.
    - Compose it yourself: write `music/compose.py` (numpy only; it writes a wav to `sys.argv[1]`), run
      `montaj music compose music/compose.py` → `music/song.wav`, and read the `OK` line (length, peak, LUFS)
-     since you can't listen. `~/Anuraj-dev/montaj/recipes/music/compose-example.py` is a starting point: keep
+     since you can't listen. `~/Projects/active/montaj/recipes/music/compose-example.py` is a starting point: keep
      what helps, write your own arrangement. Picture and sound share your tempo: start the first downbeat at
      0 s and set the same `video.bpm`.
    The analyze `OK` line gives `bpm`, `beat0` (first beat) and the first sung word's time. Done when the song

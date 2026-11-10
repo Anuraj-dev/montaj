@@ -29,7 +29,7 @@
     budget, ≤ 2 live readers per clip source): 165 s peak VRAM 4.17 → 3.61 GB, frames identical.
   - `check` no longer flags a morph's eased ends as frozen; `sheet --at 4s` accepts seconds.
 - Composed-music benchmark: Sonnet 5.5 0.27M input-eq / 19 turns / $0.65; Opus 5.5 0.31M / 23 turns / $1.27; both
-  `OK check` with music they wrote. Films in `~/Anuraj-dev/montaj-projects/arshiya/{sonnet,opus}-5.5-composed/`.
+  `OK check` with music they wrote. Films in `~/Projects/media/montaj-projects/arshiya/{sonnet,opus}-5.5-composed/`.
 - Tests (main at `1deaf74`): CPU 641 passed, GPU 48 passed (run GPU serially, 8 GB).
 
 ## Architecture map
@@ -49,7 +49,7 @@
 - Stack: Python 3.12 (uv) + torch 2.9.1 cu128 (RTX 5050, 8 GB) + ffmpeg h264_nvenc + headless Chromium (text)
 - Run: `montaj <cmd>` (or `uv run montaj`) · Test: `uv run pytest -q` (CPU only: `-m "not gpu"`)
 - Machine config: `~/.config/montaj/config.toml` (ACE-Step + whisper pythons); taste: `~/.config/montaj/taste.md`
-- Run outputs live in `~/Anuraj-dev/montaj-projects/` (outside the repo; never commit photos, renders, wavs).
+- Run outputs live in `~/Projects/media/montaj-projects/` (outside the repo; never commit photos, renders, wavs).
 
 ## Key decisions (top 5; full log in decisions.md)
 - Agents write a YAML spec, never engine code; every capability is a spec field. Music may be agent-written Python.
