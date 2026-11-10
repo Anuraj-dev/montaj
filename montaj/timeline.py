@@ -21,6 +21,7 @@ from montaj.spec import (
     INCOMING_TRANS,
     WALL_PULLBACK_ZOOM,
     WAVEFORM_BARS,
+    Layer,
     Shot,
     Spec,
     SpecError,
@@ -115,10 +116,18 @@ class Custom:
 
 
 @dataclass(frozen=True)
+class Layers:
+    """A shot composited from `spec.shots[shot].layers`, back to front. Layer clocks count from `t0`."""
+
+    shot: int
+    t0: int
+
+
+@dataclass(frozen=True)
 class Trans:
     kind: str
-    a: Still | Wall | Clip | Blank | Sequence | Card | Custom | Trans
-    b: Still | Wall | Clip | Blank | Sequence | Card | Custom | Trans
+    a: Still | Wall | Clip | Blank | Sequence | Card | Custom | Layers | Trans
+    b: Still | Wall | Clip | Blank | Sequence | Card | Custom | Layers | Trans
     t0: float
     dur: float
     axis: str = "x"
@@ -134,7 +143,7 @@ class Trans:
     params: str | None = None
 
 
-type Scene = Still | Wall | Clip | Blank | Sequence | Card | Custom | Trans
+type Scene = Still | Wall | Clip | Blank | Sequence | Card | Custom | Layers | Trans
 
 
 def sequence_index(start: int, every: int, n: int, t: float) -> int:
@@ -286,7 +295,7 @@ def _base_scene(
     shot: ResolvedShot,
     span: tuple[int, int] | None = None,
     card_span: tuple[float, float] | None = None,
-) -> Still | Wall | Clip | Blank | Sequence | Card | Custom:
+) -> Still | Wall | Clip | Blank | Sequence | Card | Custom | Layers:
     if shot.kind == "blank":
         return Blank()
     if shot.kind == "custom":
@@ -300,6 +309,8 @@ def _base_scene(
         return Clip(shot=shot.index, t0=shot.start)
     if shot.kind == "sequence":
         return Sequence(shot=shot.index, t0=shot.start)
+    if shot.kind == "layers":
+        return Layers(shot=shot.index, t0=shot.start)
     return Still(shot=shot.index, span=span)
 
 
@@ -484,6 +495,9 @@ def _materialize_transition(sh: Shot) -> Shot:
 
 def _shot_with_frame_keys(sh: Shot, i: int, parsed: dict[str, int]) -> Shot:
     """Camera, speed and freeze times become whole frames, so the renderer and the hash see frames."""
+    if sh.layers is not None:
+        return sh.model_copy(update={"layers": [_layer_with_frames(layer, f"shots[{i}].layers[{k}]", parsed)
+                                                for k, layer in enumerate(sh.layers)]})
     if sh.clip is not None:
         update: dict = {}
         if sh.camera is not None:
@@ -514,6 +528,19 @@ def _shot_with_frame_keys(sh: Shot, i: int, parsed: dict[str, int]) -> Shot:
     return sh
 
 
+def _layer_with_frames(layer: Layer, at: str, parsed: dict[str, int]) -> Layer:
+    """A layer's from/to and in/out durations as whole frames (unset fields stay unset)."""
+    update: dict = {}
+    for name, attr in (("from", "from_"), ("to", "to")):
+        if getattr(layer, attr) is not None:
+            update[attr] = parsed[f"{at}.{name}"]
+    for name, attr in (("in", "in_"), ("out", "out")):
+        anim = getattr(layer, attr)
+        if anim is not None:
+            update[attr] = anim.model_copy(update={"dur": parsed[f"{at}.{name}.dur"]})
+    return layer.model_copy(update=update) if update else layer
+
+
 def _with_picked_clip_in(sh: Shot, clip_in: str | None) -> Shot:
     """Materialise an `at_event` pick as `clip_in`, so the segment hash sees the resolved time."""
     if sh.at_event is None:
@@ -526,6 +553,8 @@ def _shot_kind(sh: Shot) -> str:
         return "blank"
     if sh.card is not None:
         return "card"
+    if sh.layers is not None:
+        return "layers"
     if sh.wall is not None:
         return "wall"
     if sh.clip is not None:

@@ -19,15 +19,17 @@ from types import SimpleNamespace
 
 import torch
 import torch.nn.functional as F
+from PIL import Image
 
 from montaj.clipmap import camera_at, source_index
 from montaj.encode import probe
-from montaj.project import find_photo, resolve_clip
+from montaj.project import find_photo, resolve_clip, shot_clips
 from montaj.render.canvas import Canvas
 from montaj.render.clip import ClipSource, window_key
 from montaj.render.core import Photo, fit_s, sine, still
 from montaj.render.custom import CustomRunner
 from montaj.render.finish import LOOKS, finish, lut_texture
+from montaj.render.layers import LayerState, LayerTexture, composite, layer_state, load_rgba
 from montaj.render.shots import (
     card_frame,
     css_blur,
@@ -65,6 +67,7 @@ from montaj.timeline import (
     Card,
     Clip,
     Custom,
+    Layers,
     Scene,
     Sequence,
     Still,
@@ -93,6 +96,8 @@ _STILL_CAP = 4
 _WALL_CAP = 2
 _CLIP_CAP = 2
 _CAPTION_CAP = 8
+# Layer images (stickers, logos) a segment can composite: a transition's two layer shots, with slack.
+_LAYER_IMAGE_CAP = 8
 # Sub-frame samples for a `text[].motion_blur` block: at least this many, more when video.motion_blur is higher.
 TEXT_BLUR_SAMPLES = 5
 
@@ -109,6 +114,54 @@ class _ClipPlan:
     crop: tuple[int, int, int, int] | None
     src: tuple[int, ...] | None
     box: tuple[int, int, int, int] | None
+
+
+@dataclass(frozen=True)
+class _LayerPlan:
+    """Where one layer draws. `dest` is device px; `src` is texture px (a decoded clip's whole frame).
+
+    `clip` is the decode window for a clip layer, None for an image. `t_start` is the frame the clip's
+    first decoded frame shows at. `full` marks a full-frame cover clip decoded like a plain clip shot.
+    """
+
+    stem: str
+    dest: tuple[float, float, float, float]
+    src: tuple[float, float, float, float]
+    clip: _ClipPlan | None
+    t_start: float
+    full: bool
+
+
+_IDENTITY = LayerState(1.0, 0.0, 1.0)
+
+
+def _cover_crop(sw: float, sh: float, aspect: float, focus) -> tuple[float, float, float, float]:
+    """The largest `aspect` (w/h) window of a sw x sh source, centred on `focus` and kept inside it."""
+    if sw / sh > aspect:
+        cw, ch = sh * aspect, sh
+    else:
+        cw, ch = sw, sw / aspect
+    fx, fy = focus if focus is not None else (sw / 2, sh / 2)
+    x0 = min(max(fx - cw / 2, 0.0), sw - cw)
+    y0 = min(max(fy - ch / 2, 0.0), sh - ch)
+    return x0, y0, x0 + cw, y0 + ch
+
+
+def _place(layer, sw: int, sh: int, W: int, H: int, k: float):
+    """(dest rect device px, source rect source px) for a layer over a sw x sh source."""
+    if layer.box is not None:
+        x0, y0, x1, y1 = (float(v) * k for v in layer.box)
+    elif layer.pos is not None:
+        cx, cy = float(layer.pos[0]) * k, float(layer.pos[1]) * k
+        x0, y0, x1, y1 = cx - sw * k / 2, cy - sh * k / 2, cx + sw * k / 2, cy + sh * k / 2
+        return (x0, y0, x1, y1), (0.0, 0.0, float(sw), float(sh))
+    else:
+        x0, y0, x1, y1 = 0.0, 0.0, float(W), float(H)
+    if layer.fit == "contain":
+        f = min((x1 - x0) / sw, (y1 - y0) / sh)
+        cx, cy, hw, hh = (x0 + x1) / 2, (y0 + y1) / 2, sw * f / 2, sh * f / 2
+        return (cx - hw, cy - hh, cx + hw, cy + hh), (0.0, 0.0, float(sw), float(sh))
+    return (x0, y0, x1, y1), _cover_crop(sw, sh, (x1 - x0) / (y1 - y0), layer.focus)
 
 
 class _ClipView:
@@ -165,6 +218,7 @@ def _cache_caps(overrides: dict[str, int] | None) -> dict[str, int]:
         "walls": _WALL_CAP,
         "clips": _CLIP_CAP,
         "captions": _CAPTION_CAP,
+        "layer_images": _LAYER_IMAGE_CAP,
     }
     if not overrides:
         return caps
@@ -253,7 +307,13 @@ class Renderer:
         self._captions: _LRU = _LRU(caps["captions"])
         self._shot: int | None = None
         self._lut = None
-        self._owners: dict[str, dict[tuple, set[int]]] = {"photos": {}, "bgs": {}, "cards": {}}
+        self._layer_images: _LRU = _LRU(caps["layer_images"])
+        self._layer_plans_by_shot: dict[int, tuple[_LayerPlan, ...]] = {}
+        self._owners: dict[str, dict[tuple, set[int]]] = {"photos": {}, "bgs": {}, "cards": {}, "layer_images": {}}
+        # A layer shot reads several clips in one frame; keep each one's reader (plus a neighbour's) open.
+        most = max((len(set(shot_clips(s.spec))) for s in tl.shots if s.spec.layers), default=0)
+        if most > 1:
+            self._clips.cap = max(self._clips.cap, most + 1)
         video = tl.spec.video
         beat0 = _parse_beat0(video.beat0, tl.fps, []) if video.beat0 is not None else None
         self._custom = CustomRunner(self._dir, cv.W, cv.H, cv.device, tl.fps, video.bpm, beat0 or 0.0, log=log)
@@ -273,6 +333,7 @@ class Renderer:
         self._drop_owned("photos", self._photos, needed)
         self._drop_owned("bgs", self._bgs, needed)
         self._drop_owned("cards", self._cards, needed)
+        self._drop_owned("layer_images", self._layer_images, needed)
 
     def _note(self, kind: str, key: tuple) -> None:
         shot = self._shot
@@ -357,12 +418,14 @@ class Renderer:
         """Close windows this segment will not read. Same stem, different clip_in, is another window."""
         wanted: dict[str, set[tuple]] = {}
         for index in needed:
-            plan = self._clip_plan(index)
-            if plan is None:
-                continue
-            wanted.setdefault(plan.stem, set()).add(
-                window_key(plan.clip_in, plan.w, plan.h, plan.count, plan.crop)
-            )
+            plans = [lp.clip for lp in self._layer_plans(index) if lp.clip is not None]
+            plans.append(self._clip_plan(index))
+            for plan in plans:
+                if plan is None:
+                    continue
+                wanted.setdefault(plan.stem, set()).add(
+                    window_key(plan.clip_in, plan.w, plan.h, plan.count, plan.crop)
+                )
         for stem in [stem for stem in self._clips if stem not in wanted]:
             src = self._clips.get(stem)
             del self._clips[stem]
@@ -559,6 +622,88 @@ class Renderer:
         keys = self._camera_keys(self.tl.shots[scene.shot].spec)
         z, fx, fy = camera_at(keys, plan.box, t - scene.t0)
         return kenburns(self.cv, _ClipView(img[None]), fx, fy, z, 0.0, 0.0)
+
+    def _layer_plans(self, index: int) -> tuple[_LayerPlan, ...]:
+        hit = self._layer_plans_by_shot.get(index)
+        if hit is not None:
+            return hit
+        shot = self.tl.shots[index]
+        if not shot.spec.layers:
+            return ()
+        W, H, k = self.cv.W, self.cv.H, self.cv.k
+        hold = shot.end - shot.start
+        plans = []
+        for layer in shot.spec.layers:
+            start = layer.from_ or 0
+            if layer.image is not None:
+                with Image.open(find_photo(self._assets, layer.image)) as im:  # header only
+                    sw, sh = im.size
+                dest, src = _place(layer, sw, sh, W, H, k)
+                plans.append(_LayerPlan(layer.image, dest, src, None, float(shot.start + start), False))
+                continue
+            count = (layer.to - start if layer.to is not None
+                     else clip_read_frames(hold - start, self._outgoing_frames(index)))
+            clip_in = 0.0 if layer.clip_in is None else self._frames(layer.clip_in) / self.tl.fps
+            full = (layer.box is None and layer.pos is None and layer.fit in (None, "cover")
+                    and layer.focus is None)
+            if full:
+                clip = _ClipPlan(layer.clip, clip_in, count, W, H, None, None, None)
+                dest, src = (0.0, 0.0, float(W), float(H)), (0.0, 0.0, float(W), float(H))
+            else:
+                sw, sh = self._clip_size(layer.clip)
+                dest, crop = _place(layer, sw, sh, W, H, k)
+                crop = tuple(int(round(v)) for v in crop)
+                cw, ch = max(1, crop[2] - crop[0]), max(1, crop[3] - crop[1])
+                grow = max(1.0, float(layer.scale or 1.0)) * (1.1 if "pop" in (
+                    getattr(layer.in_, "type", None), getattr(layer.out, "type", None)) else 1.0)
+                # Decode no finer than the layer is drawn (pop overshoot included); never upscale.
+                d = min(1.0, max((dest[2] - dest[0]) / cw, (dest[3] - dest[1]) / ch) * grow)
+                w, h = max(2, round(cw * d)), max(2, round(ch * d))
+                clip = _ClipPlan(layer.clip, clip_in, count, w, h, crop, None, None)
+                src = (0.0, 0.0, float(w), float(h))
+            plans.append(_LayerPlan(layer.clip, dest, src, clip, float(shot.start + start), full))
+        hit = self._layer_plans_by_shot[index] = tuple(plans)
+        return hit
+
+    def _layer_image(self, stem: str) -> LayerTexture:
+        key = (stem,)
+        hit = self._layer_images.get(key)
+        if hit is None:
+            hit = LayerTexture(load_rgba(find_photo(self._assets, stem), self.cv.device, self._policy))
+            self._layer_images[key] = hit
+        self._note("layer_images", key)
+        return hit
+
+    def _layer_clip(self, plan: _LayerPlan, t: float) -> torch.Tensor:
+        c = plan.clip
+        return self._clip_source(c.stem).frame(
+            t, plan.t_start, c.clip_in, c.w, c.h, nframes=c.count, device=self.cv.device, crop=c.crop,
+        )
+
+    def _layers_frame(self, scene: Layers, t: float) -> torch.Tensor:
+        """Composite the shot's layers back to front. A bottom full-frame clip at rest is the base as-is,
+        so a one-layer film matches the clip shot it replaces bit for bit."""
+        shot = self.tl.shots[scene.shot]
+        self._shot = scene.shot
+        hold = shot.end - shot.start
+        k = self.cv.k
+        out: torch.Tensor | None = None
+        for layer, plan in zip(shot.spec.layers or (), self._layer_plans(scene.shot)):
+            state = layer_state(layer, t - scene.t0, hold)
+            if state is None:
+                continue
+            mode = layer.blend or "normal"
+            radius = float(layer.radius or 0.0) * k
+            shadow = float(layer.shadow or 0.0)
+            if (out is None and plan.full and state == _IDENTITY and mode == "normal"
+                    and radius == 0 and shadow == 0):
+                out = self._layer_clip(plan, t)
+                continue
+            if out is None:
+                out = self._background()
+            tex = LayerTexture(self._layer_clip(plan, t)) if plan.clip is not None else self._layer_image(plan.stem)
+            composite(self.cv, out, tex, plan.src, plan.dest, state, mode, radius, shadow)
+        return out if out is not None else self._background()
 
     def _frame_bg(self, stem: str, photo: Photo) -> torch.Tensor:
         key = (stem, photo.crop)
@@ -857,6 +1002,8 @@ class Renderer:
             return self._sequence_frame(scene, t)
         if isinstance(scene, Clip):
             return self._clip_frame(scene, t)
+        if isinstance(scene, Layers):
+            return self._layers_frame(scene, t)
         if isinstance(scene, Wall):
             spec = self.tl.shots[scene.shot].spec.wall
             if spec is None:

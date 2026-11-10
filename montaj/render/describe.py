@@ -150,6 +150,8 @@ def _layers(tl: Timeline, scene) -> list[dict]:
         entry = {"id": f"shot:{index}", "kind": sh.kind}
         if src:
             entry["src"] = src
+        if sh.spec.layers is not None:
+            entry["layers"] = [layer.clip or layer.image for layer in sh.spec.layers]
         out.append(entry)
     return out
 
