@@ -31,8 +31,11 @@ one glance with the sound off, so it is a few heavy words that change in time wi
 | Tracking | 0 to −0.01 em | Never letter-space Devanagari |
 
 ## Position and safe zones
-- **9:16:** centre x; baseline region between 60% and 72% of the height (y ≈ 1150–1380 of 1920).
-  Keep out of the top 12%, the bottom 22% and the right 14%: platform buttons and titles sit there.
+- **9:16:** centred in the safe band, not the frame (x ≈ 491 of 1080); baseline region between 60% and 72% of
+  the height (y ≈ 1150–1380 of 1920). Keep out of the top 12%, the bottom 22% and the right 14%: platform
+  buttons and titles sit there. `captions` keeps every chunk's ink, stroke, entry overshoot and capped slam
+  inside that band and 5% from every other edge (`check.safe` moves the band too); a chunk wider than the band
+  is split, and a lone word too wide is shrunk by `fit`.
 - **16:9:** lower third, at least 8% above the bottom edge; centre, or left-aligned beside a speaker.
 - Never across a face. If the speaker fills the frame, move the caption down to chest height, not onto the chin.
 - Hold the position for the whole clip. A caption that jumps around is noise; move it only for a designed beat.
@@ -59,7 +62,13 @@ one glance with the sound off, so it is a few heavy words that change in time wi
 | Pause > 0.6 s | Clear the caption | Leaving stale words on screen |
 
 Timing: a chunk may lead its word by up to 2 frames, never lag it. Reading speed above about 20 characters per
-second is too fast; make chunks smaller.
+second is too fast. The rate is measured over a reading window, not per chunk: from each chunk, consecutive
+chunks join until they hold at least 5/6 s on screen (frame-rounded), and the window's characters over its
+on-screen time is the rate. Netflix's Timed Text Style Guide pairs its 20 cps adult limit with a 5/6 s
+minimum event duration: a reader takes in a 0.3 s word together with its neighbours, so one fast word between
+slow ones is fine, while a sustained fast stretch is over the limit in every window and still warns. A chunk
+stays up until the next one starts (or clears after a pause), so the rate is set by where a phrase is cut:
+`captions` scores each candidate cut by the same window `check` lints, and keeps the fewest fast windows.
 
 Vary with intent. Sixty seconds of identical pops goes flat: let the hook, the numbers and the punchline get the
 bigger treatment, and keep the rest plain.
@@ -96,12 +105,15 @@ text and its segment hash, and `validate` warns instead).
 - `check` (measured), per caption chunk (numbers match `montaj captions --print`):
   `WARN caption-contrast chunk=N ratio=X` (under 4.5; a stroke of at least 4% of the size counts as the backdrop),
   `WARN caption-safe chunk=N <side>` (zones above; set `check.safe: {top, bottom, left, right}` as fractions),
-  `WARN caption-face chunk=N` (needs `uv sync --extra guards`), `WARN caption-rate chunk=N Ncps` (over 20 cps).
+  `WARN caption-face chunk=N` (needs `uv sync --extra guards`), `WARN caption-rate chunk=N Ncps` (a 5/6 s window
+  over 20 cps, named by its first chunk; one line per window).
   Authored text blocks without per-glyph layout have no ink box, so only the rate is measured for them.
 - A designed exception goes under `check.expect: [{caption: [a, b], why: ...}]`; findings inside the span become
   `INFO caption a-bs ignored as intended: why`.
-- The `punch` slam never carries the accented word past the 5% edge margin or into its neighbour; the entry
-  scale is capped per word (`Motion.slam_from`).
+- The `punch` slam never carries the accented word out of the caption's safe band, nor closer than one space
+  width of clear ink to its neighbour (at the neighbour's own pop peak; never closer than the words already
+  sit when the font sets them tighter). The entry scale is capped per word (`Motion.slam_from`), down to no
+  zoom at all when the words leave no room.
 
 ## Slop list
 `validate` and `check` warn on most of these (#24).

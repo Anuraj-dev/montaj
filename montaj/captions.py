@@ -5,9 +5,12 @@ word timings are chunked deterministically and every chunk becomes one or more `
 after the author's own. The renderer and the segment hash see only that expansion (ROADMAP "cache
 contract holds"); nothing here is read at render time. Pure functions of the spec and the words file.
 
-Chunking, in order: a pause >= 0.3 s, sentence punctuation, the max word count and the line budget (the
-HarfBuzz width of the chunk at the preset's size, via `glyphs.measure`) always break; a comma only breaks
-once the chunk holds `words_per_chunk[0]` words.
+Chunking: a pause >= 0.3 s, sentence punctuation and a `chunk_break_before` always break. Between those,
+the cut points are chosen together (a small dynamic programme) so that every chunk keeps the max word count,
+fits the line budget (the HarfBuzz width at the preset's size, via `glyphs.measure`, inside the caption's
+safe band) and never runs past a comma once it holds `words_per_chunk[0]` words; among those partitions the
+fewest chunks whose reading window (`window_cps`, the measure `check` lints) is over RATE_MAX_CPS win, then
+the least excess, then the fewest chunks, then the most even on-screen times.
 """
 from __future__ import annotations
 
@@ -36,7 +39,16 @@ STOPWORDS = frozenset(
     "these those i you he she we they me my your our their his her them us do does did have has had will "
     "would can could should just very really more most than then there here what when who how why".split()
 )
-SQUARE_ASPECT = 1.15  # width/height under this counts as portrait-ish for the default y
+SQUARE_ASPECT = 1.15  # width/height under this counts as portrait-ish for the default y (and the 9:16 zones)
+RATE_MAX_CPS = 20.0  # characters per second a reader can follow (docs/CAPTIONS.md); `check` lints the same
+# Reading rate is measured over at least this much on-screen time, not per chunk: Netflix's Timed Text Style
+# Guide pairs its 20 cps adult limit with a 5/6 s minimum event duration, so a 0.3 s word is read with its
+# neighbours. A sustained fast stretch still exceeds the limit over any such window.
+RATE_WINDOW_S = 5 / 6
+# Platform UI on 9:16 (top bar, caption/title block, the right-hand button column) and on 16:9 (the seek bar).
+ZONES_PORTRAIT = {"top": 0.12, "bottom": 0.22, "right": 0.14, "left": 0.0}
+ZONES_LANDSCAPE = {"top": 0.0, "bottom": 0.08, "right": 0.0, "left": 0.0}
+EDGE_MARGIN = 0.05  # every side keeps at least this fraction of the frame clear (timeline.SLAM_MARGIN)
 
 
 @dataclass(frozen=True)
@@ -189,6 +201,75 @@ def default_y(spec: Spec) -> float:
     return round(design_h * (0.646 if w / h < SQUARE_ASPECT else 0.80))
 
 
+def safe_zones(spec: Spec) -> dict[str, float]:
+    """Fractions of the frame a caption keeps clear of, per side: the aspect's platform zones with any
+    `check.safe` side replacing its default."""
+    w, h = _frame_size(spec)
+    zones = dict(ZONES_PORTRAIT if w / h < SQUARE_ASPECT else ZONES_LANDSCAPE)
+    safe = spec.check.safe if spec.check is not None else None
+    if safe is not None:
+        for side in zones:
+            v = getattr(safe, side)
+            if v is not None:
+                zones[side] = float(v)
+    return zones
+
+
+def safe_band(spec: Spec) -> tuple[float, float, float, float]:
+    """(x0, y0, x1, y1) design px every caption's ink stays inside, stroke and entry motion included: the
+    safe zones, and at least EDGE_MARGIN from each frame edge."""
+    from montaj.render.glyphs import DESIGN_W
+
+    w, h = _frame_size(spec)
+    W, H = float(DESIGN_W), DESIGN_W * h / w
+    z = safe_zones(spec)
+    return (max(z["left"], EDGE_MARGIN) * W, max(z["top"], EDGE_MARGIN) * H,
+            W - max(z["right"], EDGE_MARGIN) * W, H - max(z["bottom"], EDGE_MARGIN) * H)
+
+
+def _budget(spec: Spec, preset: Preset) -> float:
+    """Widest painted chunk (design px, stroke included) at rest: the band, less the room its entry
+    overshoot grows into (a pop scales each word up to 1.08 about its own centre)."""
+    from montaj.render import motion as M
+
+    x0, _y0, x1, _y1 = safe_band(spec)
+    grow = max(1.0, M.IN_OVERSHOOT.get(preset.enter, 1.0)) if preset.enter else 1.0
+    return (x1 - x0) / grow
+
+
+def _painted_width(book, text: str, preset: Preset, size: float, font, case) -> float:
+    """Twice the farthest the painted ink reaches from the line's centre: glyph outlines (which can overhang
+    their advance box), the stroke around them, turned by the preset's tilt. `text` may carry `*emphasis*`."""
+    from montaj.render import glyphs
+
+    run = glyphs.layout_line(book, text, style=preset.style, y=0.0, size=size, weight=preset.weight, font=font,
+                             case=case, emphasis_scale=preset.emph_scale)
+    x, _y, w, h = run.box
+    cx = x + w / 2
+    stroke = size * preset.stroke
+    reach = max([w / 2] + [max(cx - g.ink[0], g.ink[2] - cx) for g in run.glyphs if g.ink[2] > g.ink[0]]) + stroke
+    r = math.radians(preset.tilt)
+    return 2 * (reach * abs(math.cos(r)) + (h / 2 + stroke) * abs(math.sin(r)))
+
+
+def _fit_width(book, texts: list[str], preset: Preset, size: float, font, case, budget: float) -> float:
+    """The `max_width` for the line's `fit` (which measures the advance box plus stroke) that keeps every one
+    of `texts` painting within `budget`. Ink overhang scales with the size, so one ratio holds at any size."""
+    from montaj.render import glyphs
+
+    out = budget
+    for t in texts:
+        boxed = glyphs.measure(book, t, style=preset.style, size=size, weight=preset.weight, font=font, case=case,
+                               emphasis_scale=preset.emph_scale, stroke=size * preset.stroke, rotate=preset.tilt)[1]
+        out = min(out, budget * boxed / max(_painted_width(book, t, preset, size, font, case), boxed))
+    return math.floor(out * 10) / 10
+
+
+def _centre_x(spec: Spec) -> float:
+    x0, _y0, x1, _y1 = safe_band(spec)
+    return round((x0 + x1) / 2, 1)
+
+
 def _size_for(spec: Spec, preset: Preset) -> float:
     w, h = _frame_size(spec)
     return round(preset.size * (1.0 if h >= w else 0.72))
@@ -204,36 +285,90 @@ def _font_for(preset: Preset, words: list[Word]) -> tuple[str | None, str]:
 # --- chunking ---------------------------------------------------------------------------------------------
 
 
-def _chunk_words(words: list[Word], raw: dict[int, str], lo: int, hi: int, breaks: set[int], width) -> list[list[Word]]:
-    """Split into chunks. `width(words)` is the painted width of a candidate chunk in design px."""
-    budget = _budget()
-    chunks: list[list[Word]] = []
-    cur: list[Word] = []
+def _segments(words: list[Word], raw: dict[int, str], breaks: set[int]) -> list[list[Word]]:
+    """Runs of words between the cuts nothing may cross: a pause, sentence punctuation, an override."""
+    segs: list[list[Word]] = []
     for w in words:
-        if cur:
-            prev = cur[-1]
-            punct = _punct(raw[prev.i])
-            cut = (
-                w.i in breaks
-                or w.s - prev.e >= PAUSE_S
-                or punct == "hard"
-                or len(cur) >= hi
-                or (punct == "soft" and len(cur) >= lo)
-                or width(cur + [w]) > budget
-            )
-            if cut:
-                chunks.append(cur)
-                cur = []
-        cur.append(w)
-    if cur:
-        chunks.append(cur)
-    return chunks
+        if segs and not (w.i in breaks or w.s - segs[-1][-1].e >= PAUSE_S or _punct(raw[segs[-1][-1].i]) == "hard"):
+            segs[-1].append(w)
+        else:
+            segs.append([w])
+    return segs
 
 
-def _budget() -> float:
-    from montaj.render.glyphs import default_max_width
+def window_cps(spans: list[tuple[int, int]], i: int, fps: int) -> tuple[int, int, float]:
+    """Reading rate from span `i`: `spans` are consecutive (characters, frames on screen). The window grows
+    forward from `i` until it holds RATE_WINDOW_S of on-screen time (backward from the end when the spans run
+    out first). Returns (first, last, cps) of the window."""
+    need = math.ceil(RATE_WINDOW_S * fps - 1e-9)
+    chars = frames = 0
+    a = b = i
+    while b < len(spans) and frames < need:
+        chars, frames, b = chars + spans[b][0], frames + spans[b][1], b + 1
+    while a > 0 and frames < need:
+        a -= 1
+        chars, frames = chars + spans[a][0], frames + spans[a][1]
+    return a, b - 1, chars * fps / frames if frames > 0 else 0.0
 
-    return default_max_width()
+
+def _tail_frame(seg: list[Word], nxt: list[Word] | None, fps: int) -> int:
+    """Frame the segment's last chunk leaves on: the next segment's first word, or a hold after a long pause."""
+    last = seg[-1]
+    if nxt is None or nxt[0].s - last.e > CLEAR_S:
+        end = round((last.e + HOLD_S) * fps)
+        return min(end, round(nxt[0].s * fps)) if nxt is not None else end
+    return round(nxt[0].s * fps)
+
+
+def _chunk_words(words: list[Word], raw: dict[int, str], lo: int, hi: int, breaks: set[int], width,
+                 budget: float, fps: int) -> list[list[Word]]:
+    """Split into chunks (module docstring). `width(words)` is the painted width of a chunk in design px.
+
+    A chunk is on screen from its first word's frame to the next chunk's first frame, so where a segment is
+    cut decides each chunk's reading rate: a fast word joins a slower neighbour instead of flashing past.
+    """
+    segs = _segments(words, raw, breaks)
+    seg_frames = [[round(w.s * fps) for w in seg] + [_tail_frame(seg, segs[k + 1] if k + 1 < len(segs) else None, fps)]
+                  for k, seg in enumerate(segs)]
+    # Every word as its own span: the neighbours a candidate chunk's reading window reaches into (the finest
+    # cut; check measures over the final chunks, which differ only in where the window's edge falls).
+    spans = [(len(w.w), fr[k + 1] - fr[k]) for seg, fr in zip(segs, seg_frames) for k, w in enumerate(seg)]
+    reach = math.ceil(RATE_WINDOW_S * fps) + 1  # spans are >= 1 frame, so a window never needs more
+    out: list[list[Word]] = []
+    first = 0  # index in `spans` of the segment's first word
+    for seg, frames in zip(segs, seg_frames):
+        n = len(seg)
+        # best[b]: (cost, start of the last chunk) of the best split of seg[:b]
+        best: list[tuple[tuple, int] | None] = [None] * (n + 1)
+        best[0] = ((0, 0.0, 0, 0.0), 0)
+        for b in range(1, n + 1):
+            for a in range(max(0, b - hi), b):
+                if best[a] is None:
+                    continue
+                group = seg[a:b]
+                # A comma inside the chunk is allowed only before it holds `lo` words.
+                if any(_punct(raw[w.i]) == "soft" and k + 1 >= lo for k, w in enumerate(group[:-1])):
+                    continue
+                if b - a > 1 and width(group) > budget:
+                    continue  # a single word too wide for the band is shrunk by `fit` instead
+                secs = max(frames[b] - frames[a], 1) / fps
+                lo_i, hi_i = first + a, first + b
+                around = (spans[max(0, lo_i - reach):lo_i] + [(sum(len(w.w) for w in group), max(frames[b] - frames[a], 1))]
+                          + spans[hi_i:hi_i + reach])
+                cps = window_cps(around, min(lo_i, reach), fps)[2]
+                over = cps > RATE_MAX_CPS + 1e-9
+                c0 = best[a][0]
+                cost = (c0[0] + over, c0[1] + max(0.0, cps - RATE_MAX_CPS), c0[2] + 1, c0[3] + secs * secs)
+                if best[b] is None or cost < best[b][0]:
+                    best[b] = (cost, a)
+        cuts, b = [], n
+        while b > 0:
+            a = best[b][1]
+            cuts.append(seg[a:b])
+            b = a
+        out.extend(reversed(cuts))
+        first += n
+    return out
 
 
 def _auto_emphasis(chunks: list[list[Word]]) -> list[int | None]:
@@ -319,21 +454,16 @@ def plan_chunks(spec: Spec, spec_dir: Path, errors: list[str]) -> list[Chunk]:
     preset = PRESET_DEFS[cap.preset]
     font, case = _font_for(preset, words)
     size = _size_for(spec, preset)
-    stroke = round(size * preset.stroke, 1)
     book = _book()
 
     def width(group: list[Word]) -> float:
-        from montaj.render import glyphs
-
-        text = " ".join(w.w for w in group)
         try:
-            return glyphs.measure(book, text, style=preset.style, size=size, weight=preset.weight, font=font,
-                                  case=case, stroke=stroke, emphasis_scale=preset.emph_scale)[1]
+            return _painted_width(book, " ".join(w.w for w in group), preset, size, font, case)
         except ValueError:
             return 0.0  # a glyph the fonts lack: validation of the expanded line names it
 
     breaks = {ov.chunk_break_before for ov in cap.overrides if ov.chunk_break_before is not None}
-    groups = _chunk_words(words, raw, lo, hi, breaks, width)
+    groups = _chunk_words(words, raw, lo, hi, breaks, width, _budget(spec, preset), fps)
     if cap.emphasis == "none":
         picks: list[int | None] = [None] * len(groups)
     elif isinstance(cap.emphasis, list):
@@ -390,11 +520,12 @@ def _mark(words: list[Word], k: int | None) -> str:
 
 
 def _line_dict(spec: Spec, cap: Captions, preset: Preset, chunk: Chunk, text: str, at: int, *,
-               first: bool, accent_word: int | None, bar: dict | None, y: float, size: float, font, case) -> dict:
+               first: bool, accent_word: int | None, bar: dict | None, y: float, size: float, font, case,
+               max_width: float) -> dict:
     """One gpu `text` line for a chunk (or for one spoken word of it)."""
     line: dict = {
-        "text": text, "pos": [540, y], "at": f"{at}f", "style": preset.style, "color": "#ffffff", "size": size,
-        "case": case, "fit": True, "by": "word", "stagger": "0f", "engine": "gpu",
+        "text": text, "pos": [_centre_x(spec), y], "at": f"{at}f", "style": preset.style, "color": "#ffffff",
+        "size": size, "case": case, "fit": True, "max_width": max_width, "by": "word", "stagger": "0f", "engine": "gpu",
         "shadow": {"x": 0, "y": preset.shadow[0], "blur": preset.shadow[1], "color": "#000000", "opacity": preset.shadow[2]},
     }
     if font:
@@ -434,7 +565,7 @@ def _block(frm: int, to: int, lines: list[dict]) -> dict:
     return {"from": f"{frm}f", "to": f"{to}f", "fade_in": "0f", "fade_out": "0f", "lines": lines}
 
 
-def _minimal_lines(cap: Captions, chunk: Chunk, y: float, size: float, at: int, first: bool) -> list[dict]:
+def _minimal_lines(spec: Spec, cap: Captions, chunk: Chunk, y: float, size: float, at: int, first: bool) -> list[dict]:
     """Sans words around an italic serif accent word, set side by side on one baseline (one line each)."""
     from montaj.render import glyphs
 
@@ -458,14 +589,15 @@ def _minimal_lines(cap: Captions, chunk: Chunk, y: float, size: float, at: int, 
     space = glyphs.measure(book, "a a", style="sans", size=size, weight=400, case="lower")[1] - \
         2 * glyphs.measure(book, "a", style="sans", size=size, weight=400, case="lower")[1]
     sz = size
-    for _ in range(3):  # shrink until the row fits the frame, as `fit` would
+    limit = _budget(spec, PRESET_DEFS["minimal"])
+    for _ in range(3):  # shrink until the row fits the safe band, as `fit` would
         widths = [width(t, e, sz) for t, e in parts]
         total = sum(widths) + space * (len(parts) - 1)
-        if total <= glyphs.default_max_width():
+        if total <= limit:
             break
-        sz = sz * glyphs.default_max_width() / total
+        sz = sz * limit / total
     lines = []
-    x = 540 - total / 2
+    x = _centre_x(spec) - total / 2
     for (text, emph), w in zip(parts, widths):
         kw = spec_of(text, emph, sz)
         line: dict = {
@@ -509,13 +641,21 @@ def expand_captions(spec: Spec, spec_dir: Path | None, errors: list[str] | None 
     size = _size_for(spec, preset)
     y = float(cap.y) if cap.y is not None else default_y(spec)
     blocks: list[dict] = []
+    book, budget = _book(), _budget(spec, preset)
     for c in chunks:
         ws = list(c.words)
         if preset.serif_emphasis:
-            blocks.append(_block(c.start, c.end, _minimal_lines(cap, c, y, size, c.start, True)))
-        elif preset.mode == "chunk":
+            blocks.append(_block(c.start, c.end, _minimal_lines(spec, cap, c, y, size, c.start, True)))
+            continue
+        # One width per chunk: `fit` shrinks a chunk whose accent (or a lone long word) would paint past the band.
+        marks = [_mark(ws, c.emph)] if preset.mode == "chunk" else [_mark(ws, k) for k in range(len(ws))]
+        try:
+            fit_w = _fit_width(book, marks, preset, size, font, case, budget)
+        except ValueError:
+            fit_w = math.floor(budget * 10) / 10  # a glyph the fonts lack: validation of the expanded line names it
+        if preset.mode == "chunk":
             line = _line_dict(spec, cap, preset, c, _mark(ws, c.emph), c.start, first=True, accent_word=c.emph,
-                              bar=None, y=y, size=size, font=font, case=case)
+                              bar=None, y=y, size=size, font=font, case=case, max_width=fit_w)
             blocks.append(_block(c.start, c.end, [line]))
         else:  # word: the chunk stays up, the spoken word is marked (and barred) from its own frame
             for k, st in enumerate(c.starts):
@@ -528,7 +668,7 @@ def expand_captions(spec: Spec, spec_dir: Path | None, errors: list[str] | None 
                     if k > 0:
                         bar["from"] = k - 1
                 line = _line_dict(spec, cap, preset, c, _mark(ws, k), st, first=k == 0, accent_word=k, bar=bar,
-                                  y=y, size=size, font=font, case=case)
+                                  y=y, size=size, font=font, case=case, max_width=fit_w)
                 blocks.append(_block(st, nxt, [line]))
     parsed = []
     for n, b in enumerate(blocks):

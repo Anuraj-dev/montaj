@@ -118,7 +118,7 @@ def test_reading_rate_warns_above_twenty_characters_per_second(tmp_path: Path) -
     _words(tmp_path, [("extraordinarily", 0.0, 0.2), ("unbelievable", 0.22, 0.4), ("tomorrow", 0.9, 1.5)])
     p = _write(tmp_path, "  - {photo: a, hold: 3s}\n", ["a"], extra="captions: {source: talk.words.json}\n")
     got = K.lines(resolve(load_spec(p), tmp_path))
-    assert [g for g in got if "caption-rate" in g] == ["WARN caption-rate chunk=0 64cps"]
+    assert [g for g in got if "caption-rate" in g] == ["WARN caption-rate chunk=0 30cps"]
 
 
 def test_check_expect_caption_silences_a_span(tmp_path: Path) -> None:
@@ -204,3 +204,128 @@ def test_slam_cap_leaves_other_films_untouched(tmp_path: Path) -> None:
     plain = replace(line.motion, slam_from=None)
     assert "slam_from" not in {k for k, v in __import__("dataclasses").asdict(plain).items() if k != "slam_from"}
     assert M.entry("slam", 0.0, 6.0, 1.06, 0.0, None).scale == M.SLAM_FROM  # no cap: the original slam
+
+
+# --- defaults that pass the lints (M5 exit gate) -----------------------------------------------------------
+
+WIDE = [("background", 0.0, 0.5), ("extraordinary", 0.5, 1.1), ("is", 1.1, 1.3), ("not", 1.3, 1.6),
+        ("everything", 1.6, 2.2), ("recorded", 2.2, 2.7), ("yesterday", 2.7, 3.3), ("wonderful", 3.3, 4.0)]
+
+
+@pytest.mark.parametrize("preset", ["punch", "karaoke", "comic"])
+def test_every_chunk_ink_stays_in_the_safe_zone_through_its_entry(tmp_path: Path, preset: str) -> None:
+    """Posed ink (stroke, pop overshoot, the capped slam peak and the shake) stays inside the 9:16 platform
+    zones (right 14%, top 12%, bottom 22%) and 5% of the left edge on every frame of every chunk."""
+    _words(tmp_path, WIDE)
+    p = _write(tmp_path, "  - {photo: a, hold: 5s}\n", ["a"],
+               extra=f"captions: {{source: talk.words.json, preset: {preset}, emphasis: [2, 4, 6]}}\n")
+    tl = resolve(load_spec(p), tmp_path)
+    W, H = DESIGN_W, DESIGN_W * 1920 / 1080
+    left, right, top, bottom = 0.05 * W, (1 - 0.14) * W, 0.12 * H, (1 - 0.22) * H
+    slams = 0
+    for t in tl.texts:
+        for ln in t.lines:
+            stroke = ln.stroke.width if ln.stroke else 0.0
+            slams += ln.motion is not None and ln.motion.emph_kind == "slam"
+            units: dict[tuple[int, bool], list[float]] = {}
+            for g in ln.glyphs.glyphs:
+                if g.ink[2] > g.ink[0]:
+                    b = units.setdefault((g.unit, g.emph), list(g.ink))
+                    b[:] = min(b[0], g.ink[0]), min(b[1], g.ink[1]), max(b[2], g.ink[2]), max(b[3], g.ink[3])
+            for (unit, emph), (x0, y0, x1, y1) in units.items():
+                cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
+                for k in range(80):
+                    pose = M.unit_pose(ln.motion, unit, emph, ln.at + k / 4, ln.at, ln.stagger) if ln.motion else M.REST
+                    if pose.opacity <= 0:
+                        continue
+                    hw = (x1 - x0) / 2 * pose.scale + stroke
+                    hh = (y1 - y0) / 2 * pose.scale * pose.sy + stroke
+                    px, py = cx + pose.dx, cy + pose.dy
+                    assert left - 0.5 <= px - hw and px + hw <= right + 0.5, (ln.text, k, px - hw, px + hw)
+                    assert top <= py - hh and py + hh <= bottom, (ln.text, k)
+    assert preset != "punch" or slams  # the punch slam was exercised
+    assert [g for g in K.lines(tl) if "caption-safe" in g] == []
+
+
+def test_an_isolated_fast_word_is_read_with_its_neighbours(tmp_path: Path) -> None:
+    """One 0.3 s word at 33 cps between slow ones: over the 5/6 s reading window the rate is fine, so even as
+    its own chunk (max one word) the lint stays quiet."""
+    _words(tmp_path, [("hello", 0.0, 0.8), ("background", 0.8, 1.1), ("again", 1.1, 1.9)])
+    p = _write(tmp_path, "  - {photo: a, hold: 3s}\n", ["a"],
+               extra="captions: {source: talk.words.json, words_per_chunk: [1, 1]}\n")
+    chunks, fps = C.plan(p)
+    fast = next(c for c in chunks if c.text == "background")
+    assert len("background") / ((fast.end - fast.start) / fps) > K.RATE_MAX_CPS  # fast on its own
+    assert [g for g in K.lines(resolve(load_spec(p), tmp_path)) if "caption-rate" in g] == []
+
+
+def test_a_sustained_fast_stretch_still_warns(tmp_path: Path) -> None:
+    """3 s of six-letter words at 0.2 s each is 30 cps over every window: the window is no loophole, and
+    the stretch is reported once per window rather than once per chunk."""
+    rows = [(w, k * 0.2, (k + 1) * 0.2) for k, w in enumerate(
+        "really simple little people should always choose better things before winter starts making cities colder".split())]
+    assert len(rows) == 15 and all(len(w) == 6 for w, _, _ in rows)
+    _words(tmp_path, rows)
+    p = _write(tmp_path, "  - {photo: a, hold: 4s}\n", ["a"], extra="captions: {source: talk.words.json}\n")
+    got = [g for g in K.lines(resolve(load_spec(p), tmp_path)) if "caption-rate" in g]
+    assert got and len(got) <= 4, got  # 3 s / (5/6 s) windows
+    assert got[0] == "WARN caption-rate chunk=0 30cps", got
+
+
+def _ink_boxes(ln) -> dict[int, list]:
+    """Per reveal unit: resting ink box, and whether the unit is accented."""
+    units: dict[int, list] = {}
+    for g in ln.glyphs.glyphs:
+        if g.ink[2] > g.ink[0]:
+            b = units.setdefault(g.unit, [*g.ink, bool(g.emph)])
+            b[:4] = min(b[0], g.ink[0]), min(b[1], g.ink[1]), max(b[2], g.ink[2]), max(b[3], g.ink[3])
+    return units
+
+
+def _posed(ln, t: float, stroke: float) -> dict[int, tuple[float, float, float, float, bool]]:
+    """Per reveal unit: painted ink box (stroke included) at frame `t`, and whether the unit is accented."""
+    out = {}
+    for u, (x0, y0, x1, y1, emph) in _ink_boxes(ln).items():
+        pose = M.unit_pose(ln.motion, u, emph, t, ln.at, ln.stagger)
+        if pose.opacity <= 0:
+            continue
+        cx, cy = (x0 + x1) / 2 + pose.dx, (y0 + y1) / 2 + pose.dy
+        hw, hh = (x1 - x0) / 2 * pose.scale + stroke, (y1 - y0) / 2 * pose.scale * pose.sy + stroke
+        out[u] = (cx - hw, cy - hh, cx + hw, cy + hh, emph)
+    return out
+
+
+def test_a_slammed_word_keeps_a_space_of_clear_ink_from_its_neighbours(tmp_path: Path) -> None:
+    """The slam peak is capped so the zoomed word's ink (shake included) never comes closer than one space
+    width to the word beside it, at that word's own pop overshoot, on any frame: "CHANGE THAT", never
+    "CHANGETHAT". Where the neighbour's own entrance already brings it closer than a space to the word at
+    rest, the slam closes that gap no further. Ink is the outline box, as the caption lints measure it."""
+    _words(tmp_path, [("can", 0.0, 0.4), ("you", 0.4, 0.8), ("change", 0.8, 1.2), ("that", 1.2, 1.8),
+                      ("big", 2.4, 2.8), ("wonderful", 2.8, 3.3), ("thing", 3.3, 3.9)])
+    p = _write(tmp_path, "  - {photo: a, hold: 5s}\n", ["a"],
+               extra="captions: {source: talk.words.json, preset: punch, emphasis: [2, 5]}\n")
+    tl = resolve(load_spec(p), tmp_path)
+    checked, capped = 0, 0
+    for res in tl.texts:
+        for ln in res.lines:
+            if ln.motion is None or ln.motion.emph_kind != "slam":
+                continue
+            capped += (ln.motion.slam_from or M.SLAM_FROM) < M.SLAM_FROM
+            spaces = [g.advance for g in ln.glyphs.glyphs if g.ink[2] <= g.ink[0]]
+            if not spaces:
+                continue  # one word: no neighbour
+            space, rest = max(spaces), _ink_boxes(ln)
+            for k in range(int((res.to - ln.at) * 4)):  # quarter-frame steps through the whole block
+                boxes = _posed(ln, ln.at + k / 4, 0.0)
+                for u, (x0, y0, x1, y1, emph) in boxes.items():
+                    if not emph:
+                        continue
+                    r0, _, r1 = rest[u][:3]
+                    for v, (n0, n1, n2, n3, ne) in boxes.items():
+                        if v == u or ne or n3 <= y0 or n1 >= y1:
+                            continue
+                        right = n0 >= (x0 + x1) / 2
+                        gap, unslammed = (n0 - x1, n0 - r1) if right else (x0 - n2, r0 - n2)
+                        assert gap >= min(space, unslammed) - 0.5, (ln.text, k / 4, gap, space, unslammed)
+                        checked += 1
+    assert checked and capped

@@ -12,18 +12,15 @@ import shutil
 from dataclasses import dataclass
 from pathlib import Path
 
+from montaj.captions import RATE_MAX_CPS, safe_zones, window_cps
 from montaj.render.glyphs import DESIGN_W
 from montaj.spec import is_caption_block
 from montaj.timeline import ResolvedLine, Timeline
 
-RATE_MAX_CPS = 20.0  # characters per second a reader can follow (docs/CAPTIONS.md)
 CONTRAST_MIN = 4.5
 STROKE_GUARANTEES = 0.04  # a stroke at least this fraction of the size separates the fill from any footage
 RING = 0.18  # width of the sampled band around the ink, as a fraction of the size
 MAX_SAMPLES = 30  # frames decoded per run; chunks beyond are an even subsample
-PORTRAIT = 1.15  # width/height under this uses the 9:16 platform zones
-ZONES_PORTRAIT = {"top": 0.12, "bottom": 0.22, "right": 0.14, "left": 0.0}
-ZONES_LANDSCAPE = {"top": 0.0, "bottom": 0.08, "right": 0.0, "left": 0.0}
 _NAMED = {"cream": "#fbf1dc", "gold": "#f0c77e", "ink": "#4a2c1a"}
 
 
@@ -65,24 +62,19 @@ def chunks(tl: Timeline) -> list[Chunk]:
 
 
 def _zones(tl: Timeline) -> dict[str, float]:
-    w, h = tl.size
-    zones = dict(ZONES_PORTRAIT if w / h < PORTRAIT else ZONES_LANDSCAPE)
-    safe = tl.spec.check.safe if tl.spec.check is not None else None
-    if safe is not None:
-        for side in zones:
-            v = getattr(safe, side)
-            if v is not None:
-                zones[side] = float(v)
-    return zones
+    return safe_zones(tl.spec)
 
 
 def rate_lines(cs: list[Chunk], fps: int) -> list[tuple[Chunk, str]]:
-    out = []
-    for c in cs:
-        secs = (c.end - c.start) / fps
-        chars = len(c.text.replace(" ", ""))
-        if secs > 0 and chars / secs > RATE_MAX_CPS + 1e-9:
-            out.append((c, f"WARN caption-rate chunk={c.index} {chars / secs:.0f}cps"))
+    """Reading rate over a window of consecutive chunks (`captions.window_cps`), one WARN per fast window,
+    named by its first chunk; a window inside one already reported is not repeated."""
+    spans = [(len(c.text.replace(" ", "")), c.end - c.start) for c in cs]
+    out, reported = [], -1
+    for i in range(len(cs)):
+        a, b, cps = window_cps(spans, i, fps)
+        if cps > RATE_MAX_CPS + 1e-9 and a > reported:
+            out.append((cs[a], f"WARN caption-rate chunk={cs[a].index} {cps:.0f}cps"))
+            reported = b
     return out
 
 
