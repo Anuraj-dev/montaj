@@ -17,6 +17,7 @@ from pydantic import (
     ConfigDict,
     Discriminator,
     Field,
+    StrictBool,
     StrictInt,
     Tag,
     ValidationError,
@@ -567,6 +568,13 @@ class Shot(Frozen):
     effects: list[CustomEffect] | None = Field(default=None, exclude_if=lambda v: v is None)
     in_: Transition | None = Field(default=None, alias="in")
     flash: float | None = None
+    # Linked clip audio (#40): the clip's own sound follows this shot. Audio-only, so
+    # `project._shot_payload` keeps them out of the segment hash; absent stays out of model_dump.
+    audio: StrictBool | None = Field(default=None, exclude_if=lambda v: v is None)
+    gain: str | None = Field(default=None, exclude_if=lambda v: v is None)
+    audio_lead: str | None = Field(default=None, exclude_if=lambda v: v is None)
+    audio_tail: str | None = Field(default=None, exclude_if=lambda v: v is None)
+    id: str | None = Field(default=None, exclude_if=lambda v: v is None)
 
 
 class TextBackdrop(Frozen):
@@ -616,6 +624,9 @@ class Sub(Frozen):
     text: str
     size: RealNum | None = None
     color: str | None = None
+    # `drop` removes trailing `.`/`,` from the text at load (#24). Unset leaves the text as written, so films
+    # made before it keep their hashes; `validate` warns about a trailing mark on an unset sub.
+    punctuation: Literal["drop", "keep"] | None = Field(default=None, exclude_if=_none)
 
 
 class TrackKey(Frozen):
@@ -709,14 +720,17 @@ class ExpectSpan(Frozen):
 
     black: tuple[TimeExpr, TimeExpr] | None = None
     frozen: tuple[TimeExpr, TimeExpr] | None = None
+    # A designed caption exception (#24): caption WARNs inside the span are dropped.
+    caption: tuple[TimeExpr, TimeExpr] | None = Field(default=None, exclude_if=_none)
     why: str | None = None
 
     @model_validator(mode="after")
     def _one_kind(self) -> ExpectSpan:
-        if self.black is None and self.frozen is None:
-            raise ValueError("need black or frozen")
-        if self.black is not None and self.frozen is not None:
-            raise ValueError("set black or frozen, not both")
+        kinds = [k for k in ("black", "frozen", "caption") if getattr(self, k) is not None]
+        if not kinds:
+            raise ValueError("need black, frozen or caption")
+        if len(kinds) > 1:
+            raise ValueError("set one of black, frozen, caption")
         if self.why is None:
             return self
         why = self.why.strip()
@@ -742,7 +756,17 @@ class PacingTarget(Frozen):
     hook_text_by: DurationStr | None = None
 
 
+class SafeZones(Frozen):
+    """`check.safe`: fractions of the frame a caption keeps clear of. Unset sides take the aspect's default."""
+
+    top: RealNum | None = None
+    bottom: RealNum | None = None
+    left: RealNum | None = None
+    right: RealNum | None = None
+
+
 class CheckSpec(Frozen):
+    safe: SafeZones | None = Field(default=None, exclude_if=_none)
     expect: list[ExpectSpan] = Field(default_factory=list)
     pacing: PacingTarget | None = None
     loudness: LoudnessTarget | None = None
@@ -768,6 +792,8 @@ class Captions(Frozen):
     words_per_chunk: tuple[StrictInt, StrictInt] = (1, 3)
     accent: str = "#ffe600"
     emphasis: str | list[StrictInt] = "auto"
+    # `keep` leaves trailing `.` and `,` on the chunks; the default drops them (docs/CAPTIONS.md).
+    punctuation: Literal["drop", "keep"] = "drop"
     y: RealNum | None = None
     offset: DurationStr | None = None
     overrides: list[CaptionOverride] = Field(default_factory=list)
@@ -785,6 +811,8 @@ class Spec(Frozen):
     tracks: Tracks | None = None
     overlays: list[Overlay] = Field(default_factory=list)
     check: CheckSpec | None = None
+    # Set by `expand_captions`: index of the first `text` block it made. Never dumped, so never hashed.
+    caption_from: int | None = Field(default=None, exclude=True)
     captions: Captions | None = Field(default=None, exclude_if=_none_value)
 
 
@@ -1117,7 +1145,7 @@ def _time_strings(spec: Spec) -> list[str]:
             out.extend(k.t for k in keys)
     if spec.check is not None:
         for item in spec.check.expect:
-            pair = item.black if item.black is not None else item.frozen
+            pair = item.black or item.frozen or item.caption
             if pair:
                 out.extend(pair)
     return out
@@ -2539,6 +2567,9 @@ def validate_spec(
                 )
 
     _reject_overlap_windows(spec, holds, parsed, errors)
+    from montaj.audio.mix import check_links
+
+    check_links(spec, spec_dir, holds, fps, bpm, errors)
     _check_finish(spec, errors, spec_dir)
     if spec.check is not None and not 1 <= spec.check.sample <= 30:
         errors.append(_line("check.sample", f"must be 1 to 30, got {spec.check.sample}", "use sample: 3"))
@@ -2865,11 +2896,65 @@ def _check_text_styling(path: str, line: TextLine, errors: list[str]) -> None:
         errors.append(_line(f"{path}.rotate", "must be finite", "use degrees, e.g. -3"))
 
 
+CAPTION_MIN_WEIGHT = 600
+CAPTION_MIN_SIZE = 0.05  # of the frame height
+CAPTION_MAX_WORDS = 8  # an authored block this short, low in the frame, reads as a caption
+STOP_ENDS = (".", "।")
+
+
+def _line_y(line: TextLine) -> float | None:
+    return line.pos[1] if line.pos is not None else line.y
+
+
+def is_caption_block(spec: Spec, i: int, block: TextBlock, design_h: float) -> bool:
+    """A block made by `captions`, or an authored one that looks like a caption: a few words, no `dot`
+    (the lower-third marker), every line below 55% of the frame height."""
+    if spec.caption_from is not None and i >= spec.caption_from:
+        return True
+    ys = [_line_y(ln) for ln in block.lines]
+    words = sum(len(ln.text.split()) for ln in block.lines)
+    return (bool(ys) and all(y is not None and y >= 0.55 * design_h for y in ys)
+            and words <= CAPTION_MAX_WORDS and all(ln.dot is None for ln in block.lines))
+
+
+def _caption_warnings(spec: Spec) -> list[str]:
+    """Spec-only caption hygiene lines (#24): trailing full stops, static boxes, thin or small type."""
+    from montaj.render import glyphs
+
+    w, h = (int(x) for x in spec.video.size.lower().split("x"))
+    design_h = glyphs.DESIGN_W * h / w
+    out: list[str] = []
+    for i, sub in enumerate(spec.subs):
+        if sub.punctuation is None and sub.text.rstrip().endswith((".", ",", "।")) and not sub.text.rstrip().endswith(".."):
+            out.append(f"WARN subs[{i}] ends with a full stop or comma; set punctuation: drop")
+    for i, block in enumerate(spec.text):
+        for j, line in enumerate(block.lines):
+            plain = line.text.rstrip()
+            if plain.endswith(STOP_ENDS) and not plain.endswith(".."):
+                out.append(f"WARN text[{i}].lines[{j}] ends with a full stop")
+        if not is_caption_block(spec, i, block, design_h):
+            continue
+        boxed = (block.backdrop is not None and block.backdrop.type == "solid") or any(ln.box == "chip" for ln in block.lines)
+        if boxed:
+            out.append(f"WARN caption-box text[{i}] uses a static box; use stroke + shadow")
+        for j, line in enumerate(block.lines):
+            if line.font is None:  # a display face is heavy by design
+                weight = line.weight if line.weight is not None else glyphs.STYLE_METRICS.get(line.style, glyphs.STYLE_METRICS["serif"]).weight
+                if weight < CAPTION_MIN_WEIGHT:
+                    out.append(f"WARN caption-weight text[{i}].lines[{j}] weight {weight:g} (want {CAPTION_MIN_WEIGHT}+)")
+            size = line.size if line.size is not None else glyphs.STYLE_METRICS.get(line.style, glyphs.STYLE_METRICS["serif"]).size
+            if size < CAPTION_MIN_SIZE * design_h:
+                out.append(f"WARN caption-size text[{i}].lines[{j}] size {size:g} (want {CAPTION_MIN_SIZE * design_h:.0f}+, "
+                           f"{CAPTION_MIN_SIZE:.0%} of frame height)")
+    return out
+
+
 def text_warnings(spec: Spec) -> list[str]:
     """`WARN` lines for text that validates but will likely look wrong."""
     from montaj.render import glyphs
 
     out: list[str] = []
+    out += _caption_warnings(spec)
     for i, block in enumerate(spec.text):
         for j, line in enumerate(block.lines):
             if line.stroke is None:
@@ -2956,8 +3041,8 @@ def _validate_check(
                 )
             )
     for i, item in enumerate(spec.check.expect):
-        kind = "black" if item.black is not None else "frozen"
-        pair = item.black if item.black is not None else item.frozen
+        kind = "black" if item.black is not None else "frozen" if item.frozen is not None else "caption"
+        pair = item.black or item.frozen or item.caption
         if pair is None:
             continue
         ends: list[float | None] = []
@@ -3033,13 +3118,15 @@ def _finite_all(vals) -> bool:
 
 
 def _check_waveform_source(spec: Spec, ov: Overlay, path: str, errors: list[str]) -> None:
-    """`source` is `music` or an `audio.clips[].id`. No audio block is its own error."""
+    """`source` is `music`, an `audio.clips[].id` or a linked shot's `id`. No audio block is its own error."""
     if spec.audio is None:
         errors.append(_line(f"{path}.source", "no audio block", "add audio: with a track or clips"))
         return
     if ov.source is None or ov.source == "music":
         return  # a missing source is already "required for waveform"
-    ids = sorted({c.id for c in spec.audio.clips if c.id})
+    from montaj.audio.mix import linked_ids
+
+    ids = sorted({c.id for c in spec.audio.clips if c.id} | linked_ids(spec))
     if ov.source not in ids:
         errors.append(_line(
             f"{path}.source",
@@ -3234,6 +3321,10 @@ def load_spec(path: Path | str, *, expand: bool = True) -> Spec:
         from montaj.captions import expand_captions
 
         spec = expand_captions(spec, path.parent, errors)
+    if spec is not None and expand and spec.subs:
+        from montaj.captions import normalise_subs
+
+        spec = normalise_subs(spec)
     if spec is not None:
         validate_spec(spec, errors, spec_dir=path.parent)
     if errors:

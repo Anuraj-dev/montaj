@@ -28,7 +28,7 @@ from montaj.encode import MediaInfo, export, probe
 from montaj.analysis import analyze_assets, describe_all
 from montaj.gpu_policy import GpuStrictError, load_policy
 from montaj.ingest import IngestError, ingest, ingest_rec
-from montaj import inspector, pacing, taste
+from montaj import caption_check, inspector, pacing, taste
 from montaj.guards import content_guards
 from montaj.qa import BLACK_PIX_TH, FREEZE_MIN_S, Expect, check, clip_overruns, subtract, union
 from montaj.review.server import serve as serve_review
@@ -793,6 +793,8 @@ def _cmd_check(ns: argparse.Namespace, root: Path, numbers: dict | None = None) 
             numbers.update(nums)
         lines += pacing.lines(nums, spec.check.pacing if spec.check else None,
                               fps=tl.fps, bpm=tl.spec.video.bpm)
+        lines += caption_check.lines(tl, _video(root, ns.video), root / "build" / "captions-check",
+                                     log=root / "build" / "qa.log")
     errs = sum(line.startswith("ERR") for line in lines)
     warns = sum(line.startswith("WARN") for line in lines)
     if errs:

@@ -34,6 +34,11 @@ Photo fields (`crop`, `focus`, swirl `center`, wall `at`) are source-image pixel
 - `shots[].camera[].ease` — easing name, default `smooth` — how the camera travels into this key.
 - `shots[].speed` — number > 0 or list of `{t, v, ease}` keys, default `1` — playback speed of a clip. `2` plays twice as fast. Keys ease the speed (`v`) like a camera track; the source position is its integral at frame resolution. Needs `clip`; mutually exclusive with `range`. The source must last the hold (`ERR shots[3]: clip ends at 4.1s of source, needs 5.2s`). No reverse.
 - `shots[].freeze` — duration, default none — from this time in the shot to its end the clip shows the source frame it had here. Needs `clip`; must fall inside the hold.
+- `shots[].audio` — boolean, default none — `true` mixes the clip's own sound in, locked to its picture: it follows `clip_in`/`range`, `speed` (varispeed, so pitch moves with it) and goes silent at `freeze`. Needs `clip` with an audio stream and an `audio` block. 15 ms fades at each audio cut. Audio fields never re-render pixels.
+- `shots[].gain` — dB string, default `0dB` — level of the shot's own sound. Needs `audio: true`.
+- `shots[].audio_lead` — duration (`ms`, `s`, `f`, `b`), default none — J cut: the sound starts this early, over the previous shot, reading the source before `clip_in`. Needs `audio: true`; not on the first shot; at most the previous shot's hold; not with an `audio_tail` on a linked previous shot.
+- `shots[].audio_tail` — duration, default none — L cut: the sound runs this long past the cut, under the next shot (replacing a linked next shot's sound there). Needs `audio: true`; not on the last shot; at most the next shot's hold.
+- `shots[].id` — `[a-z][a-z0-9_]*`, default none — names the shot's own sound for `audio.duck.under` and waveform `overlays[].source`, like `audio.clips[].id`. Needs `audio: true`.
 - `shots[].hold` — duration, hold, until or range — how long this shot is on screen. Exactly one of `hold`, `until` or `range`. A whole-beat hold (`4b`) ends on a beat of the grid (moving forward if the shot started off-beat), and beat holds never drift from rounding.
 - `shots[].until` — time expression, hold or until — the shot ends at this time from film start. Must fall after the shot's start.
 - `shots[].drift` — mapping, default none — Ken Burns zoom/pan on a photo. Needs `photo`. Mutually exclusive with `zoom`.
@@ -135,7 +140,7 @@ Photo fields (`crop`, `focus`, swirl `center`, wall `at`) are source-image pixel
 - `audio.clips[].gain` — dB string, default `0dB` — level, e.g. `-10dB`; within ±120 dB.
 - `audio.clips[].pan` — number in `[-1, 1]`, default `0` — constant-power pan, `-1` left.
 - `audio.duck` — mapping, default none — dips the music (not other clips) while the named clips speak: RMS over 120 ms above -45 dB, eased by attack and release.
-- `audio.duck.under` — list of clip ids, required — which clips trigger the duck.
+- `audio.duck.under` — list of clip ids (or linked shot ids), required — which clips trigger the duck.
 - `audio.duck.depth` — dB string below 0, default `-6dB` — how far the music drops.
 - `audio.duck.attack` — duration (`40ms`), default `40ms` — time to reach the depth.
 - `audio.duck.release` — duration, default `200ms` — time to come back.
@@ -215,11 +220,13 @@ Photo fields (`crop`, `focus`, swirl `center`, wall `at`) are source-image pixel
 - `captions.emphasis` — `auto`, `none` or a list of word indexes, default `auto` — which word per chunk takes the accent; `auto` picks a number, a negation, or a long content word, never in two chunks running.
 - `captions.y` — number, default 64.6 % of the frame height on portrait, 80 % otherwise — design-px centre of the caption.
 - `captions.offset` — duration, default none — shifts every word time (a trimmed clip).
+- `captions.punctuation` — `drop` or `keep`, default `drop` — `drop` removes a trailing `.` `,` `।` from every chunk (`?` `!` `…` stay).
 - `captions.overrides` — list, default none — per-word fixes: `{word, text?, emphasis?}` rewrites a word or forces/clears its accent; `{chunk_break_before}` starts a chunk at that word. An index not in the source is an error. Trailing `.` and `,` are dropped from every word; `?` `!` stay.
 - `subs` — list, default none — lyric subtitles, one fixed style.
 - `subs[].from` — time expression, required — subtitle window start.
 - `subs[].to` — time expression, required — subtitle window end.
 - `subs[].text` — string, required — the lyric line.
+- `subs[].punctuation` — `drop` or `keep`, default unset — `drop` removes a trailing `.` `,` `।` from the line; unset keeps it as written and `validate` warns `WARN subs[i] ends with a full stop or comma`.
 - `subs[].size` — number, default `44` — font size in design px of a 1080-wide frame.
 - `subs[].color` — `cream`, `gold`, `ink` or `#rrggbb`, default `rgba(251,241,220,.92)` — `.sub` fill. Omit it to keep that translucent cream.
 - `tracks` — mapping, default none — slow global levels. Keys are piecewise curves like wall camera keys. Before the first key: first value; after the last: last value.
@@ -237,7 +244,7 @@ Photo fields (`crop`, `focus`, swirl `center`, wall `at`) are source-image pixel
 - `overlays[].radius` — number or `[from, to]`, required with ring — ring radius; a pair animates over the window with `ease`.
 - `overlays[].sweep` — number or `[from, to]` degrees, 0–360, default `360` — arc extent, clockwise from 12 o'clock; a pair draws the arc on over the window. Ring only.
 - `overlays[].box` — `[x0, y0, x1, y1]`, required with brackets and waveform — brackets: four corner marks, no edges. waveform: vertical bars fill the region, mirrored about its horizontal centre.
-- `overlays[].source` — clip id or `music`, required with waveform — an `audio.clips[].id` (every clip with that id, summed after gain and placement) or `music` (the track after `audio.edit` and the duck). Bars follow what is heard: the mix's peak ceiling and `audio.fade_out` apply; loudnorm, one constant gain, does not. Unknown source, or no `audio` block, is an error. `music` is the track even if a clip uses that id.
+- `overlays[].source` — clip id or `music`, required with waveform — an `audio.clips[].id` or `shots[].id` (every clip or linked shot with that id, summed after gain and placement) or `music` (the track after `audio.edit` and the duck). Bars follow what is heard: the mix's peak ceiling and `audio.fade_out` apply; loudnorm, one constant gain, does not. Unknown source, or no `audio` block, is an error. `music` is the track even if a clip uses that id.
 - `overlays[].bars` — integer 1–128, default `32`, waveform only — how many vertical bars. Each bar is the peak of its slice of that frame, quantised to 1/255.
 - `overlays[].arm` — number, default `28` — bracket arm length. Brackets only; capped at half the box side.
 - `overlays[].points` — list of `[x, y]`, at least 2, required with line — a polyline.
@@ -259,6 +266,8 @@ Photo fields (`crop`, `focus`, swirl `center`, wall `at`) are source-image pixel
 - `check.expect[].black` — `[start, end]` time expressions, black or frozen — a designed black window. Set this or `frozen`, not both. `end` must be later than `start`.
 - `check.expect[].frozen` — `[start, end]` time expressions, black or frozen — a designed hold. Set this or `black`, not both. `end` must be later than `start`.
 - `check.expect[].why` — string, default none — one line, added when this span matches a detected one.
+- `check.expect[].caption` — `[start, end]` time expressions — a designed caption exception: `check` silences `caption-*` findings inside it. Set exactly one of `black`, `frozen`, `caption`.
+- `check.safe` — mapping, default 9:16 top 0.12, bottom 0.22, right 0.14 (16:9 bottom 0.08) — platform safe-zone fractions for `WARN caption-safe chunk=N <side>`; keys `top` `bottom` `left` `right`.
 - `check.loudness` — mapping, default none — replaces the `-14` LUFS target used by `check`.
 - `check.loudness.i` — number, required with loudness — integrated-loudness target, in LUFS.
 - `check.loudness.tol` — number, default `1` — how far the measurement may sit from `i`, in LU.

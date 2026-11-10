@@ -147,12 +147,25 @@ def _source_path(spec: Spec, spec_dir: Path, errors: list[str]) -> Path | None:
     return None
 
 
-def normalise(raw: str) -> str:
-    """Trailing `.`, `,` (and `;:।`) dropped; `?`, `!`, `…` kept. `*` is escaped for the text engine."""
-    w = raw.strip()
-    while len(w) > 1 and w[-1] in DROP_END:
-        w = w[:-1]
+def drop_end(text: str) -> str:
+    """`text` without trailing `.`, `,`, `;`, `:`, `।`. `?`, `!`, `…` and a `..` ellipsis stay."""
+    w = text.strip()
+    while len(w) > 1 and w[-1] in DROP_END and not w.endswith(".."):
+        w = w[:-1].rstrip()
+    return w
+
+
+def normalise(raw: str, keep: bool = False) -> str:
+    """Trailing `.`, `,` (and `;:।`) dropped unless `keep`; `*` is escaped for the text engine."""
+    w = raw.strip() if keep else drop_end(raw)
     return w.replace("*", "\\*")
+
+
+def normalise_subs(spec: Spec) -> Spec:
+    """`spec` with the trailing `.`/`,` dropped from every sub marked `punctuation: drop`."""
+    subs = [s if s.punctuation != "drop" or drop_end(s.text) == s.text else s.model_copy(update={"text": drop_end(s.text)})
+            for s in spec.subs]
+    return spec if all(a is b for a, b in zip(subs, spec.subs)) else spec.model_copy(update={"subs": subs})
 
 
 def _punct(raw: str) -> str:
@@ -300,7 +313,7 @@ def plan_chunks(spec: Spec, spec_dir: Path, errors: list[str]) -> list[Chunk]:
 
     raw = {w.i: w.w for w in words}
     text_of = {ov.word: ov.text for ov in cap.overrides if ov.word is not None and ov.text is not None}
-    words = [Word(i=w.i, w=text_of[w.i].replace("*", "\\*") if w.i in text_of else normalise(w.w),
+    words = [Word(i=w.i, w=text_of[w.i].replace("*", "\\*") if w.i in text_of else normalise(w.w, cap.punctuation == "keep"),
                   s=w.s + offset, e=w.e + offset) for w in words]
     words = [w for w in words if w.w]
     preset = PRESET_DEFS[cap.preset]
@@ -527,7 +540,7 @@ def expand_captions(spec: Spec, spec_dir: Path | None, errors: list[str] | None 
         if own:
             raise SpecError(errors[before:])
         return spec
-    return spec.model_copy(update={"text": [*spec.text, *parsed], "captions": None})
+    return spec.model_copy(update={"text": [*spec.text, *parsed], "captions": None, "caption_from": len(spec.text)})
 
 
 # --- review as text ----------------------------------------------------------------------------------------
