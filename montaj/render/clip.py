@@ -4,7 +4,8 @@ The decoded span is `[clip_in, clip_in + hold)` — pass `hold` in seconds or `n
 A shot with speed or freeze passes `src`, the source frame for each shot frame; the
 decoded span is then `[clip_in, clip_in + max(src) + 1 frames)`. A shot with a crop or
 camera passes `crop` (source px) and decodes that box at `w x h` instead of covering the frame.
-Frames stay uint8 where they were decoded: on the GPU from NVDEC, on CPU from ffmpeg.
+Frames stay uint8 where they were decoded: on CPU from ffmpeg as RGB; on the GPU from NVDEC
+in the reader's compact form (NV12 or RGB, whichever is smaller), expanded to RGB on read.
 `frame` converts that one frame to float on the caller's device.
 `ClipSource.decoder` is the one decision of which reader runs (`nvdec.choose`); a failed
 NVDEC open demotes the source to ffmpeg and logs why.
@@ -60,6 +61,10 @@ def _read_one(stdout, w: int, h: int) -> torch.Tensor | None:
     return torch.from_numpy(np.ascontiguousarray(arr.transpose(2, 0, 1)))
 
 
+def _as_is(frame: torch.Tensor) -> torch.Tensor:
+    return frame
+
+
 class _ClipWindow:
     """Forward reader for one hold. At most `cap` uint8 frames stay in `_frames`."""
 
@@ -77,6 +82,9 @@ class _ClipWindow:
         self._err: list[bytes] | None = None
         self._thread: threading.Thread | None = None
         self._nv: nvdec.NvdecReader | None = None
+        # Compact frame -> (3, h, w) uint8 RGB. Outlives the reader, which closes once the
+        # hold is in hand.
+        self._expand = _as_is
         self._filled = 0
         self._produced: int | None = None
 
@@ -84,10 +92,10 @@ class _ClipWindow:
         return len(self._frames)
 
     def __iter__(self):
-        return iter(self._frames.values())
+        return (self._expand(frame) for frame in self._frames.values())
 
     def __getitem__(self, index: int) -> torch.Tensor:
-        return self._frames[index]
+        return self._expand(self._frames[index])
 
     def live(self) -> bool:
         if self._nv is not None:
@@ -143,6 +151,7 @@ class _ClipWindow:
                 )
             except Exception as exc:
                 source._demote(f"NVDEC open failed ({type(exc).__name__}: {exc})")
+        self._expand = self._nv.expand if self._nv is not None else _as_is
         if self._nv is None:
             self._proc, self._err, self._thread = self._spawn()
         source = self._source()
@@ -204,7 +213,7 @@ class _ClipWindow:
         hit = self._frames.get(index)
         if hit is not None:
             self._frames.move_to_end(index)
-            return hit
+            return self._expand(hit)
         if (self._proc is None and self._nv is None) or index < self._filled:
             self._open()
         while self._filled <= index:
@@ -225,7 +234,7 @@ class _ClipWindow:
         got = self._frames.get(index)
         if got is None:
             raise RuntimeError(f"clip {self._name()} frame {index} was not retained")
-        return got
+        return self._expand(got)
 
 
 class ClipSource:

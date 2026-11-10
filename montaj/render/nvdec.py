@@ -25,7 +25,6 @@ from __future__ import annotations
 
 import json
 import math
-import os
 import subprocess
 from dataclasses import dataclass
 from fractions import Fraction
@@ -33,11 +32,10 @@ from pathlib import Path
 
 import torch
 
-# PyNvVideoCodec's native logger prints INFO lines to stdout and reads LOGGER_LEVEL once, at
-# import; Montaj keeps stdout to one result line (same rule as encode's import).
-os.environ.setdefault("LOGGER_LEVEL", "ERROR")
+from montaj.encode import _pynvc
+
 try:  # The wheel is a hard dependency; a broken driver still has to fall back.
-    import PyNvVideoCodec as _nvc
+    _nvc = _pynvc()  # quiets its stdout logger before import
     _IMPORT_ERROR: str | None = None
 except Exception as exc:  # pragma: no cover - depends on the machine
     _nvc = None
@@ -287,9 +285,19 @@ class _Converter:
         return rgb.round_().clamp_(0, 255).to(torch.uint8)
 
 
+def _identity(frame: torch.Tensor) -> torch.Tensor:
+    return frame
+
+
 class NvdecReader:
-    """Forward reader for one window: `read()` returns the next (3, h, w) uint8 CUDA frame
-    of `fps=…,scale…` output, or None at the end (after `nframes` or EOF)."""
+    """Forward reader for one window of `fps=…,scale…` output: `read()` returns the next
+    frame in its compact form, or None at the end (after `nframes` or EOF); `expand(frame)`
+    turns that into (3, h, w) uint8 RGB on the GPU.
+
+    The compact form is whichever is smaller: the decoded NV12 surface (1.5 bytes per source
+    px, converted on every expand) or the converted RGB (3 bytes per output px). A repeated
+    frame (fps up-conversion) is the same tensor, so a cache holding both pays once.
+    """
 
     def __init__(self, path, choice: Choice, clip_in: float, fps: float, w: int, h: int,
                  nframes: int, crop: tuple | None, device):
@@ -301,6 +309,8 @@ class NvdecReader:
         self._nframes = int(nframes)
         self._emitted = 0
         self._convert = _Converter(self._stream, int(w), int(h), crop, self._device)
+        self.compact = self._stream.width * self._stream.height * 3 // 2 < int(w) * int(h) * 3
+        self.expand = self._convert if self.compact else _identity
         tb = self._stream.tb
         # -ss before -i: ts_offset is microseconds, added to pts in the stream's time base.
         offset_us = _rescale_near(1, self._stream.start * 1_000_000) + _rescale_near(1, Fraction(clip_in) * 1_000_000)
@@ -405,4 +415,4 @@ class NvdecReader:
                         return None
                 self._next += 1
                 self._emitted += 1
-                return self._convert(self._cur[1])
+                return self._cur[1] if self.compact else self._convert(self._cur[1])

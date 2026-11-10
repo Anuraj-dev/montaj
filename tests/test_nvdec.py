@@ -57,7 +57,7 @@ def _both(path: Path, clip_in: float, w: int, h: int, n: int, crop=None):
     reader = nvdec.NvdecReader(path, choice, clip_in, 30, w, h, n, crop, "cuda")
     got = []
     while (frame := reader.read()) is not None:
-        got.append(frame)
+        got.append(reader.expand(frame))
     reader.close()
     return ref, torch.stack(got) if got else torch.empty(0, 3, h, w, dtype=torch.uint8, device="cuda")
 
@@ -143,3 +143,22 @@ def test_nvdec_decode_keeps_stdout_clean(clips) -> None:
                           env={k: v for k, v in os.environ.items() if k != "LOGGER_LEVEL"})
     assert proc.returncode == 0, proc.stderr[-400:]
     assert proc.stdout == ""
+
+
+@pytest.mark.gpu
+def test_window_cache_keeps_the_smaller_of_nv12_and_rgb(clips) -> None:
+    """640x360 source: an upscaled window caches NV12 surfaces, a downscaled one RGB; reads are RGB."""
+    gpu = ClipSource(clips["h264"], 30, device="cuda")
+    cpu = ClipSource(clips["h264"], 30)
+    for w, h, stored in ((540, 960, (540, 640)), (160, 90, (3, 90, 160))):
+        a = gpu.frames(0.5, w, h, 12)
+        window = gpu._cache[clip_mod.window_key(0.5, w, h, 12)]
+        held = list(window._frames.values())
+        assert all(t.dtype == torch.uint8 and tuple(t.shape) == stored for t in held)
+        # 24 -> 30 fps repeats a frame by reference instead of storing it twice.
+        assert len({t.data_ptr() for t in held}) < len(held) if len(stored) == 2 else True
+        assert all(t.shape == (3, h, w) for t in a)
+        b = cpu.frames(0.5, w, h, 12)
+        assert min(_psnr(x, y.cuda()) for x, y in zip(a, b)) >= _MIN_PSNR
+        assert torch.equal(window[0], a[0])
+    gpu.close()
