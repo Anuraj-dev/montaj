@@ -82,10 +82,12 @@ Photo fields (`crop`, `focus`, swirl `center`, wall `at`) are source-image pixel
 - `shots[].layers[].to` — duration, default past the shot's end — when the layer disappears. After `from`, at most the hold.
 - `shots[].layers[].box` — `[x0, y0, x1, y1]` design px, default the full frame — where the layer sits. Fully off-frame is an error, partly off-frame a `validate` warning. Mutually exclusive with `pos`.
 - `shots[].layers[].fit` — `cover` or `contain`, default `cover` — how the source fills the box: crop to fill, or fit whole inside it. Not with `pos`.
-- `shots[].layers[].pos` — `[x, y]` design px, default none — centre of the layer at its natural size (1 source px = 1 design px). Mutually exclusive with `box`.
-- `shots[].layers[].scale` — number > 0, default `1` — size multiple about the layer's centre.
-- `shots[].layers[].rotate` — degrees, default `0` — clockwise rotation about the layer's centre.
-- `shots[].layers[].opacity` — number 0 to 1, default `1` — layer alpha, multiplied with a PNG's own alpha.
+- `shots[].layers[].pos` — `[x, y]` or list of keys `{t, v: [x, y], ease}`, default none — centre of the layer at its natural size (1 source px = 1 design px). Keys fly it from the first key's point (the placement) along the eased path. Mutually exclusive with `box`.
+- `shots[].layers[].scale` — number > 0 or list of keys `{t, v, ease}`, default `1` — size multiple about the layer's centre. Keys hold the first value before and the last after.
+- `shots[].layers[].rotate` — degrees or list of keys `{t, v, ease}`, default `0` — clockwise rotation about the layer's centre.
+- `shots[].layers[].opacity` — number 0 to 1 or list of keys `{t, v, ease}`, default `1` — layer alpha, multiplied with a PNG's own alpha. An overshooting ease is clamped to 0..1.
+- `shots[].layers[].<prop>[].t` — duration, required — when the key lands, from the shot's start (`0f`, `10f`, `0.5s`, `2b`). Strictly increasing, inside the hold; whole frames after resolve.
+- `shots[].layers[].<prop>[].ease` — easing name, default `smooth` — how the value travels into this key. Core: `linear smooth cubic outc inc expo ramp sine`. Keyframe easings (closed form, may leave 0..1): `back-in`, `back-out`, `bounce`, `elastic`, `spring` (or `spring(stiffness, damping)`, default `spring(100, 10)`: 16% overshoot, settles inside the key), `cubic-bezier(x1, y1, x2, y2)` (CSS; x1, x2 in 0..1), `steps(n)`.
 - `shots[].layers[].blend` — `normal`, `screen`, `add`, `multiply`, `overlay`, `soft-light` or `difference`, default `normal` — how the layer mixes with what is below (W3C formulas, in display sRGB).
 - `shots[].layers[].radius` — design px >= 0, default `0` — antialiased rounded corners on the layer's rectangle.
 - `shots[].layers[].shadow` — number 0 to 1, default `0` — soft drop shadow under the layer's rectangle, this strong.
