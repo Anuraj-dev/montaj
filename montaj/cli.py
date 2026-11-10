@@ -25,6 +25,7 @@ from montaj.audio.music import parse_duration
 from montaj.capture import run as run_capture
 from montaj.doctor import doctor
 from montaj.encode import MediaInfo, export, probe
+from montaj.analysis import analyze_assets, describe_all
 from montaj.gpu_policy import GpuStrictError, load_policy
 from montaj.ingest import IngestError, ingest, ingest_rec
 from montaj import caption_check, inspector, pacing, taste
@@ -52,7 +53,7 @@ class _Usage(Exception):
 
 _COMMANDS = (
     "doctor", "new", "ingest", "ingest-rec", "validate", "render", "sheet", "check", "export", "music",
-    "review", "watch", "taste", "capture", "inspect", "captions", "transcribe",
+    "review", "watch", "taste", "capture", "inspect", "captions", "transcribe", "ref",
 )
 
 
@@ -75,13 +76,16 @@ def _parser() -> argparse.ArgumentParser:
     new.add_argument("--photos", default=None)
 
     ing = sub.add_parser("ingest")
-    ing.add_argument("--photos", required=True)
+    ing.add_argument("--photos", default=None)
+    ing.add_argument("--fast", action="store_true")  # normalise only; no analysis
+    ing.add_argument("--list", action="store_true")  # one line per analysed asset; no work
 
     rec = sub.add_parser("ingest-rec")
     rec.add_argument("video")
     rec.add_argument("--events", default=None)
 
-    sub.add_parser("validate")
+    val = sub.add_parser("validate")
+    val.add_argument("--expand", action="store_true", help="print the spec with styles, defaults and components expanded")
 
     ren = sub.add_parser("render")
     group = ren.add_mutually_exclusive_group()
@@ -128,7 +132,12 @@ def _parser() -> argparse.ArgumentParser:
     comp.add_argument("--timeout", type=float, default=600.0)
 
     cp = sub.add_parser("captions")
-    cp.add_argument("--print", dest="print_", action="store_true", required=True)
+    mode = cp.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--print", dest="print_", action="store_true")
+    mode.add_argument("--gallery", action="store_true")
+    mode.add_argument("--strip", type=int, metavar="CHUNK", default=None)
+    rf = sub.add_parser("ref")
+    rf.add_argument("video")
     tr = sub.add_parser("transcribe")
     tr.add_argument("clip")
     tr.add_argument("--lang", default=analyze_audio.DEFAULT_LANG)
@@ -326,11 +335,30 @@ def _cmd_ingest_rec(ns: argparse.Namespace, root: Path) -> list[str]:
     return [f"OK {rec.stem} {rec.duration:.1f}s {rec.fps:g}fps{audio}{n_ev} -> {rec.path.name}"]
 
 
+def _make_analyzer():
+    """The GPU analyser; torch loads only here, and only when a row needs work."""
+    from montaj.vision import GpuAnalyzer
+
+    return GpuAnalyzer()
+
+
 def _cmd_ingest(ns: argparse.Namespace, root: Path) -> list[str]:
-    photos = _at(root, ns.photos)
     assets = _assets_dir(root, _assets_rel(root / "montaj.yaml"))
-    infos = ingest(photos, assets, sheet_path=root / "build" / "ingest-sheet.jpg")
-    return [f"OK {len(infos)} photos sheet=build/ingest-sheet.jpg"]
+    if ns.list:
+        lines = describe_all(assets)
+        if not lines:
+            return [f"ERR ingest: no photos or clips in {assets} (run montaj ingest --photos DIR)"]
+        return [*lines, f"OK {len(lines)} assets"]
+    if ns.photos is None and ns.fast:
+        return ["ERR ingest: --fast needs --photos DIR"]
+    out = []
+    if ns.photos is not None:
+        infos = ingest(_at(root, ns.photos), assets, sheet_path=root / "build" / "ingest-sheet.jpg")
+        out.append(f"{len(infos)} photos sheet=build/ingest-sheet.jpg")
+    if not ns.fast:
+        done = analyze_assets(assets, _make_analyzer, log=root / "build" / "ingest.log")
+        out.append(f"analyzed={done.analyzed} cached={done.cached} -> {assets.name}/analysis.json")
+    return ["OK " + " ".join(out)]
 
 
 def _cmd_inspect(ns: argparse.Namespace, root: Path, as_json: bool) -> list[str]:
@@ -351,7 +379,17 @@ def _cmd_inspect(ns: argparse.Namespace, root: Path, as_json: bool) -> list[str]
     return inspector.lines(payload)
 
 
-def _cmd_validate(root: Path) -> list[str]:
+def _cmd_validate(root: Path, expand: bool = False) -> list[str]:
+    if expand:
+        from montaj.expand import ExpandError, expand_file
+        from montaj.spec import TEXT_STYLES
+
+        try:
+            data = expand_file(root / "montaj.yaml", TEXT_STYLES)
+        except ExpandError as e:
+            raise SpecError(e.lines((root / "montaj.yaml").read_text())) from e
+        body = yaml.safe_dump(data, sort_keys=False, allow_unicode=True).rstrip("\n").split("\n")
+        return [*body, "OK montaj.yaml expanded (not validated; run validate)"]
     spec = load_spec(root / "montaj.yaml")
     tl = resolve(spec, root)
     seconds = tl.n_frames / tl.fps
@@ -837,11 +875,32 @@ def _cmd_music_analyze(ns: argparse.Namespace, root: Path) -> list[str]:
     return [*analysis.lines, result]
 
 
-def _cmd_captions(root: Path) -> list[str]:
+def _cmd_captions(ns: argparse.Namespace, root: Path) -> list[str]:
+    if ns.gallery:
+        from montaj.capgallery import gallery
+
+        path, n = gallery(root)
+        return [f"OK {_rel(root, path)} {n} presets x 2 frames"]
+    if ns.strip is not None:
+        from montaj.capgallery import strip
+
+        path, n = strip(root, ns.strip)
+        return [f"OK {_rel(root, path)} chunk {ns.strip} {n} frames"]
     from montaj.captions import format_chunks, plan
 
     chunks, fps = plan(root / "montaj.yaml")
     return [*format_chunks(chunks, fps).splitlines(), f"OK {len(chunks)} chunks"]
+
+
+def _cmd_ref(ns: argparse.Namespace, root: Path) -> list[str]:
+    from montaj.ref import study
+
+    video = _at(root, ns.video)
+    if not video.is_file():
+        return [f"ERR ref: {ns.video} not found: pass a video file"]
+    path, stats, shown = study(video, root / "build" / f"ref-{video.stem}.jpg", log=root / "build" / "ref.log")
+    return [f"OK {_rel(root, path)} {stats.duration:.1f}s {stats.shots} shots {len(stats.cuts)} cuts "
+            f"cut_rate={stats.per_10s:.1f}/10s median_shot={stats.median_shot:.2f}s {shown} frames"]
 
 
 def _cmd_transcribe(ns: argparse.Namespace, root: Path) -> list[str]:
@@ -917,7 +976,7 @@ def _dispatch(ns: argparse.Namespace, root: Path) -> list[str]:
     if ns.cmd == "ingest-rec":
         return _cmd_ingest_rec(ns, root)
     if ns.cmd == "validate":
-        return _cmd_validate(root)
+        return _cmd_validate(root, ns.expand)
     if ns.cmd == "render":
         return _cmd_render(ns, root)
     if ns.cmd == "sheet":
@@ -933,7 +992,9 @@ def _dispatch(ns: argparse.Namespace, root: Path) -> list[str]:
             return _cmd_music_analyze(ns, root)
         return _cmd_music_compose(ns, root)
     if ns.cmd == "captions":
-        return _cmd_captions(root)
+        return _cmd_captions(ns, root)
+    if ns.cmd == "ref":
+        return _cmd_ref(ns, root)
     if ns.cmd == "transcribe":
         return _cmd_transcribe(ns, root)
     if ns.cmd == "review":

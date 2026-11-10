@@ -64,6 +64,8 @@ check and review round after that is a `montaj` command that costs no tokens. Ru
      `bottom` or `top`). A closing title usually holds to the last frame.
    - Subtitles follow the song: start them at the first sung word in `markers.json`; an instrumental intro
      can carry a title or no text. `subs[].size` / `color` lift them off a busy backdrop.
+   - Repeating yourself? `styles:` (named text fields, `extends`), `defaults:` (per `shots` / `text.lines`) and
+     `components:` + `use:` cut the boilerplate; `montaj validate --expand` shows the result.
    - Framing: `focus: [x, y]` (source px) puts a face at the screen centre; `crop` trims.
    `montaj validate` and fix every `ERR` line. Done on `OK montaj.yaml …`.
 

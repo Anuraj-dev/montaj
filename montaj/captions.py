@@ -66,10 +66,10 @@ PRESET_DEFS = {
     "karaoke": Preset(size=92, font="montserrat-black", stroke=0.08, shadow=(6.0, 12.0, 0.6), mode="word"),
     "highlight": Preset(size=78, font="poppins-extrabold", case="as-is", shadow=(4.0, 10.0, 0.5), mode="word",
                         enter=None, bar=True),  # no entry: the bar and the text land on the same frame
-    "clean": Preset(size=64, style="sans", weight=600, case="lower", shadow=(4.0, 14.0, 0.6), enter="scale-in"),
+    "clean": Preset(size=80, style="sans", weight=600, case="lower", shadow=(4.0, 14.0, 0.6), enter="scale-in"),
     "comic": Preset(size=112, font="bangers", stroke=0.11, shadow=(6.0, 10.0, 0.6), enter="drop", emph_scale=1.12,
                     tilt=3.0),
-    "minimal": Preset(size=52, style="sans", weight=400, case="lower", shadow=(3.0, 12.0, 0.55), enter="scale-in",
+    "minimal": Preset(size=68, style="sans", weight=400, case="lower", shadow=(3.0, 12.0, 0.55), enter="scale-in",
                       serif_emphasis=True),
 }
 

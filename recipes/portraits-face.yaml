@@ -1,0 +1,21 @@
+# Portrait montage framed by analysis, not pixels: every shot uses `focus: face` (run `montaj ingest`).
+# No zoom: a photo scales to cover the frame around its focus, so the face lands centred with no border.
+# Same photos as birthday-short's faces; 120 BPM, no text, no audio.
+video:
+  size: 1080x1920
+  fps: 30
+  bpm: 120
+  look: warm-film
+  intro: {type: white-lift, dur: 30f}
+  outro: {type: glow, dur: 60f}
+assets: assets
+shots:
+  - {photo: "09", hold: 4b, focus: face}
+  - {photo: "32", hold: 4b, focus: face, in: {type: swirl, dur: 22f}}
+  - {photo: "38", hold: 2b, focus: face, flash: 0.3}
+  - {photo: "10", hold: 2b, focus: face, flash: 0.2}
+  - {photo: "33", hold: 2b, focus: face, flash: 0.2}
+  - {photo: "34", hold: 2b, focus: face, flash: 0.2}
+  - {photo: "35", hold: 4b, focus: face, in: {type: whip, dur: 14f, axis: x}}
+  - {photo: "30", hold: 4b, focus: face, in: {type: fade, dur: 15f}}
+  - {photo: "37", hold: 6b, focus: face, in: {type: whip, dur: 14f, axis: y}}

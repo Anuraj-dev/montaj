@@ -28,6 +28,7 @@ from montaj.spec import (
     _line,
     parse_wh,
     round_frame,
+    resolve_sugar,
     validate_spec,
 )
 
@@ -969,6 +970,7 @@ def resolve(spec: Spec, spec_dir: Path) -> Timeline:
         from montaj.captions import normalise_subs
 
         spec = normalise_subs(spec)
+    spec = resolve_sugar(spec, spec_dir, errors)  # analysis sugar -> numbers, so the hash sees them
     parsed, times, markers, bpm, beat0, clip_ins = validate_spec(spec, errors, spec_dir=spec_dir)
     size = parse_wh(spec.video.size, "video.size", errors, even=True)
     if errors:
