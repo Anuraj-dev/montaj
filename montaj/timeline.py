@@ -573,7 +573,7 @@ def _layer_with_frames(layer: Layer, at: str, parsed: dict[str, int]) -> Layer:
     for prop in LAYER_KEYED:
         keys = getattr(layer, prop)
         if isinstance(keys, list):
-            update[prop] = [key.model_copy(update={"t": parsed[f"{at}.{prop}[{j}].t"]}) for j, key in enumerate(keys)]
+            update[prop] = [key.model_copy(update={"t": parsed[f"{at}.{prop}[{j}].t"], "on": None}) for j, key in enumerate(keys)]
     return layer.model_copy(update=update) if update else layer
 
 

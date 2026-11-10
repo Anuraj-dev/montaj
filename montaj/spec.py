@@ -575,9 +575,20 @@ class LayerKey(Frozen):
     """A keyframe on a layer property (#35). `t` is the shot clock (whole frames after `resolve`); `v` is a
     number, or `[x, y]` for `pos`. `ease` shapes the move that arrives at this key; the first key's is unused."""
 
-    t: DurationStr | int
+    t: DurationStr | int = "0f"
     v: RealNum | tuple[RealNum, RealNum] | tuple[RealNum, RealNum, RealNum, RealNum]
     ease: str = "smooth"
+    # `beat` snaps the key to the nearest beat of the grid; `word:N` lands it on audio word N. `t` is then the
+    # offset from the shot start (`beat`) or from the word. Folded into `t` by `resolve`, so it never reaches the hash.
+    on: str | None = Field(default=None, exclude_if=_none)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _yaml_on(cls, data: Any) -> Any:
+        """YAML 1.1 reads an unquoted `on:` key as the boolean True; it means the `on` field."""
+        if isinstance(data, dict) and True in data and "on" not in data:
+            data = {("on" if k is True else k): v for k, v in data.items()}
+        return data
 
 
 LAYER_KEYED = ("pos", "scale", "rotate", "opacity", "box", "radius", "shadow")
@@ -595,6 +606,11 @@ class Layer(Frozen):
 
     clip: PhotoId | None = Field(default=None, exclude_if=_none)
     image: PhotoId | None = Field(default=None, exclude_if=_none)
+    # `id` names a layer for `parent`, which inherits that layer's transform; `anchor` is the pivot's offset from
+    # the layer's centre (design px) that scale and rotate act about.
+    id: str | None = Field(default=None, exclude_if=_none)
+    parent: str | None = Field(default=None, exclude_if=_none)
+    anchor: tuple[RealNum, RealNum] | None = Field(default=None, exclude_if=_none)
     clip_in: DurationStr | None = Field(default=None, exclude_if=_none)
     focus: Focus | None = Field(default=None, exclude_if=_none)
     # Shot clock: frames from the shot start. Ints after resolve.
@@ -1151,7 +1167,8 @@ def _duration_fields(spec: Spec) -> list[tuple[str, str]]:
                 keys = getattr(layer, prop)
                 if isinstance(keys, list):
                     for j, lkey in enumerate(keys):
-                        out.append((f"shots[{i}].layers[{k}].{prop}[{j}].t", lkey.t))
+                        if lkey.on is None:  # an anchored key's time is worked out against the grid or a word
+                            out.append((f"shots[{i}].layers[{k}].{prop}[{j}].t", lkey.t))
         for path, fx in _shot_effects(sh, i):
             if fx.dur is not None:
                 out.append((f"{path}.dur", fx.dur))
@@ -1231,6 +1248,13 @@ def _time_strings(spec: Spec) -> list[str]:
 
     out.extend(time_strings(spec))
     for sh in spec.shots:
+        for layer in sh.layers or ():
+            for prop in LAYER_KEYED:
+                for lkey in getattr(layer, prop) if isinstance(getattr(layer, prop), list) else ():
+                    if lkey.on is not None:
+                        out.append(lkey.t if isinstance(lkey.t, str) else "0f")
+                        if lkey.on == "beat":
+                            out.append("1b")  # snapping to the grid needs a bpm
         if sh.until is not None:
             out.append(sh.until)
         if sh.range is not None:
@@ -1941,6 +1965,19 @@ def _event_seconds(found: Hit | Miss, stem: str, path: str, errors: list[str]) -
     return t
 
 
+def _key_anchors(spec: Spec) -> list[tuple[str, str]]:
+    """(path, `on` value) for every anchored layer key."""
+    out = []
+    for i, sh in enumerate(spec.shots):
+        for k, layer in enumerate(sh.layers or ()):
+            for prop in LAYER_KEYED:
+                keys = getattr(layer, prop)
+                for j, lkey in enumerate(keys if isinstance(keys, list) else ()):
+                    if lkey.on is not None:
+                        out.append((f"shots[{i}].layers[{k}].{prop}[{j}].on", lkey.on))
+    return out
+
+
 def resolve_markers(
     spec: Spec,
     spec_dir: Path | None,
@@ -1959,12 +1996,14 @@ def resolve_markers(
         for name, expr in spec.markers.items()
         if isinstance(expr, str) and _WORD.match(expr.strip())
     ]
+    anchors = [(path, on) for path, on in _key_anchors(spec) if _WORD.match(on)]  # layer keys `on: word:N`
+    uses_word += [(path, on) for path, on in anchors]
     word_s: dict[int, float] = {}
     if uses_word:
         if spec.audio is None or not spec.audio.markers:
             for name, expr in uses_word:
                 errors.append(
-                    _line(f"markers.{name}", f"{expr} needs audio.markers", "set audio.markers")
+                    _line(name if name.startswith("shots[") else f"markers.{name}", f"{expr} needs audio.markers", "set audio.markers")
                 )
         else:
             word_s = _load_word_starts(
@@ -1981,6 +2020,13 @@ def resolve_markers(
 
     resolved: dict[str, float] = {}
     pending: dict[str, str] = {}
+    for path, on in anchors:  # filed under their own text ("word:12"), which no marker name can be
+        i = int(_WORD.match(on).group(1))
+        if i in word_s:
+            resolved[on] = word_s[i] * fps
+        elif spec.audio is not None and spec.audio.markers:
+            have = ", ".join(str(k) for k in sorted(word_s)) or "none"
+            errors.append(_line(path, f"unknown word {i}", f"have: {have}"))
     for name, expr in spec.markers.items():
         if not _NAME.match(name):
             continue
@@ -2622,7 +2668,7 @@ def validate_spec(
         if sh.card is not None:
             _validate_card(sh.card, i, fps, bpm, errors)
         if sh.layers is not None:
-            _validate_layers(spec, i, sh, h, parsed, times, spec_dir, errors)
+            _validate_layers(spec, i, sh, h, parsed, times, spec_dir, errors, (markers, fps, bpm, beat0))
         if not has_p:
             for name in ("drift", "frame", "morph", "tone", "pulse"):
                 if getattr(sh, name) is not None:
@@ -3294,6 +3340,39 @@ def _layer_extent(spec: Spec, spec_dir: Path | None, layer: Layer) -> tuple[floa
     return cx - ex, cy - ey, cx + ex, cy + ey
 
 
+def _anchor_keys(layer: Layer, p: str, start: int, parsed: dict[str, int],
+                 grid: tuple[dict[str, float], int, float | None, float], errors: list[str]) -> None:
+    """Whole shot-clock frames for keys with `on`: `beat` snaps shot start + `t` to the nearest beat of the grid,
+    `word:N` is word N's start + `t`. Stored in `parsed` like any key time, for `resolve` and the order checks."""
+    markers, fps, bpm, beat0 = grid
+    for prop in LAYER_KEYED:
+        keys = getattr(layer, prop)
+        for j, key in enumerate(keys if isinstance(keys, list) else ()):
+            if key.on is None:
+                continue
+            q = f"{p}.{prop}[{j}]"
+            off = parse_dur(key.t, fps, bpm, f"{q}.t", errors) if isinstance(key.t, str) else 0
+            if off is None:
+                continue
+            if key.on == "beat":
+                if not bpm:
+                    continue  # the beats-need-bpm error already says so
+                bf = fps * 60.0 / bpm
+                at = beat0 + round((start + off - beat0) / bf) * bf
+            elif _WORD.match(key.on):
+                if key.on not in markers:
+                    continue  # resolve_markers already reported it
+                at = markers[key.on] + off
+            else:
+                errors.append(_line(f"{q}.on", f"unknown {key.on!r}", "use beat or word:N"))
+                continue
+            frame = round(at) - start
+            if frame < 0:
+                errors.append(_line(f"{q}.on", f"{key.on} lands {-frame}f before the shot", "use a later beat or word, or another shot"))
+            else:
+                parsed[f"{q}.t"] = frame
+
+
 def _layer_values(path: str, raw, parsed: dict[str, int], errors: list[str], hold: int | None):
     """Yield (path, value) for a layer property that is a value or a key list, checking the keys' shape,
     order, easing and shot-clock range. Scalars (`scale`) yield floats, `pos` yields pairs."""
@@ -3375,7 +3454,7 @@ def _validate_mattes(spec: Spec, spec_dir: Path | None, errors: list[str]) -> No
 
 def _validate_layers(
     spec: Spec, i: int, sh: Shot, hold: int | None, parsed: dict[str, int], times: dict[str, float],
-    spec_dir: Path | None, errors: list[str],
+    spec_dir: Path | None, errors: list[str], grid: tuple[dict[str, float], int, float | None, float],
 ) -> None:
     at = f"shots[{i}]"
     if not sh.layers:
@@ -3385,13 +3464,32 @@ def _validate_layers(
         if getattr(sh, name) is not None:
             errors.append(_line(f"{at}.{name}", "not used on a layers shot", "set it on the layer"))
     frame = _design_frame(spec)
+    ids = [layer.id for layer in sh.layers if layer.id is not None]
+    for dup in sorted({x for x in ids if ids.count(x) > 1}):
+        errors.append(_line(f"{at}.layers", f"id {dup!r} is used twice", "give each layer its own id"))
+    parent_of = {layer.id: layer.parent for layer in sh.layers if layer.id is not None}
     for k, layer in enumerate(sh.layers):
         p = f"{at}.layers[{k}]"
+        if layer.parent is not None:
+            if layer.parent not in ids:
+                errors.append(_line(f"{p}.parent", f"no layer has id {layer.parent!r}", f"have: {', '.join(ids) or 'none'}"))
+            else:
+                seen, cur = {layer.id}, layer.parent
+                while cur is not None and cur in parent_of:
+                    if cur in seen:
+                        errors.append(_line(f"{p}.parent", "parents form a loop", "a layer cannot be its own ancestor"))
+                        break
+                    seen.add(cur)
+                    cur = parent_of[cur]
         n_err = len(errors)
         if (layer.clip is None) == (layer.image is None):
             errors.append(_line(p, "need exactly one of clip or image", "set clip: or image:"))
         if layer.clip_in is not None and layer.clip is None:
             errors.append(_line(f"{p}.clip_in", "clip_in needs clip", "add clip:"))
+        if layer.id is not None and not _NAME.match(layer.id):
+            errors.append(_line(f"{p}.id", f"invalid name {layer.id!r}", "use [a-z][a-z0-9_]*"))
+        if layer.anchor is not None and not _finite_all(layer.anchor):
+            errors.append(_line(f"{p}.anchor", "must be finite", "use [x, y] design px from the layer centre"))
         if layer.box is not None and layer.pos is not None:
             errors.append(_line(p, "box and pos are mutually exclusive", "box sizes the layer; pos keeps its natural size"))
         if layer.fit is not None and layer.fit not in LAYER_FITS:
@@ -3400,6 +3498,7 @@ def _validate_layers(
             errors.append(_line(f"{p}.fit", "fit is for a box or the full frame", "remove fit or use box"))
         if layer.blend is not None and layer.blend not in LAYER_BLENDS:
             errors.append(_line(f"{p}.blend", f"unknown {layer.blend!r}", f"use {_choices(LAYER_BLENDS)}"))
+        _anchor_keys(layer, p, parsed.get(f"{at}.start", 0), parsed, grid, errors)
         for name, lo, hi, hint in (("opacity", 0.0, 1.0, "use a value like 0.8"), ("scale", 1e-9, None, "use 0.5 for half size"),
                                    ("rotate", None, None, "use degrees, clockwise"),
                                    ("shadow", 0.0, 1.0, "use a value like 0.8"), ("radius", 0.0, None, "use design px")):

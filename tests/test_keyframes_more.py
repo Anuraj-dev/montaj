@@ -95,3 +95,91 @@ def test_keyed_box_grows_the_layer_on_screen(tmp_path: Path) -> None:
     assert not torch.equal(small, big)
     k = rend.cv.k
     assert rend._dest_at(tl.shots[0].spec.layers[1], rend._layer_plans(0)[1], 10.0) == pytest.approx((0, 0, 800 * k, 800 * k))
+
+
+# ---------------------------------------------------------------- anchors
+
+
+def _anchored(tmp: Path, shots: str, header: str = "  bpm: 120\n") -> Path:
+    path = _project(tmp, shots)
+    path.write_text(path.read_text().replace("  look: warm-film\n", "  look: warm-film\n" + header))
+    return path
+
+
+def test_beat_anchor_snaps_to_the_grid_and_leaves_no_trace(tmp_path: Path) -> None:
+    shots = ("  - {hold: 2s, layers: [{clip: rec}]}\n"
+             "  - {hold: 2s, layers: [{clip: rec}, {image: tag, scale: [{on: beat, t: 0.4s, v: 1}, {t: 20f, v: 2}]}]}\n")
+    tl = resolve(load_spec(_anchored(tmp_path, shots)), tmp_path)
+    keys = tl.shots[1].spec.layers[1].scale
+    assert [k.t for k in keys] == [15, 20]  # 120 bpm = a beat per 15f; shot start 60f is on a beat, 0.4s = 12f -> 15f
+    assert all(k.on is None for k in keys)
+    assert "on" not in keys[0].model_dump(exclude_none=True) or keys[0].on is None
+
+
+def test_word_anchor_follows_the_word_and_checks_it_exists(tmp_path: Path) -> None:
+    (tmp_path / "music").mkdir()
+    (tmp_path / "music" / "song.wav").write_bytes(b"RIFF")
+    (tmp_path / "music" / "markers.json").write_text('{"words": [{"i": 3, "w": "hey", "s": 0.5, "e": 0.9}]}')
+    audio = "audio:\n  track: music/song.wav\n  markers: music/markers.json\n"
+    shots = "  - {hold: 2s, layers: [{clip: rec}, {image: tag, rotate: [{on: word:3, t: 0.2s, v: 0}, {t: 40f, v: 9}]}]}\n"
+    path = _anchored(tmp_path, shots, header="")
+    path.write_text(path.read_text() + audio)
+    tl = resolve(load_spec(path), tmp_path)
+    assert [k.t for k in tl.shots[0].spec.layers[1].rotate] == [21, 40]  # 0.5s = 15f, plus 0.2s = 6f
+    path.write_text(path.read_text().replace("word:3", "word:9"))
+    from montaj.spec import SpecError
+
+    with pytest.raises(SpecError) as ei:
+        load_spec(path)
+    assert any("unknown word 9" in e for e in ei.value.errors)
+
+
+def test_anchor_errors(tmp_path: Path) -> None:
+    def err(key: str, header: str = "  bpm: 120\n") -> str:
+        shots = f"  - {{hold: 2s, layers: [{{clip: rec}}, {{image: tag, scale: [{key}]}}]}}\n"
+        from montaj.spec import SpecError
+
+        with pytest.raises(SpecError) as ei:
+            load_spec(_anchored(tmp_path, shots, header))
+        return "\n".join(ei.value.errors)
+
+    assert "use beat or word:N" in err("{on: sometime, v: 1}")
+    assert "bpm" in err("{on: beat, v: 1}", header="")
+    assert "needs audio.markers" in err("{on: 'word:1', v: 1}")
+
+
+def _pair(**child) -> list[Layer]:
+    return [Layer(image="a", id="p", rotate=[LayerKey(t=0, v=0), LayerKey(t=10, v=90)]),
+            Layer(image="b", parent="p", **child)]
+
+
+def test_child_inherits_the_parent_rotation_about_the_parent_centre() -> None:
+    layers = _pair()
+    from montaj.render.layers import world_state
+
+    centres = {0: (0.0, 0.0), 1: (100.0, 0.0)}
+    s = world_state(layers, 1, 10, 30, centres.__getitem__)
+    assert s.rotate == pytest.approx(90)
+    # a quarter turn clockwise on screen carries the child from right of the parent to below it
+    assert (s.dx, s.dy) == pytest.approx((-100.0, 100.0), abs=1e-6)
+    assert world_state(layers, 1, 0, 30, centres.__getitem__).dx == pytest.approx(0.0)
+
+
+def test_anchor_pivots_a_rotation_off_the_centre() -> None:
+    layer = Layer(image="a", anchor=(100.0, 0.0), rotate=[LayerKey(t=0, v=0), LayerKey(t=10, v=90)])
+    s = layer_state(layer, 10, 30)
+    assert (s.dx, s.dy) == pytest.approx((100.0, -100.0), abs=1e-6)  # clockwise about a pivot on its right: the centre swings up
+
+
+def test_parent_errors(tmp_path: Path) -> None:
+    def err(layers: str) -> str:
+        return "\n".join(_errors(tmp_path, f"  - {{hold: 1s, layers: [{layers}]}}\n"))
+
+    assert "no layer has id" in err("{image: tag, parent: nope}")
+    assert "loop" in err("{image: tag, id: a, parent: b}, {image: tag, id: b, parent: a}")
+    assert "used twice" in err("{image: tag, id: a}, {image: tag, id: a}")
+
+
+def test_unset_parent_fields_leave_hashes_alone() -> None:
+    dumped = Layer(image="a").model_dump_json()
+    assert not any(f in dumped for f in ('"parent"', '"anchor"', '"id"'))

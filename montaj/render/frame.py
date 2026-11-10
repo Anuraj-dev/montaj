@@ -32,7 +32,7 @@ from montaj.render.custom import CustomRunner
 from montaj.render import effects as fxlib
 from montaj.render.finish import LOOKS, finish, lut_texture
 from montaj.render.layers import (
-    LayerState, LayerTexture, base_box, base_pos, box_growth, composite, layer_state, load_rgba, peak_scale, sample,
+    LayerState, LayerTexture, base_box, base_pos, box_growth, composite, load_rgba, peak_scale_world, sample, world_state,
 )
 from montaj.render.shots import (
     card_frame,
@@ -691,7 +691,7 @@ class Renderer:
         W, H, k = self.cv.W, self.cv.H, self.cv.k
         hold = shot.end - shot.start
         plans = []
-        for layer in shot.spec.layers:
+        for idx, layer in enumerate(shot.spec.layers):
             start = layer.from_ or 0
             if layer.image is not None:
                 with Image.open(find_photo(self._assets, layer.image)) as im:  # header only
@@ -712,7 +712,7 @@ class Renderer:
                 dest, crop = _place(layer, sw, sh, W, H, k)
                 crop = tuple(int(round(v)) for v in crop)
                 cw, ch = max(1, crop[2] - crop[0]), max(1, crop[3] - crop[1])
-                grow = max(1.0, peak_scale(layer)) * box_growth(layer) * (1.1 if "pop" in (
+                grow = max(1.0, peak_scale_world(shot.spec.layers, idx)) * box_growth(layer) * (1.1 if "pop" in (
                     getattr(layer.in_, "type", None), getattr(layer.out, "type", None)) else 1.0)
                 # Decode no finer than the layer is drawn (pop overshoot included); never upscale.
                 d = min(1.0, max((dest[2] - dest[0]) / cw, (dest[3] - dest[1]) / ch) * grow)
@@ -769,10 +769,11 @@ class Renderer:
         shot = self.tl.shots[scene.shot]
         hold = shot.end - shot.start
         out: torch.Tensor | None = None
-        for layer, plan in zip(shot.spec.layers or (), self._layer_plans(scene.shot)):
+        plans = self._layer_plans(scene.shot)
+        for n, (layer, plan) in enumerate(zip(shot.spec.layers or (), plans)):
             if layer.mask is None:
                 continue
-            state = layer_state(layer, t - scene.t0, hold)
+            state = self._state_at(shot, plans, n, t - scene.t0, hold)
             if state is None:
                 continue
             if out is None:
@@ -809,8 +810,9 @@ class Renderer:
         hold = shot.end - shot.start
         k = self.cv.k
         out: torch.Tensor | None = None
-        for layer, plan in zip(shot.spec.layers or (), self._layer_plans(scene.shot)):
-            state = layer_state(layer, t - scene.t0, hold)
+        plans = self._layer_plans(scene.shot)
+        for n, (layer, plan) in enumerate(zip(shot.spec.layers or (), plans)):
+            state = self._state_at(shot, plans, n, t - scene.t0, hold)
             if state is None:
                 continue
             mode = layer.blend or "normal"
@@ -834,13 +836,23 @@ class Renderer:
                 self._seam_effect("trails")
                 decay = fxlib.TRAIL_DECAY if fx.decay is None else float(fx.decay)
                 for i in range(fx.frames or fxlib.TRAIL_FRAMES, 0, -1):
-                    ghost = layer_state(layer, local - i, hold)
+                    ghost = self._state_at(shot, plans, n, local - i, hold)
                     if ghost is not None:
                         ghost = LayerState(ghost.scale, ghost.rotate, ghost.opacity * v * decay ** i)
                         self._draw_layer(out, layer, plan, ghost, t - i, local - i, mode,
                                          _radius(layer, local - i) * k, shadow)
             self._draw_layer(out, layer, plan, state, t, local, mode, radius, shadow)
         return out if out is not None else self._background()
+
+    def _state_at(self, shot, plans, n: int, local: float, hold: int) -> LayerState | None:
+        """Layer `n`'s state on the shot clock, with its parents' transforms folded in."""
+        layers, k = shot.spec.layers, self.cv.k
+
+        def centre(j: int) -> tuple[float, float]:
+            x0, y0, x1, y1 = self._dest_at(layers[j], plans[j], local)
+            return (x0 + x1) / 2 / k, (y0 + y1) / 2 / k
+
+        return world_state(layers, n, local, hold, centre)
 
     def _dest_at(self, layer, plan, local: float) -> tuple[float, float, float, float]:
         """The layer's rect on the shot clock: fixed, or a keyed `box` stretching the first key's source window."""
