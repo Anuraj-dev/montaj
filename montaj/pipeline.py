@@ -170,7 +170,7 @@ def render(spec_path: Path, mode: str = "preview") -> RenderResult:
     with gpu_hold(log):
         with torch.no_grad():
             cv = Canvas(W, H, device="cuda")
-            renderer = Renderer(tl, spec_dir, cv)
+            renderer = Renderer(tl, spec_dir, cv, log=lambda message: _log(log, message))
             try:
                 for seg in tl.segments:
                     # A cache hit still has to let the previous segment's wall go.

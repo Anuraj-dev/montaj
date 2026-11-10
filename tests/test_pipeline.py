@@ -264,7 +264,7 @@ def test_render_holds_the_gpu_and_muxes_the_track(tmp_path: Path, monkeypatch: p
             self.W, self.H, self.device = W, H, "cpu"
 
     class FakeRenderer:
-        def __init__(self, tl, spec_dir, cv):
+        def __init__(self, tl, spec_dir, cv, log=None):
             seen.append(("renderer", held["on"]))
             self.cv = cv
 
@@ -397,7 +397,7 @@ def test_render_tells_the_renderer_which_shots_a_segment_reads(tmp_path: Path, m
             self.W, self.H, self.device = W, H, "cpu"
 
     class FakeRenderer:
-        def __init__(self, tl, spec_dir, cv):
+        def __init__(self, tl, spec_dir, cv, log=None):
             assert held["on"]
             self.cv = cv
 
