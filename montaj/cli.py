@@ -25,6 +25,7 @@ from montaj.audio.music import parse_duration
 from montaj.capture import run as run_capture
 from montaj.doctor import doctor
 from montaj.encode import MediaInfo, export, probe
+from montaj.analysis import analyze_assets, describe_all
 from montaj.gpu_policy import GpuStrictError, load_policy
 from montaj.ingest import IngestError, ingest, ingest_rec
 from montaj import inspector, pacing, taste
@@ -75,7 +76,9 @@ def _parser() -> argparse.ArgumentParser:
     new.add_argument("--photos", default=None)
 
     ing = sub.add_parser("ingest")
-    ing.add_argument("--photos", required=True)
+    ing.add_argument("--photos", default=None)
+    ing.add_argument("--fast", action="store_true")  # normalise only; no analysis
+    ing.add_argument("--list", action="store_true")  # one line per analysed asset; no work
 
     rec = sub.add_parser("ingest-rec")
     rec.add_argument("video")
@@ -326,11 +329,30 @@ def _cmd_ingest_rec(ns: argparse.Namespace, root: Path) -> list[str]:
     return [f"OK {rec.stem} {rec.duration:.1f}s {rec.fps:g}fps{audio}{n_ev} -> {rec.path.name}"]
 
 
+def _make_analyzer():
+    """The GPU analyser; torch loads only here, and only when a row needs work."""
+    from montaj.vision import GpuAnalyzer
+
+    return GpuAnalyzer()
+
+
 def _cmd_ingest(ns: argparse.Namespace, root: Path) -> list[str]:
-    photos = _at(root, ns.photos)
     assets = _assets_dir(root, _assets_rel(root / "montaj.yaml"))
-    infos = ingest(photos, assets, sheet_path=root / "build" / "ingest-sheet.jpg")
-    return [f"OK {len(infos)} photos sheet=build/ingest-sheet.jpg"]
+    if ns.list:
+        lines = describe_all(assets)
+        if not lines:
+            return [f"ERR ingest: no photos or clips in {assets} (run montaj ingest --photos DIR)"]
+        return [*lines, f"OK {len(lines)} assets"]
+    if ns.photos is None and ns.fast:
+        return ["ERR ingest: --fast needs --photos DIR"]
+    out = []
+    if ns.photos is not None:
+        infos = ingest(_at(root, ns.photos), assets, sheet_path=root / "build" / "ingest-sheet.jpg")
+        out.append(f"{len(infos)} photos sheet=build/ingest-sheet.jpg")
+    if not ns.fast:
+        done = analyze_assets(assets, _make_analyzer, log=root / "build" / "ingest.log")
+        out.append(f"analyzed={done.analyzed} cached={done.cached} -> {assets.name}/analysis.json")
+    return ["OK " + " ".join(out)]
 
 
 def _cmd_inspect(ns: argparse.Namespace, root: Path, as_json: bool) -> list[str]:
