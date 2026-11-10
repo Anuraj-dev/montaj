@@ -53,7 +53,7 @@ class _Usage(Exception):
 
 _COMMANDS = (
     "doctor", "new", "ingest", "ingest-rec", "validate", "render", "sheet", "check", "export", "music",
-    "review", "watch", "taste", "capture", "inspect", "captions", "transcribe",
+    "review", "watch", "taste", "capture", "inspect", "captions", "transcribe", "ref",
 )
 
 
@@ -131,7 +131,12 @@ def _parser() -> argparse.ArgumentParser:
     comp.add_argument("--timeout", type=float, default=600.0)
 
     cp = sub.add_parser("captions")
-    cp.add_argument("--print", dest="print_", action="store_true", required=True)
+    mode = cp.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--print", dest="print_", action="store_true")
+    mode.add_argument("--gallery", action="store_true")
+    mode.add_argument("--strip", type=int, metavar="CHUNK", default=None)
+    rf = sub.add_parser("ref")
+    rf.add_argument("video")
     tr = sub.add_parser("transcribe")
     tr.add_argument("clip")
     tr.add_argument("--lang", default=analyze_audio.DEFAULT_LANG)
@@ -857,11 +862,32 @@ def _cmd_music_analyze(ns: argparse.Namespace, root: Path) -> list[str]:
     return [*analysis.lines, result]
 
 
-def _cmd_captions(root: Path) -> list[str]:
+def _cmd_captions(ns: argparse.Namespace, root: Path) -> list[str]:
+    if ns.gallery:
+        from montaj.capgallery import gallery
+
+        path, n = gallery(root)
+        return [f"OK {_rel(root, path)} {n} presets x 2 frames"]
+    if ns.strip is not None:
+        from montaj.capgallery import strip
+
+        path, n = strip(root, ns.strip)
+        return [f"OK {_rel(root, path)} chunk {ns.strip} {n} frames"]
     from montaj.captions import format_chunks, plan
 
     chunks, fps = plan(root / "montaj.yaml")
     return [*format_chunks(chunks, fps).splitlines(), f"OK {len(chunks)} chunks"]
+
+
+def _cmd_ref(ns: argparse.Namespace, root: Path) -> list[str]:
+    from montaj.ref import study
+
+    video = _at(root, ns.video)
+    if not video.is_file():
+        return [f"ERR ref: {ns.video} not found: pass a video file"]
+    path, stats, shown = study(video, root / "build" / f"ref-{video.stem}.jpg", log=root / "build" / "ref.log")
+    return [f"OK {_rel(root, path)} {stats.duration:.1f}s {stats.shots} shots {len(stats.cuts)} cuts "
+            f"cut_rate={stats.per_10s:.1f}/10s median_shot={stats.median_shot:.2f}s {shown} frames"]
 
 
 def _cmd_transcribe(ns: argparse.Namespace, root: Path) -> list[str]:
@@ -953,7 +979,9 @@ def _dispatch(ns: argparse.Namespace, root: Path) -> list[str]:
             return _cmd_music_analyze(ns, root)
         return _cmd_music_compose(ns, root)
     if ns.cmd == "captions":
-        return _cmd_captions(root)
+        return _cmd_captions(ns, root)
+    if ns.cmd == "ref":
+        return _cmd_ref(ns, root)
     if ns.cmd == "transcribe":
         return _cmd_transcribe(ns, root)
     if ns.cmd == "review":
