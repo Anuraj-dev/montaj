@@ -53,3 +53,9 @@ M5's `custom:` code would also widen the cache contract. Rejected: starting M5 n
 **Why:** Raja wants Sonnet 5.5 / Opus 5.5 free to compose (including their own Python-synthesised music) at minimal
 token cost; other models finishing a video is enough. Skill guidance stays advisory, not strict; new facts go into
 `ERR` lines, `OK` lines and spec fields, not new bans.
+
+## 2026-11-10 — Roadmap M5–M11: agent-first editor, pixels on the dGPU only
+**Why:** Raja wants After Effects-level motion, Premiere-level editing and Resolve-level colour from a small spec,
+YouTube-grade captions (no boxes, no full stops), and no pixel work on the CPU or iGPU. Type goes first: it is the
+most visible gap and Chromium is the largest CPU pixel path. Caption taste ships as presets, normalisation and
+`WARN` lines, not skill bans. Sugar expands at layout time so the cache contract holds. Plan: `ROADMAP.md`.

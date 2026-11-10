@@ -2,6 +2,8 @@
 > Agent-native video harness: YAML spec in, finished video out, zero-token re-render/review · Last checkpoint: 2026-10-21
 
 ## 🚧 In progress / next
+- Next: `docs/ROADMAP.md` (M5–M11, issues #20–#48, tracker #49). Start with #28 step 1, #30, #31, then M5
+  (#20 GPU text engine first). Caption design contract: `docs/CAPTIONS.md`.
 - GitHub issues #1–19 all merged into `main` and pushed (2026-10-21); issues closed with their merge sha.
 - Open worktrees with uncommitted, unmerged work (keep): `montaj-wt/launch-film` (`feat/engine-launch-film`),
   `montaj-wt/export-wa-audio` (`fix/export-whatsapp-audio-copy`). Both branch from `6b1caaf`, 82 commits behind

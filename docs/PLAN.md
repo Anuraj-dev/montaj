@@ -110,7 +110,7 @@ end: {wall: [34, 9, 10, 16, 38, 32], hero: 10}
 ---
 
 ## Milestones (each ends with `/checkpoint`)
-Status: M0–M4 done, plus M4.5 hardening and the GitHub issue batch (#1–19); M5 not started. Detail in STATE.md.
+Status: M0–M4 done, plus M4.5 hardening and the GitHub issue batch (#1–19); M5 not started. Detail in STATE.md. From M5 on the plan is `docs/ROADMAP.md`.
 - **M0 Scaffold**: repo, plan, context, token audit.
 - **M1 Engine + montage**:
   - spec/timeline/render/encode/cache, plus `new`, `ingest`, `validate`, `render`, `sheet`, `check`, `export`, `doctor`;
@@ -123,7 +123,8 @@ Status: M0–M4 done, plus M4.5 hardening and the GitHub issue batch (#1–19); 
 - **M4 Skill + benchmark**:
   - `skills/make-video/SKILL.md`, `SPEC-REFERENCE.md`, symlinked into `~/.claude/skills` and Codex;
   - run the fresh-agent benchmark and iterate the docs until the targets are met.
-- **M5 Motion-graphics** (later): `custom:` layer API; port `reel/reel.html` as a recipe.
+- **M5–M11**: see `docs/ROADMAP.md` (type and captions, all-dGPU, agent eyes, compositing, editing, colour, skill).
+  The old "M5 Motion-graphics" `custom:` layer is issue #37 in M8.
 
 ## Targets (measured by `tools/token-report.py`)
 | Metric | Before Montaj | Measured (M4/M4.5, BENCHMARK.md) | Target |
