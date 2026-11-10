@@ -2,19 +2,19 @@
 > Agent-native video harness: YAML spec in, finished video out, zero-token re-render/review · Last checkpoint: 2026-11-10
 
 ## Issue status (source of truth; 2026-11-10)
-- **Closed** (merged to `main`, closed on GitHub with merge sha): #1–34, #36, #37, #38, #39, #40, #42, #46, and the M5
-  gate fix (`fix/caption-safe-rate`, 8d974ef). Do not reopen or re-implement these.
-- **Open, partly done:** #35 (part 1 keyframes+easing merged d87e2b3; rest listed in its last comment).
-- **Open, not started:** #41 (after #35), #43, #44 (after #43), #45 (after #43), #47, #48, #50, #51.
-- Tracker #49 checkboxes match this list. `main` is 85+ merges ahead of `origin/main` (not pushed).
-- M5 7/7 · M6 3/3 · M7 4/4 · M8 4/5 · M9 3/4 · M10 1/4 · M11 0/2. Tests on main 67603ac: CPU 1007, GPU 115 passed.
-- Follow-ups: #50 strict wall print shadow (PIL blur), #51 `montaj cut` ignores pauses inside word timings.
-  #36 gaps (in its close comment): layers above the subject don't hide it in behind-text; only fade blends the
-  matte; no mattes on photo shots; behind-text ignores layer shake; DeepLab edges coarse (matting model = decision).
-  Stale hint: `mix.check_links` says "add audio: {track: ...}" but `track` is optional.
+- **Closed** (merged to `main`, closed on GitHub with merge sha): #1–46 except #47/#48, #50, #52. Do not reopen or
+  re-implement these. Gaps each left are in its close comment.
+- **Open:** #47 (CLI `montaj spec` + skill rewrite merged 73bbc11; fresh-agent benchmark left), #48 (talking-short,
+  vlog-montage merged; explainer + gaming-highlight in worktrees `i48-explainer`/`i48-gaming`), #51 (`montaj cut`
+  pauses; merged, real 18.5 s clip not on this machine), #53 (cuts: auto word remap + layer audio; worktree `i53`).
+- Tracker #49 checkboxes match this list. `main` is 120 commits ahead of `origin/main` (not pushed).
+- Tests on main f31c988: CPU 1197, GPU 134 passed.
+- Follow-ups: #36 gaps (behind-text: layers above the subject don't hide it; only fade blends the matte; no mattes
+  on photo shots; DeepLab edges coarse). Stale hint: `mix.check_links` says "add audio: {track: ...}" but `track`
+  is optional. `montaj new --list` shows `-` length for recipes whose first comment line has no length.
 
 ## 🚧 In progress / next
-- Next: `docs/ROADMAP.md` (M5–M11, issues #20–#48, tracker #49). Caption design contract: `docs/CAPTIONS.md`.
+- Next: finish #48/#53, then the #47 fresh-agent benchmark; ROADMAP (M5–M11, tracker #49) is otherwise done. Caption design contract: `docs/CAPTIONS.md`.
 - GitHub issues #1–19 all merged into `main` and pushed (2026-10-21); issues closed with their merge sha.
 - Open worktrees with uncommitted, unmerged work (keep): `montaj-wt/launch-film` (`feat/engine-launch-film`),
   `montaj-wt/export-wa-audio` (`fix/export-whatsapp-audio-copy`). Both branch from `6b1caaf`, 82 commits behind
@@ -27,7 +27,7 @@
 - M1–M4.5 and the issue batch pushed to origin/main. `wip/*` branches stay local only.
 - M1 engine (Vidyut parity on raw frames). M2: text cards, subtitles, Ken Burns, frame cards, morph, clips,
   golden-film, markers, music gen/analyze, two-pass loudnorm. M3: `review` page, `watch`, `taste`. M4: skill
-  `skills/make-video/SKILL.md` linked into `~/.claude/skills` and `~/.codex/skills`.
+  `skills/make-video/SKILL.md` (v4: reads `montaj spec <topic>`, recipes via `montaj new --list`) linked into `~/.claude/skills` and `~/.codex/skills`.
 - M4.5 (waves 8–9, `docs/BENCHMARK.md`):
   - Contract: `validate` rejects unknown `look`/`intro`/`outro`, non-integer `fx.burst`; `subs[].size`/`color`.
   - Music: `montaj music compose music/compose.py` runs an agent-written numpy synth → wav, checks length/peak/LUFS;
