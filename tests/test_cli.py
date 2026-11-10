@@ -166,7 +166,7 @@ def test_sheet_check_export_exit_codes(tmp_path: Path, capsys: pytest.CaptureFix
 
     code, out, err = _run(["-C", str(proj), "export", "--target", "master"], capsys)
     assert code == 0 and err == "", out
-    assert out.startswith("OK out/master.mp4 ") and out.strip().endswith("MB")
+    assert out.startswith("OK out/master.mp4 ") and "target=master copy bt709" in out
     assert (proj / "out" / "master.mp4").is_file()
 
     code, out, err = _run(["-C", str(proj), "export", "--target", "whatsapp"], capsys)

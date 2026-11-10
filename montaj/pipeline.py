@@ -10,7 +10,7 @@ import torch
 
 from montaj import __version__
 from montaj.audio.mix import plan_audio, render_mix
-from montaj.encode import Encoder, concat, mux
+from montaj.encode import Encoder, Target, VideoSettings, concat, mux
 from montaj.gpu_policy import GpuPolicy, load_policy, resolve_device
 from montaj.gpulock import hold as gpu_hold
 from montaj.project import file_sha, find_photo, resolve_clip, segment_hash, shot_clips
@@ -37,6 +37,7 @@ class RenderResult:
     cached: int
     audio: bool = False
     gpu: str = "all"  # `all`, or `partial(text,decode)`: the stages that fell back to the CPU
+    video: str = ""  # `VideoSettings.describe()` of what was encoded
 
 
 def _apply_mode(spec: Spec, mode: str) -> Spec:
@@ -56,6 +57,19 @@ def _apply_mode(spec: Spec, mode: str) -> Spec:
         "motion_blur": min(2, spec.video.motion_blur),
     })
     return spec.model_copy(update={"video": video})
+
+
+def _apply_width(spec: Spec, width: int | None) -> Spec:
+    """An export target's width: the film is rendered at that size (design px scale with it, as
+    in preview), so a 720-wide delivery is not a CPU downscale of the 1080 master."""
+    if not width:
+        return spec
+    w_s, _, h_s = spec.video.size.lower().partition("x")
+    w, h = int(w_s), int(h_s)
+    if w == width:
+        return spec
+    height = max(2, round(h * width / w / 2) * 2)
+    return spec.model_copy(update={"video": spec.video.model_copy(update={"size": f"{width}x{height}"})})
 
 
 def _asset_shas(spec: Spec, spec_dir: Path) -> dict[str, str]:
@@ -126,7 +140,7 @@ def _segment_shots(tl, seg: Segment) -> frozenset[int]:
 
 
 def _encode_segment(renderer: Renderer, seg: Segment, dest: Path, fps: float, log: Path,
-                    policy: GpuPolicy | None = None) -> None:
+                    policy: GpuPolicy | None = None, video: VideoSettings | None = None) -> None:
     """Encode to a per-attempt temp file, then `os.replace` it onto the cache file.
 
     The name is `.<hash>.<pid>-<random>.partial.mp4`. A shared `.<hash>.partial.mp4`
@@ -136,7 +150,7 @@ def _encode_segment(renderer: Renderer, seg: Segment, dest: Path, fps: float, lo
     tmp = dest.with_name(f".{dest.stem}.{os.getpid()}-{secrets.token_hex(4)}.partial.mp4")
     try:
         with Encoder(tmp, renderer.cv.W, renderer.cv.H, fps, log=log, device=renderer.cv.device,
-                     policy=policy) as enc:
+                     policy=policy, video=video) as enc:
             for f in range(seg.start, seg.end):
                 enc.write(renderer.frame(f))
         os.replace(tmp, dest)
@@ -145,23 +159,33 @@ def _encode_segment(renderer: Renderer, seg: Segment, dest: Path, fps: float, lo
         raise
 
 
-def render(spec_path: Path, mode: str = "preview", policy: GpuPolicy | None = None) -> RenderResult:
+def render(spec_path: Path, mode: str = "preview", policy: GpuPolicy | None = None, *,
+           video: VideoSettings | None = None, target: Target | None = None) -> RenderResult:
     """`policy` defaults to the machine config's `[gpu]` table; it travels as an argument to every
-    pixel seam (decode, photo, text, encode) and its tally becomes `RenderResult.gpu`."""
+    pixel seam (decode, photo, text, encode) and its tally becomes `RenderResult.gpu`.
+
+    `video` picks the codec (`render --codec`); `target` is an export preset (`montaj export`): its
+    video settings, width and loudness, written to out/<target>.mp4. Segments are cached per
+    encode setting, so a youtube export and the h264 final share no file and evict nothing.
+    """
     spec_path = Path(spec_path)
     policy = policy if policy is not None else load_policy()
     device = resolve_device(policy.device) if torch.cuda.is_available() else policy.device
     spec_dir = spec_path.parent
-    spec = _apply_mode(load_spec(spec_path), mode)
+    if target is not None:
+        video = target.video
+    video = video or VideoSettings()
+    spec = _apply_width(_apply_mode(load_spec(spec_path), mode), target.width if target else None)
     tl = resolve(spec, spec_dir)
     shas = _asset_shas(spec, spec_dir)
     version = engine_version()
     log = spec_dir / "build" / "render.log"
     seg_dir = spec_dir / "build" / "segments"
     seg_dir.mkdir(parents=True, exist_ok=True)
-    out = spec_dir / "out" / f"{mode}.mp4"
+    out = spec_dir / "out" / f"{target.name if target else mode}.mp4"
     W, H = tl.size
-    _log(log, f"render {mode} {W}x{H} motion_blur {spec.video.motion_blur} frames {tl.n_frames}")
+    _log(log, f"render {mode} {W}x{H} motion_blur {spec.video.motion_blur} frames {tl.n_frames}"
+              + (f" {target.describe()}" if target else f" {video.describe()}" if video.hash_key() else ""))
     fade_s = 0.0
     loudnorm = True
     track: Path | None = None
@@ -196,7 +220,7 @@ def render(spec_path: Path, mode: str = "preview", policy: GpuPolicy | None = No
                 for seg in tl.segments:
                     # A cache hit still has to let the previous segment's wall go.
                     renderer.begin_segment(_segment_shots(tl, seg))
-                    digest = segment_hash(tl, seg, shas, version)
+                    digest = segment_hash(tl, seg, shas, version, video.hash_key())
                     dest = seg_dir / f"{digest}.mp4"
                     chunks.append(dest)
                     if dest.is_file() and dest.stat().st_size > 0:
@@ -204,7 +228,7 @@ def render(spec_path: Path, mode: str = "preview", policy: GpuPolicy | None = No
                         _log(log, f"segment {seg.index} {seg.start}-{seg.end} hit {digest}")
                         continue
                     _log(log, f"segment {seg.index} {seg.start}-{seg.end} miss {digest}")
-                    _encode_segment(renderer, seg, dest, tl.fps, log, policy)
+                    _encode_segment(renderer, seg, dest, tl.fps, log, policy, video)
                     rendered += 1
             finally:
                 del renderer, cv
@@ -217,13 +241,15 @@ def render(spec_path: Path, mode: str = "preview", policy: GpuPolicy | None = No
             fps=tl.fps,
             frames=[seg.end - seg.start for seg in tl.segments],
             log=log,
+            vcodec=video.codec,
         )
         _log(log, f"concat {out.name} rendered {rendered} cached {cached}")
         if track is not None:
             # ffmpeg cannot read and write the same path. A failed mux leaves the silent concat.
             tmp = out.with_name(f".{out.name}.muxing.mp4")
             try:
-                mux(out, track, tmp, loudnorm=loudnorm, fade_out=fade_s, log=log)
+                mux(out, track, tmp, loudnorm=loudnorm, fade_out=fade_s, log=log,
+                    **({"lufs": target.lufs, "audio_kbps": target.audio_kbps} if target else {}))
                 os.replace(tmp, out)
             except Exception:
                 tmp.unlink(missing_ok=True)
@@ -238,4 +264,5 @@ def render(spec_path: Path, mode: str = "preview", policy: GpuPolicy | None = No
         cached=cached,
         audio=track is not None,
         gpu=policy.summary(),
+        video=video.describe(),
     )
