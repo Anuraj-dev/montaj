@@ -34,6 +34,7 @@ from PIL import Image
 
 from montaj.doctor import chromium as find_chromium
 from montaj.render.core import outc, sine
+from montaj.render.type import GlyphLine, GlyphXform, draw_run_crop
 
 # Stage sits at (OX, OY) so shadow padding stays inside the viewport and the
 # fidelity crop of that rect has the same subpixel phase as the rasters.
@@ -1205,6 +1206,18 @@ def _paint(dst: torch.Tensor, cv, block: TextBlock, line: TextLine, raster: Rast
         _blit(dst, cv.k, sprite, unit.box, sigma, k, dy)
 
 
+def _paint_glyphs(dst: torch.Tensor, cv, block: TextBlock, line: TextLine, raster: GlyphLine,
+                  t: float, fps: float, ks: list[float]) -> None:
+    """The gpu engine's `_paint`: each reveal unit's k becomes its glyphs' rise, blur and opacity."""
+    xforms = []
+    for g in raster.run.glyphs:
+        k = ks[g.unit] if g.unit < len(ks) else 1.0
+        # Same motion as `_paint`: σ = (1−k)·12 design px (CSS radius 2σ), dy = (1−k)·rise, opacity k.
+        xforms.append(GlyphXform(dy=(1 - k) * line.rise, opacity=k, blur=(1 - k) * 24.0) if k < 1 - 1e-6 else None)
+    crop, x0, y0 = draw_run_crop(cv, raster.run, raster.style, xforms, atlas=raster.atlas)
+    _stamp(dst, crop.to(dtype=dst.dtype), x0, y0)
+
+
 def _pop(line: TextLine, block: TextBlock, t: float) -> float:
     # film.html:289-291, per line. Spec span is the block window, not one counter step.
     span = block.end - block.start
@@ -1226,7 +1239,7 @@ def _ink(unit: Unit, k: float, memo: dict) -> tuple[float, float, float, float] 
     return memo[key]
 
 
-def line_extent(block: TextBlock, line: TextLine, raster: RasterLine, t: float, fps: float, k: float,
+def line_extent(block: TextBlock, line: TextLine, raster: RasterLine | GlyphLine, t: float, fps: float, k: float,
                 memo: dict) -> tuple[float, tuple[float, float, float, float]] | None:
     """`(alpha, (x0, y0, x1, y1))` in design px for what `draw_text` shows of this line at `t`.
 
@@ -1238,13 +1251,18 @@ def line_extent(block: TextBlock, line: TextLine, raster: RasterLine, t: float, 
     alpha = _vis(t, block, fps)
     if alpha <= 0.0:
         return None
-    n = len(raster.units)
+    glyph = isinstance(raster, GlyphLine)
+    n = raster.run.units if glyph else len(raster.units)
     if line.reveal == "pop":
         ks = [1.0 if _pop(line, block, t) > 1e-4 else 0.0] * n
     else:
         ks = _unit_ks(line, n, t, fps)
-    rects = [r for u, uk in zip(raster.units, ks) if uk > 1e-4 and (r := _ink(u, k, memo)) is not None]
-    if raster.chip is not None and ks and ks[0] > 1e-4 and raster.chip_box is not None:
+    if glyph:  # gpu engine: the shaped outlines' boxes, already design px
+        rects = [g.ink for g in raster.run.glyphs
+                 if g.ink[2] > g.ink[0] and (ks[g.unit] if g.unit < n else 1.0) > 1e-4]
+    else:
+        rects = [r for u, uk in zip(raster.units, ks) if uk > 1e-4 and (r := _ink(u, k, memo)) is not None]
+    if not glyph and raster.chip is not None and ks and ks[0] > 1e-4 and raster.chip_box is not None:
         c = raster.chip_box
         rects.append((c[0], c[1], c[0] + c[2], c[1] + c[3]))
     if not rects:
@@ -1253,29 +1271,32 @@ def line_extent(block: TextBlock, line: TextLine, raster: RasterLine, t: float, 
                    max(r[2] for r in rects), max(r[3] for r in rects))
 
 
-def _paint_line(dst: torch.Tensor, cv, block: TextBlock, line: TextLine, raster: RasterLine,
+def _paint_line(dst: torch.Tensor, cv, block: TextBlock, line: TextLine, raster: RasterLine | GlyphLine,
                 t: float, fps: float) -> None:
-    n = len(raster.units)
+    glyph = isinstance(raster, GlyphLine)
+    paint = _paint_glyphs if glyph else _paint
+    n = raster.run.units if glyph else len(raster.units)
     if line.reveal == "pop":
         pop = _pop(line, block, t)
         if pop <= 1e-4:
             return
         if abs(pop - 1.0) < 1e-4:
-            _paint(dst, cv, block, line, raster, t, fps, [1.0] * n)
+            paint(dst, cv, block, line, raster, t, fps, [1.0] * n)
             return
         layer = torch.zeros(4, dst.shape[-2], dst.shape[-1], device=dst.device, dtype=dst.dtype)
-        _paint(layer, cv, block, line, raster, t, fps, [1.0] * n)
+        paint(layer, cv, block, line, raster, t, fps, [1.0] * n)
         layer = _blur(layer, (1 - pop) * 14 * cv.k)
         scale = 1.25 + (1.0 - 1.25) * pop
         if abs(scale - 1.0) >= 1e-4:
-            cx = (raster.line_box[0] + raster.line_box[2] / 2) * cv.k
-            cy = (raster.line_box[1] + raster.line_box[3] / 2) * cv.k
+            box = raster.run.box if glyph else raster.line_box
+            cx = (box[0] + box[2] / 2) * cv.k
+            cy = (box[1] + box[3] / 2) * cv.k
             layer = _scale_about(layer, cx, cy, scale)
         _stamp(dst, layer * pop, 0, 0)
         return
     ks = _unit_ks(line, n, t, fps)
-    _paint(dst, cv, block, line, raster, t, fps, ks)
-    if line.cursor and line.reveal == "type":
+    paint(dst, cv, block, line, raster, t, fps, ks)
+    if line.cursor and line.reveal == "type" and not glyph:
         _paint_cursor(dst, cv, line, raster, t, fps, ks)
 
 

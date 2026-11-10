@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from montaj.render.core import EASE as EASE_FN, key as eval_key
+from montaj.render.glyphs import STYLE_ENGINE, FontBook, GlyphRun, layout_line
 from montaj.spec import (
     INCOMING_TRANS,
     WALL_PULLBACK_ZOOM,
@@ -153,6 +154,9 @@ class ResolvedLine:
     box_color: str | None = None
     dot: str | None = None
     cursor: bool = False
+    # `engine: gpu` lines only: the HarfBuzz layout, fixed here so the renderer never shapes and the
+    # segment hash sees every glyph id, position and font identity (project.segment_hash).
+    glyphs: GlyphRun | None = None
 
 
 @dataclass(frozen=True)
@@ -545,8 +549,13 @@ def _visible_span(resolved: list[ResolvedShot], i: int, parsed: dict[str, int]) 
     return (round_frame(v0), round_frame(v1))
 
 
+def _line_engine(line) -> str:
+    return line.engine or STYLE_ENGINE.get(line.style, "chromium")
+
+
 def _resolve_texts(spec: Spec, times: dict[str, float], fps: int) -> list[ResolvedText]:
     out: list[ResolvedText] = []
+    book: FontBook | None = None  # loaded on the first gpu line; one per resolve
     for i, block in enumerate(spec.text):
         frm = times[f"text[{i}].from"]
         to = times[f"text[{i}].to"]
@@ -564,6 +573,14 @@ def _resolve_texts(spec: Spec, times: dict[str, float], fps: int) -> list[Resolv
                 sweep = (times[f"text[{i}].lines[{j}].sweep[0]"], times[f"text[{i}].lines[{j}].sweep[1]"])
             else:
                 sweep = (frm, to)
+            run = None
+            if _line_engine(line) == "gpu":
+                book = book or FontBook()
+                run = layout_line(
+                    book, line.text, style=line.style, y=line.y, size=line.size, weight=line.weight,
+                    italic=line.italic, tracking=line.tracking, line_height=line.line_height,
+                    align=line.align, indent=line.indent, by="char" if typed else line.by,
+                )
             lines.append(
                 ResolvedLine(
                     text=line.text,
@@ -590,6 +607,7 @@ def _resolve_texts(spec: Spec, times: dict[str, float], fps: int) -> list[Resolv
                     box_color=line.box_color,
                     dot=line.dot,
                     cursor=line.cursor,
+                    glyphs=run,
                 )
             )
         out.append(

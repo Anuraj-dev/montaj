@@ -256,6 +256,16 @@ def segment_hash(
             str(i): tl.spec.text[i].model_dump(mode="json", by_alias=True)
             for i in sorted(text_ids)
         }
+        # gpu-engine lines: the materialised layout (glyph ids, positions, font shas, cell params).
+        # Only present when a line uses it, so every older film keeps its hash.
+        runs = {
+            f"{i}.{j}": asdict(line.glyphs)
+            for i in sorted(text_ids)
+            for j, line in enumerate(tl.texts[i].lines)
+            if line.glyphs is not None
+        }
+        if runs:
+            payload["glyph_runs"] = runs
     if sub_ids:
         payload["subs"] = {
             str(i): tl.spec.subs[i].model_dump(mode="json", by_alias=True)

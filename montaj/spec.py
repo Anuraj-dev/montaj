@@ -324,6 +324,8 @@ class TextLine(Frozen):
     box_color: str | None = Field(default=None, exclude_if=lambda v: v is None)
     dot: str | None = Field(default=None, exclude_if=lambda v: v is None)
     cursor: bool = Field(default=False, exclude_if=lambda v: v is False)
+    # None = the style's engine (render/glyphs.STYLE_ENGINE). "gpu" shapes with HarfBuzz at resolve time.
+    engine: str | None = Field(default=None, exclude_if=lambda v: v is None)
 
 
 class LowerThird(Frozen):
@@ -2234,6 +2236,8 @@ def _check_text_line(path: str, line: TextLine, errors: list[str]) -> None:
         errors.append(_line(f"{path}.dur", "typewriter characters appear instantly", "remove dur, or use reveal: rise"))
     if line.cursor and line.reveal != "type":
         errors.append(_line(f"{path}.cursor", "cursor needs the typewriter reveal", "set reveal: type"))
+    if line.engine is not None:
+        _check_text_engine(path, line, errors)
     allowed = TEXT_WEIGHTS.get(line.style)
     if allowed and line.weight is not None and line.weight not in allowed:
         errors.append(_line(f"{path}.weight", f"{line.style} has no weight {_fmt_num(line.weight)}",
@@ -2253,6 +2257,25 @@ def _check_text_line(path: str, line: TextLine, errors: list[str]) -> None:
             )
 
 
+def _check_text_engine(path: str, line: TextLine, errors: list[str]) -> None:
+    from montaj.render import glyphs
+
+    if line.engine not in glyphs.ENGINES:
+        errors.append(_line(f"{path}.engine", f"unknown {line.engine!r}", "use chromium or gpu"))
+        return
+    if line.engine != "gpu":
+        return
+    # The gpu engine draws fill, shadow and the rise/pop/type reveals; these still need Chromium.
+    for name, unset in (("gold", False), ("box", "none"), ("cursor", False)):
+        if getattr(line, name) != unset:
+            errors.append(_line(f"{path}.{name}", f"{name} is not drawn by the gpu engine yet", "remove it, or drop engine: gpu"))
+    if line.style in TEXT_STYLES:
+        missing = glyphs.FontBook().missing(line.style, line.weight, line.italic, line.text)
+        if missing:
+            errors.append(_line(f"{path}.text", f"{line.style} fonts have no glyph for {''.join(missing)!r}",
+                                "use another style, or drop engine: gpu"))
+
+
 def _validate_card(
     card: CardSpec, index: int, fps: int, bpm: float | None, errors: list[str]
 ) -> None:
@@ -2264,6 +2287,8 @@ def _validate_card(
     for j, line in enumerate(card.text):
         p = f"{path}.text[{j}]"
         _check_text_line(p, line, errors)
+        if line.engine == "gpu":
+            errors.append(_line(f"{p}.engine", "card lines are drawn by Chromium", "remove engine: gpu"))
         _card_duration(line.at, fps, bpm, f"{p}.at", errors)
         if line.stagger is not None:
             _card_duration(line.stagger, fps, bpm, f"{p}.stagger", errors)

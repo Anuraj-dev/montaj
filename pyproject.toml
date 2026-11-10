@@ -4,11 +4,13 @@ version = "0.1.0"
 description = "Agent-native video harness: YAML spec in, finished video out"
 requires-python = ">=3.12,<3.13"
 dependencies = [
+    "fonttools[woff]>=4.68.0",
     "numpy>=2",
     "pillow>=11",
     "pydantic>=2.12",
     "pyyaml>=6",
     "torch==2.9.1",
+    "uharfbuzz>=0.57.0",
     "websocket-client>=1.9.2",
 ]
 
