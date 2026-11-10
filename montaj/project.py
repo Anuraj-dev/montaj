@@ -290,7 +290,7 @@ def segment_hash(
             payload["glyph_runs"] = runs
         # Text motion (#22): the resolved frame values (defaults, exit clocks, seeds). Absent when unused.
         motions = {
-            f"{i}.{j}": asdict(line.motion)
+            f"{i}.{j}": {k: v for k, v in asdict(line.motion).items() if not (k == "slam_from" and v is None)}
             for i in sorted(text_ids)
             for j, line in enumerate(tl.texts[i].lines)
             if line.motion is not None

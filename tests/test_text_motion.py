@@ -151,7 +151,7 @@ def test_emphasis_slam_and_shake_are_seeded(tmp_path: Path) -> None:
     m = ln.motion
     assert m.emph_kind == "slam" and m.shake == 6 and m.shake_dur == round(M.SHAKE_DUR * FPS)
     hit = ln.at + ln.stagger + m.emph_dur  # unit 1 lands
-    assert _pose(ln, 1, ln.at + ln.stagger, emph=True).scale == pytest.approx(M.SLAM_FROM)
+    assert _pose(ln, 1, ln.at + ln.stagger, emph=True).scale == pytest.approx(m.slam_from or M.SLAM_FROM)  # #24 caps it off the neighbours
     shaken = [_pose(ln, 1, hit + s, emph=True) for s in (0.5, 1.5, 3.5)]
     assert any(abs(p.dx) > 0.1 or abs(p.dy) > 0.1 for p in shaken)
     assert all(abs(p.dx) <= 6 and abs(p.dy) <= 6 for p in shaken)
