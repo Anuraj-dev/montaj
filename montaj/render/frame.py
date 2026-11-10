@@ -1357,6 +1357,18 @@ class Renderer:
         # Copy: fps is per film, and LOOKS itself stays immutable.
         return {**look, "fps": self.tl.fps}
 
+    def picture(self, f: int) -> torch.Tensor | None:
+        """One shot's graded picture at `f`, display-encoded 0..1: after grade and effects, before
+        overlays, text and the look (#45 scopes). None on a transition or a blank."""
+        scene = self.tl.plan(f).scene
+        if isinstance(scene, (Trans, Blank)):
+            return None
+        if isinstance(scene, (Card, Layers)):
+            self._ensure_rasters()  # only these scenes draw text into the picture itself
+        with torch.no_grad():
+            img = self._eval(scene, float(f))
+        return to_display(img) if self._linear else img.clamp(0, 1)
+
     def frame(self, f: int) -> torch.Tensor:
         """(3, H, W) in 0..1. Sub-frame times share the integer frame's scene."""
         plan = self.tl.plan(f)
