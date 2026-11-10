@@ -31,8 +31,11 @@ one glance with the sound off, so it is a few heavy words that change in time wi
 | Tracking | 0 to −0.01 em | Never letter-space Devanagari |
 
 ## Position and safe zones
-- **9:16:** centre x; baseline region between 60% and 72% of the height (y ≈ 1150–1380 of 1920).
-  Keep out of the top 12%, the bottom 22% and the right 14%: platform buttons and titles sit there.
+- **9:16:** centred in the safe band, not the frame (x ≈ 491 of 1080); baseline region between 60% and 72% of
+  the height (y ≈ 1150–1380 of 1920). Keep out of the top 12%, the bottom 22% and the right 14%: platform
+  buttons and titles sit there. `captions` keeps every chunk's ink, stroke, entry overshoot and capped slam
+  inside that band and 5% from every other edge (`check.safe` moves the band too); a chunk wider than the band
+  is split, and a lone word too wide is shrunk by `fit`.
 - **16:9:** lower third, at least 8% above the bottom edge; centre, or left-aligned beside a speaker.
 - Never across a face. If the speaker fills the frame, move the caption down to chest height, not onto the chin.
 - Hold the position for the whole clip. A caption that jumps around is noise; move it only for a designed beat.
@@ -59,7 +62,9 @@ one glance with the sound off, so it is a few heavy words that change in time wi
 | Pause > 0.6 s | Clear the caption | Leaving stale words on screen |
 
 Timing: a chunk may lead its word by up to 2 frames, never lag it. Reading speed above about 20 characters per
-second is too fast; make chunks smaller.
+second is too fast. A chunk stays up until the next one starts (or clears after a pause), so the reading rate
+is set by where a phrase is cut: `captions` picks the cuts that keep the fewest chunks over 20 cps, pairing a
+fast word with a slow neighbour. A word spoken faster than 20 cps that fits beside no neighbour still warns.
 
 Vary with intent. Sixty seconds of identical pops goes flat: let the hook, the numbers and the punchline get the
 bigger treatment, and keep the rest plain.
@@ -100,8 +105,8 @@ text and its segment hash, and `validate` warns instead).
   Authored text blocks without per-glyph layout have no ink box, so only the rate is measured for them.
 - A designed exception goes under `check.expect: [{caption: [a, b], why: ...}]`; findings inside the span become
   `INFO caption a-bs ignored as intended: why`.
-- The `punch` slam never carries the accented word past the 5% edge margin or into its neighbour; the entry
-  scale is capped per word (`Motion.slam_from`).
+- The `punch` slam never carries the accented word out of the caption's safe band or into its neighbour; the
+  entry scale is capped per word (`Motion.slam_from`).
 
 ## Slop list
 `validate` and `check` warn on most of these (#24).

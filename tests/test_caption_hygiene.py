@@ -204,3 +204,58 @@ def test_slam_cap_leaves_other_films_untouched(tmp_path: Path) -> None:
     plain = replace(line.motion, slam_from=None)
     assert "slam_from" not in {k for k, v in __import__("dataclasses").asdict(plain).items() if k != "slam_from"}
     assert M.entry("slam", 0.0, 6.0, 1.06, 0.0, None).scale == M.SLAM_FROM  # no cap: the original slam
+
+
+# --- defaults that pass the lints (M5 exit gate) -----------------------------------------------------------
+
+WIDE = [("background", 0.0, 0.5), ("extraordinary", 0.5, 1.1), ("is", 1.1, 1.3), ("not", 1.3, 1.6),
+        ("everything", 1.6, 2.2), ("recorded", 2.2, 2.7), ("yesterday", 2.7, 3.3), ("wonderful", 3.3, 4.0)]
+
+
+@pytest.mark.parametrize("preset", ["punch", "karaoke", "comic"])
+def test_every_chunk_ink_stays_in_the_safe_zone_through_its_entry(tmp_path: Path, preset: str) -> None:
+    """Posed ink (stroke, pop overshoot, the capped slam peak and the shake) stays inside the 9:16 platform
+    zones (right 14%, top 12%, bottom 22%) and 5% of the left edge on every frame of every chunk."""
+    _words(tmp_path, WIDE)
+    p = _write(tmp_path, "  - {photo: a, hold: 5s}\n", ["a"],
+               extra=f"captions: {{source: talk.words.json, preset: {preset}, emphasis: [2, 4, 6]}}\n")
+    tl = resolve(load_spec(p), tmp_path)
+    W, H = DESIGN_W, DESIGN_W * 1920 / 1080
+    left, right, top, bottom = 0.05 * W, (1 - 0.14) * W, 0.12 * H, (1 - 0.22) * H
+    slams = 0
+    for t in tl.texts:
+        for ln in t.lines:
+            stroke = ln.stroke.width if ln.stroke else 0.0
+            slams += ln.motion is not None and ln.motion.emph_kind == "slam"
+            units: dict[tuple[int, bool], list[float]] = {}
+            for g in ln.glyphs.glyphs:
+                if g.ink[2] > g.ink[0]:
+                    b = units.setdefault((g.unit, g.emph), list(g.ink))
+                    b[:] = min(b[0], g.ink[0]), min(b[1], g.ink[1]), max(b[2], g.ink[2]), max(b[3], g.ink[3])
+            for (unit, emph), (x0, y0, x1, y1) in units.items():
+                cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
+                for k in range(80):
+                    pose = M.unit_pose(ln.motion, unit, emph, ln.at + k / 4, ln.at, ln.stagger) if ln.motion else M.REST
+                    if pose.opacity <= 0:
+                        continue
+                    hw = (x1 - x0) / 2 * pose.scale + stroke
+                    hh = (y1 - y0) / 2 * pose.scale * pose.sy + stroke
+                    px, py = cx + pose.dx, cy + pose.dy
+                    assert left - 0.5 <= px - hw and px + hw <= right + 0.5, (ln.text, k, px - hw, px + hw)
+                    assert top <= py - hh and py + hh <= bottom, (ln.text, k)
+    assert preset != "punch" or slams  # the punch slam was exercised
+    assert [g for g in K.lines(tl) if "caption-safe" in g] == []
+
+
+def test_chunker_keeps_fast_words_under_the_reading_rate(tmp_path: Path) -> None:
+    """Two fast words in a row would flash past at 33 cps as one chunk; the planner pairs each with a slow
+    neighbour instead, and the rate lint (on-screen time, chunk start to the next chunk) stays quiet."""
+    rows = [("well", 0.0, 0.6), ("yes", 0.6, 1.2), ("quick", 1.2, 1.35), ("brown", 1.35, 1.5), ("fox", 1.5, 2.1)]
+    _words(tmp_path, rows)
+    p = _write(tmp_path, "  - {photo: a, hold: 3s}\n", ["a"],
+               extra="captions: {source: talk.words.json, words_per_chunk: [1, 2]}\n")
+    chunks, fps = C.plan(p)
+    assert [c.text for c in chunks] == ["well", "yes quick", "brown fox"]
+    for c in chunks:
+        assert sum(len(w.w) for w in c.words) / ((c.end - c.start) / fps) <= K.RATE_MAX_CPS
+    assert [g for g in K.lines(resolve(load_spec(p), tmp_path)) if "caption-rate" in g] == []

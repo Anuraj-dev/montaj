@@ -591,7 +591,13 @@ def _turn_stack(book: FontBook, line, pieces: list, rotate: float, escale: float
 def _resolve_texts(spec: Spec, times: dict[str, float], fps: int) -> list[ResolvedText]:
     out: list[ResolvedText] = []
     book: FontBook | None = None  # loaded on the first gpu line; one per resolve
+    band = None
+    if spec.caption_from is not None:  # blocks made by `captions` keep their slam inside the caption band
+        from montaj.captions import safe_band
+
+        band = safe_band(spec)
     for i, block in enumerate(spec.text):
+        caption = band is not None and i >= spec.caption_from
         frm = times[f"text[{i}].from"]
         to = times[f"text[{i}].to"]
         fi = times.get(f"text[{i}].fade_in", 0.0)
@@ -665,7 +671,8 @@ def _resolve_texts(spec: Spec, times: dict[str, float], fps: int) -> list[Resolv
                     y = run.box[1]  # `pos` lines: the laid-out top
                     if piece_motion is not None:
                         piece_motion = _cap_slam(piece_motion, run, spec.video.size,
-                                                 line.stroke.width if line.stroke is not None else 0.0)
+                                                 line.stroke.width if line.stroke is not None else 0.0,
+                                                 band if caption else None)
                 lines.append(
                     ResolvedLine(
                         text=text,
@@ -769,9 +776,11 @@ SLAM_MARGIN = 0.05  # fraction of the frame the zoomed ink must stay inside (mat
 SLAM_NEIGHBOUR_MIN = 1.25  # a slam still lands as a slam when a neighbouring word limits it
 
 
-def _cap_slam(m: Motion, run: GlyphRun, size: str, stroke: float) -> Motion:
-    """Lower a slam's starting scale so the zoomed ink (stroke and shake included) stays inside the frame's
-    safe margin, and, down to SLAM_NEIGHBOUR_MIN, clear of the words beside it. No slam: `m` unchanged."""
+def _cap_slam(m: Motion, run: GlyphRun, size: str, stroke: float,
+              box: tuple[float, float, float, float] | None = None) -> Motion:
+    """Lower a slam's starting scale so the zoomed ink (stroke and shake included) stays inside `box`
+    (design px; default the frame less SLAM_MARGIN; captions pass their safe band), and, down to
+    SLAM_NEIGHBOUR_MIN, clear of the words beside it. No slam: `m` unchanged."""
     from montaj.render.glyphs import DESIGN_W
 
     emph_slam, all_slam = m.emph_kind == "slam", m.kind == "slam"
@@ -792,7 +801,8 @@ def _cap_slam(m: Motion, run: GlyphRun, size: str, stroke: float) -> Motion:
     for u in slamming & boxes.keys():
         x0, y0, x1, y1 = boxes[u]
         cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
-        for centre, lo, hi, a, b in ((cx, x0, x1, mx, W - mx), (cy, y0, y1, my, H - my)):
+        bx0, by0, bx1, by1 = box if box is not None else (mx, my, W - mx, H - my)
+        for centre, lo, hi, a, b in ((cx, x0, x1, bx0, bx1), (cy, y0, y1, by0, by1)):
             edge = min(edge, (centre - a) / (centre - lo + pad), (b - centre) / (hi - centre + pad))
         for v, (n0, n1, n2, n3) in boxes.items():
             if v in slamming or n3 <= y0 or n1 >= y1:
