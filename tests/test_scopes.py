@@ -120,7 +120,11 @@ def test_write_grades_refuses_what_it_cannot_index() -> None:
 
 
 def _tl(*stems: str | None) -> SimpleNamespace:
-    return SimpleNamespace(shots=[SimpleNamespace(spec=SimpleNamespace(clip=s, photo=None)) for s in stems])
+    """Back-to-back 1 s shots that read each clip from its start (one take, one moment)."""
+    spec = SimpleNamespace(video=SimpleNamespace(fps=25, bpm=None))
+    shots = [SimpleNamespace(start=25 * k, end=25 * (k + 1), spec=SimpleNamespace(
+        clip=s, photo=None, range=None, clip_in=None, speed=None)) for k, s in enumerate(stems)]
+    return SimpleNamespace(shots=shots, fps=25, spec=spec, check_expects=[])
 
 
 def _s(i: int, p50: float, **kw) -> ShotScope:
@@ -135,7 +139,8 @@ def test_check_warnings() -> None:
     assert lines == [
         "WARN scopes shot 0: clip_hi 5.0% > 2% (lower grade.exposure or gain)",
         "WARN scopes shot 1: skin hue 50° off the skin line (10–34°) (adjust grade.temp/tint)",
-        "WARN scopes shots 0→1: p50 luma jumps +0.15 within one scene (montaj match --to 0)",
+        "WARN scopes shots 0→1 (1.0s): p50 luma jumps +0.15 within one scene "
+        "(montaj match --to 0; designed? check.expect luma or match: false)",
     ]
 
 

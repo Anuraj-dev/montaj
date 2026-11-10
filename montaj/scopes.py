@@ -37,6 +37,9 @@ LUMA = (0.2126, 0.7152, 0.0722)  # Rec.709, on display-encoded values (Y')
 CLIP_HI_WARN = 0.02  # fraction of pixels at the top
 SKIN_LINE = (10.0, 34.0)  # degrees of HSV hue; the skin line sits near 22
 LUMA_JUMP = 0.06  # p50 jump between adjacent shots of one scene that `check` flags
+# Two shots of one camera take are one scene only when their source windows sit at most this many
+# seconds apart (and no detected cut lies between them): past that they are different moments.
+SCENE_GAP_S = 10.0
 MATCH_FIELDS = ("exposure", "temp", "tint", "saturation")
 # Bounds keep a match a small correction: what lies past them is a content difference, not a grade.
 _RANGES = {"temp": (-2000.0, 2000.0), "tint": (-40.0, 40.0), "saturation": (0.5, 2.0), "exposure": (-4.0, 4.0)}
@@ -534,12 +537,50 @@ def match_line(row: MatchRow, target: ShotScope) -> str:
 
 # --- check -------------------------------------------------------------------------------------
 
-def _scene_key(tl: Timeline, i: int) -> str | None:
-    sh = tl.shots[i].spec
-    return str(sh.clip or sh.photo) if (sh.clip or sh.photo) else None
+def _window(tl: Timeline, i: int) -> tuple[float, float]:
+    """Source seconds clip shot `i` reads: `range`, else clip_in plus the hold at a scalar speed."""
+    sh, rs = tl.shots[i].spec, tl.shots[i]
+    if isinstance(sh.range, tuple):
+        return _clip_start_s(tl.spec, sh.range[0]), _clip_start_s(tl.spec, sh.range[1])
+    a = _clip_start_s(tl.spec, sh.clip_in)
+    speed = float(sh.speed) if isinstance(sh.speed, int | float) else 1.0  # keyed speed: approximate
+    return a, a + (rs.end - rs.start) / tl.fps * speed
 
 
-def warnings(stats: list[ShotScope], tl: Timeline) -> list[str]:
+def _same_scene(tl: Timeline, i: int, j: int, rows: dict[str, dict], recs: frozenset[str]) -> bool:
+    """Shots `i` and `j` show one lit scene, so a luma jump between them is an exposure change.
+    One photo is one scene. One clip is one scene only when it is not a screen recording (its luma
+    is UI content), the two source windows are within SCENE_GAP_S, and no detected cut lies between."""
+    a, b = tl.shots[i].spec, tl.shots[j].spec
+    if a.photo or b.photo:
+        return bool(a.photo) and str(a.photo) == str(b.photo) and not a.clip and not b.clip
+    if not a.clip or str(a.clip) != str(b.clip):
+        return False
+    stem = Path(str(a.clip)).stem
+    if stem in recs:
+        return False
+    (a0, a1), (b0, b1) = _window(tl, i), _window(tl, j)
+    if max(b0 - a1, a0 - b1) > SCENE_GAP_S:
+        return False
+    lo, hi = min(a0, b0), max(a1, b1)
+    return not any(lo < float(c) < hi for c in (rows.get(stem) or {}).get("cuts") or ())
+
+
+def _recordings(root: Path, tl: Timeline) -> frozenset[str]:
+    """Stems `ingest-rec` brought in: the clips with an `assets/<stem>.events.json` beside them."""
+    try:
+        return frozenset(p.name.removesuffix(".events.json") for p in (root / tl.spec.assets).glob("*.events.json"))
+    except OSError:
+        return frozenset()
+
+
+def _t(sec: float) -> str:
+    return f"{sec:.1f}s"
+
+
+def warnings(stats: list[ShotScope], tl: Timeline, rows: dict[str, dict] | None = None,
+             recs: frozenset[str] = frozenset()) -> list[str]:
+    """`rows` is analysis.json by stem (clip cuts); `recs` the screen-recording stems (skipped)."""
     out = []
     for s in stats:
         if s.clip_hi > CLIP_HI_WARN:
@@ -549,14 +590,30 @@ def warnings(stats: list[ShotScope], tl: Timeline) -> list[str]:
             out.append(f"WARN scopes shot {s.shot}: skin hue {s.skin_hue:.0f}° off the skin line "
                        f"({SKIN_LINE[0]:.0f}–{SKIN_LINE[1]:.0f}°) (adjust grade.temp/tint)")
     by = {s.shot: s for s in stats}
+    expects = [e for e in getattr(tl, "check_expects", ()) if e.kind == "luma"]
+    used = [False] * len(expects)
     for i in range(len(tl.shots) - 1):
         a, b = by.get(i), by.get(i + 1)
-        key = _scene_key(tl, i)
-        if a is None or b is None or key is None or key != _scene_key(tl, i + 1):
+        if a is None or b is None or abs(a.p50 - b.p50) <= LUMA_JUMP:
             continue
-        if abs(a.p50 - b.p50) > LUMA_JUMP:
-            out.append(f"WARN scopes shots {i}→{i + 1}: p50 luma jumps {b.p50 - a.p50:+.2f} within one scene "
-                       f"(montaj match --to {i})")
+        if not _same_scene(tl, i, i + 1, rows or {}, recs):
+            continue
+        at = tl.shots[i + 1].start / tl.fps
+        head = f"scopes shots {i}→{i + 1} ({_t(at)})"
+        off = next((k for k in (i, i + 1) if getattr(tl.shots[k].spec, "match", None) is False), None)
+        hit = next((k for k, e in enumerate(expects) if e.start <= at <= e.end), None)
+        if off is not None:
+            out.append(f"INFO {head} luma jump ignored as intended: match: false on shot {off}")
+        elif hit is not None:
+            used[hit] = True
+            why = expects[hit].why
+            out.append(f"INFO {head} luma jump ignored as intended" + (f": {why}" if why else ""))
+        else:
+            out.append(f"WARN {head}: p50 luma jumps {b.p50 - a.p50:+.2f} within one scene "
+                       f"(montaj match --to {i}; designed? check.expect luma or match: false)")
+    for k, e in enumerate(expects):
+        if not used[k]:
+            out.append(f"INFO expect luma {round(e.start, 2):g}-{round(e.end, 2):g}s not found")
     return out
 
 
@@ -573,7 +630,7 @@ def check_lines(root: Path, spec: Spec, *, policy: GpuPolicy | None = None) -> l
         # check reads a finished file; a spec whose pictures no longer render is not a scope finding.
         _log(log, f"scopes: unavailable: {exc}")
         return [f"INFO scopes: unavailable ({' '.join(str(exc).split())[:120]})"]
-    return warnings(stats, r.tl)
+    return warnings(stats, r.tl, _analysis(root, r.tl), _recordings(root, r.tl))
 
 
 def as_dict(s: ShotScope) -> dict:

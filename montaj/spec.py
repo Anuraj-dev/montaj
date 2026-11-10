@@ -698,6 +698,9 @@ class Shot(Frozen):
     custom: str | None = Field(default=None, exclude_if=lambda v: v is None)
     params: dict[str, Any] | None = Field(default=None, exclude_if=lambda v: v is None)
     effects: list[Effect] | None = Field(default=None, exclude_if=lambda v: v is None)
+    # `match: false` (#63): a luma jump into or out of this shot is designed, so check accepts it.
+    # Check-only (the renderer never reads it); absent stays out of model_dump and the segment hash.
+    match: Literal[False] | None = Field(default=None, exclude_if=lambda v: v is None)
     # Back to front; replaces the single source (#34). Absent stays out of model_dump.
     layers: list[Layer] | None = Field(default=None, exclude_if=lambda v: v is None)
     # `subject` on a clip shot: its ingested matte is the plane `behind` text sits under (#36). Absent stays out.
@@ -870,15 +873,17 @@ class ExpectSpan(Frozen):
     frozen: tuple[TimeExpr, TimeExpr] | None = None
     # A designed caption exception (#24): caption WARNs inside the span are dropped.
     caption: tuple[TimeExpr, TimeExpr] | None = Field(default=None, exclude_if=_none)
+    # A designed luma jump (#63): a scopes luma-jump WARN whose cut lies inside the span is accepted.
+    luma: tuple[TimeExpr, TimeExpr] | None = Field(default=None, exclude_if=_none)
     why: str | None = None
 
     @model_validator(mode="after")
     def _one_kind(self) -> ExpectSpan:
-        kinds = [k for k in ("black", "frozen", "caption") if getattr(self, k) is not None]
+        kinds = [k for k in ("black", "frozen", "caption", "luma") if getattr(self, k) is not None]
         if not kinds:
-            raise ValueError("need black, frozen or caption")
+            raise ValueError("need black, frozen, caption or luma")
         if len(kinds) > 1:
-            raise ValueError("set one of black, frozen, caption")
+            raise ValueError("set one of black, frozen, caption, luma")
         if self.why is None:
             return self
         why = self.why.strip()
@@ -1420,7 +1425,7 @@ def _time_strings(spec: Spec) -> list[str]:
             out.extend(k.t for k in keys)
     if spec.check is not None:
         for item in spec.check.expect:
-            pair = item.black or item.frozen or item.caption
+            pair = item.black or item.frozen or item.caption or item.luma
             if pair:
                 out.extend(pair)
     return out
@@ -3913,8 +3918,9 @@ def _validate_check(
                 )
             )
     for i, item in enumerate(spec.check.expect):
-        kind = "black" if item.black is not None else "frozen" if item.frozen is not None else "caption"
-        pair = item.black or item.frozen or item.caption
+        kind = ("black" if item.black is not None else "frozen" if item.frozen is not None
+                else "caption" if item.caption is not None else "luma")
+        pair = item.black or item.frozen or item.caption or item.luma
         if pair is None:
             continue
         ends: list[float | None] = []

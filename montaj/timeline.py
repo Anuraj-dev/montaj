@@ -1251,6 +1251,7 @@ def _resolved_expects(spec: Spec, times: dict[str, float]) -> list[ResolvedExpec
         end = times.get(f"check.expect[{i}].end")
         if start is None or end is None:
             continue
-        kind = "black" if item.black is not None else "frozen" if item.frozen is not None else "caption"
+        kind = ("black" if item.black is not None else "frozen" if item.frozen is not None
+                else "caption" if item.caption is not None else "luma")
         out.append(ResolvedExpect(kind, start / fps, end / fps, item.why))
     return out
