@@ -76,7 +76,7 @@ def _ok_line(root: Path, result, dt: float) -> str:
     w, h = result.size
     return (
         f"OK {_rel(root, path)} {result.seconds:.2f}s {w}x{h} {mb:.1f}MB "
-        f"rendered {result.rendered}/{n} cached {result.cached}/{n} in {dt:.1f}s"
+        f"rendered {result.rendered}/{n} cached {result.cached}/{n} in {dt:.1f}s gpu={result.gpu}"
     )
 
 

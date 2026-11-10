@@ -11,6 +11,7 @@ import torch
 from montaj import __version__
 from montaj.audio.mix import plan_audio, render_mix
 from montaj.encode import Encoder, concat, mux
+from montaj.gpu_policy import GpuPolicy, load_policy, resolve_device
 from montaj.gpulock import hold as gpu_hold
 from montaj.project import file_sha, find_photo, resolve_clip, segment_hash
 from montaj.render.canvas import Canvas
@@ -35,6 +36,7 @@ class RenderResult:
     rendered: int
     cached: int
     audio: bool = False
+    gpu: str = "all"  # `all`, or `partial(text,decode)`: the stages that fell back to the CPU
 
 
 def _apply_mode(spec: Spec, mode: str) -> Spec:
@@ -110,7 +112,8 @@ def _segment_shots(tl, seg: Segment) -> frozenset[int]:
     return frozenset(shots)
 
 
-def _encode_segment(renderer: Renderer, seg: Segment, dest: Path, fps: float, log: Path) -> None:
+def _encode_segment(renderer: Renderer, seg: Segment, dest: Path, fps: float, log: Path,
+                    policy: GpuPolicy | None = None) -> None:
     """Encode to a per-attempt temp file, then `os.replace` it onto the cache file.
 
     The name is `.<hash>.<pid>-<random>.partial.mp4`. A shared `.<hash>.partial.mp4`
@@ -119,7 +122,8 @@ def _encode_segment(renderer: Renderer, seg: Segment, dest: Path, fps: float, lo
     """
     tmp = dest.with_name(f".{dest.stem}.{os.getpid()}-{secrets.token_hex(4)}.partial.mp4")
     try:
-        with Encoder(tmp, renderer.cv.W, renderer.cv.H, fps, log=log, device=renderer.cv.device) as enc:
+        with Encoder(tmp, renderer.cv.W, renderer.cv.H, fps, log=log, device=renderer.cv.device,
+                     policy=policy) as enc:
             for f in range(seg.start, seg.end):
                 enc.write(renderer.frame(f))
         os.replace(tmp, dest)
@@ -128,8 +132,12 @@ def _encode_segment(renderer: Renderer, seg: Segment, dest: Path, fps: float, lo
         raise
 
 
-def render(spec_path: Path, mode: str = "preview") -> RenderResult:
+def render(spec_path: Path, mode: str = "preview", policy: GpuPolicy | None = None) -> RenderResult:
+    """`policy` defaults to the machine config's `[gpu]` table; it travels as an argument to every
+    pixel seam (decode, photo, text, encode) and its tally becomes `RenderResult.gpu`."""
     spec_path = Path(spec_path)
+    policy = policy if policy is not None else load_policy()
+    device = resolve_device(policy.device) if torch.cuda.is_available() else policy.device
     spec_dir = spec_path.parent
     spec = _apply_mode(load_spec(spec_path), mode)
     tl = resolve(spec, spec_dir)
@@ -169,8 +177,8 @@ def render(spec_path: Path, mode: str = "preview") -> RenderResult:
     # The lock covers CUDA, encode, concat and mux. Wait lines land in render.log.
     with gpu_hold(log):
         with torch.no_grad():
-            cv = Canvas(W, H, device="cuda")
-            renderer = Renderer(tl, spec_dir, cv, log=lambda message: _log(log, message))
+            cv = Canvas(W, H, device=device)
+            renderer = Renderer(tl, spec_dir, cv, log=lambda message: _log(log, message), policy=policy)
             try:
                 for seg in tl.segments:
                     # A cache hit still has to let the previous segment's wall go.
@@ -183,7 +191,7 @@ def render(spec_path: Path, mode: str = "preview") -> RenderResult:
                         _log(log, f"segment {seg.index} {seg.start}-{seg.end} hit {digest}")
                         continue
                     _log(log, f"segment {seg.index} {seg.start}-{seg.end} miss {digest}")
-                    _encode_segment(renderer, seg, dest, tl.fps, log)
+                    _encode_segment(renderer, seg, dest, tl.fps, log, policy)
                     rendered += 1
             finally:
                 del renderer, cv
@@ -216,4 +224,5 @@ def render(spec_path: Path, mode: str = "preview") -> RenderResult:
         rendered=rendered,
         cached=cached,
         audio=track is not None,
+        gpu=policy.summary(),
     )
