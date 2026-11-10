@@ -185,6 +185,7 @@ def test_birthday_short_still_resolves(tmp_path: Path) -> None:
 def test_birthday_song_film_validate(tmp_path: Path, capsys) -> None:
     proj = _film_project(tmp_path)
     code = main(["-C", str(proj), "validate"])
-    out = capsys.readouterr().out.strip()
+    out = capsys.readouterr().out.strip().splitlines()
     assert code == 0
-    assert out == "OK montaj.yaml 4950f 165.00s 56 shots 56 segments"
+    assert out[-1] == "OK montaj.yaml 4950f 165.00s 56 shots 56 segments"
+    assert all(line.startswith("WARN ") for line in out[:-1])  # hygiene facts (#24); the recipe's lyrics end in marks

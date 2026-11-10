@@ -663,6 +663,9 @@ def _resolve_texts(spec: Spec, times: dict[str, float], fps: int) -> list[Resolv
                         emphasis_scale=escale, pos=pos, rotate=rotate,
                     )
                     y = run.box[1]  # `pos` lines: the laid-out top
+                    if piece_motion is not None:
+                        piece_motion = _cap_slam(piece_motion, run, spec.video.size,
+                                                 line.stroke.width if line.stroke is not None else 0.0)
                 lines.append(
                     ResolvedLine(
                         text=text,
@@ -760,6 +763,47 @@ def _line_motion(line, path: str, times: dict[str, float], fps: int, to: float, 
                       idle_amount=float(a) if a is not None else M.IDLE_AMOUNT[line.idle.type],
                       idle_period=M.IDLE_PERIOD * fps)
     return Motion(**fields)
+
+
+SLAM_MARGIN = 0.05  # fraction of the frame the zoomed ink must stay inside (matches inspect's safe margin)
+SLAM_NEIGHBOUR_MIN = 1.25  # a slam still lands as a slam when a neighbouring word limits it
+
+
+def _cap_slam(m: Motion, run: GlyphRun, size: str, stroke: float) -> Motion:
+    """Lower a slam's starting scale so the zoomed ink (stroke and shake included) stays inside the frame's
+    safe margin, and, down to SLAM_NEIGHBOUR_MIN, clear of the words beside it. No slam: `m` unchanged."""
+    from montaj.render.glyphs import DESIGN_W
+
+    emph_slam, all_slam = m.emph_kind == "slam", m.kind == "slam"
+    if not (emph_slam or all_slam):
+        return m
+    w, h = (int(x) for x in size.lower().split("x"))
+    W, H = float(DESIGN_W), DESIGN_W * h / w
+    mx, my = SLAM_MARGIN * W, SLAM_MARGIN * H
+    boxes: dict[int, list[float]] = {}
+    for g in run.glyphs:
+        if g.ink[2] <= g.ink[0]:
+            continue
+        b = boxes.setdefault(g.unit, [g.ink[0], g.ink[1], g.ink[2], g.ink[3]])
+        b[0], b[1], b[2], b[3] = min(b[0], g.ink[0]), min(b[1], g.ink[1]), max(b[2], g.ink[2]), max(b[3], g.ink[3])
+    slamming = {g.unit for g in run.glyphs if all_slam or (emph_slam and g.emph)}
+    pad = stroke + m.shake
+    edge = neigh = M.SLAM_FROM
+    for u in slamming & boxes.keys():
+        x0, y0, x1, y1 = boxes[u]
+        cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
+        for centre, lo, hi, a, b in ((cx, x0, x1, mx, W - mx), (cy, y0, y1, my, H - my)):
+            edge = min(edge, (centre - a) / (centre - lo + pad), (b - centre) / (hi - centre + pad))
+        for v, (n0, n1, n2, n3) in boxes.items():
+            if v in slamming or n3 <= y0 or n1 >= y1:
+                continue
+            if n2 <= x0:
+                neigh = min(neigh, (cx - n2) / (cx - x0 + pad))
+            elif n0 >= x1:
+                neigh = min(neigh, (n0 - cx) / (x1 - cx + pad))
+    cap = max(1.0, min(edge, max(neigh, SLAM_NEIGHBOUR_MIN)))
+    cap = round(cap, 3)
+    return m if cap >= M.SLAM_FROM else replace(m, slam_from=cap)
 
 
 def _pair(v) -> tuple[float, float] | None:
@@ -922,6 +966,10 @@ def resolve(spec: Spec, spec_dir: Path) -> Timeline:
         from montaj.captions import expand_captions
 
         spec = expand_captions(spec, spec_dir)
+    if spec.subs:
+        from montaj.captions import normalise_subs
+
+        spec = normalise_subs(spec)
     spec = resolve_sugar(spec, spec_dir, errors)  # analysis sugar -> numbers, so the hash sees them
     parsed, times, markers, bpm, beat0, clip_ins = validate_spec(spec, errors, spec_dir=spec_dir)
     size = parse_wh(spec.video.size, "video.size", errors, even=True)
@@ -1085,6 +1133,6 @@ def _resolved_expects(spec: Spec, times: dict[str, float]) -> list[ResolvedExpec
         end = times.get(f"check.expect[{i}].end")
         if start is None or end is None:
             continue
-        kind = "black" if item.black is not None else "frozen"
+        kind = "black" if item.black is not None else "frozen" if item.frozen is not None else "caption"
         out.append(ResolvedExpect(kind, start / fps, end / fps, item.why))
     return out

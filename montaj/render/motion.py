@@ -66,6 +66,9 @@ class Motion:
     idle_amount: float = 0.0
     idle_period: float = 0.0
     seed: int = 0
+    # Starting scale of a slam, capped at resolve time so the zoomed ink stays in the safe zone.
+    # None = SLAM_FROM; left out of the hash while None (project.segment_hash).
+    slam_from: float | None = None
 
 
 @dataclass(frozen=True)
@@ -125,7 +128,8 @@ def settle_time(kind: str, dur: float) -> float:
     return dur + (SLAM_SETTLE if kind == "slam" else 0.0)
 
 
-def entry(kind: str, u: float, dur: float, overshoot_: float, distance: float, side: str | None) -> Pose:
+def entry(kind: str, u: float, dur: float, overshoot_: float, distance: float, side: str | None,
+          slam_from: float | None = None) -> Pose:
     """Pose `u` frames after the unit starts. Before 0 the unit is hidden; after the settle it is at rest."""
     if u < 0:
         return HIDDEN
@@ -144,7 +148,8 @@ def entry(kind: str, u: float, dur: float, overshoot_: float, distance: float, s
         return Pose(scale=overshoot(p, POP_FROM, overshoot_), opacity=min(1.0, p / 0.35))
     if kind == "slam":
         if u < dur:  # accelerate down onto the line
-            return Pose(scale=SLAM_FROM + (1.0 - SLAM_FROM) * _inq(p), opacity=min(1.0, p / 0.25))
+            start = SLAM_FROM if slam_from is None else slam_from
+            return Pose(scale=start + (1.0 - start) * _inq(p), opacity=min(1.0, p / 0.25))
         q = (u - dur) / SLAM_SETTLE  # squash past rest and back
         return Pose(scale=1.0 - (overshoot_ - 1.0) * math.sin(math.pi * q))
     if kind == "slide":
@@ -213,7 +218,7 @@ def unit_pose(m: Motion, unit: int, emph: bool, t: float, at: float, stagger: fl
         kind, dur, ov, distance = m.emph_kind, m.emph_dur, m.emph_overshoot, m.emph_distance
     else:
         kind, dur, ov, distance = m.kind, m.dur, m.overshoot, m.distance
-    pose = entry(kind, u, dur, ov, distance, m.from_)
+    pose = entry(kind, u, dur, ov, distance, m.from_, m.slam_from)
     if pose.opacity <= 0.0:
         return pose
     land = settle_time(kind, dur)

@@ -208,11 +208,13 @@ Photo fields (`crop`, `focus`, swirl `center`, wall `at`) are source-image pixel
 - `captions.emphasis` — `auto`, `none` or a list of word indexes, default `auto` — which word per chunk takes the accent; `auto` picks a number, a negation, or a long content word, never in two chunks running.
 - `captions.y` — number, default 64.6 % of the frame height on portrait, 80 % otherwise — design-px centre of the caption.
 - `captions.offset` — duration, default none — shifts every word time (a trimmed clip).
+- `captions.punctuation` — `drop` or `keep`, default `drop` — `drop` removes a trailing `.` `,` `।` from every chunk (`?` `!` `…` stay).
 - `captions.overrides` — list, default none — per-word fixes: `{word, text?, emphasis?}` rewrites a word or forces/clears its accent; `{chunk_break_before}` starts a chunk at that word. An index not in the source is an error. Trailing `.` and `,` are dropped from every word; `?` `!` stay.
 - `subs` — list, default none — lyric subtitles, one fixed style.
 - `subs[].from` — time expression, required — subtitle window start.
 - `subs[].to` — time expression, required — subtitle window end.
 - `subs[].text` — string, required — the lyric line.
+- `subs[].punctuation` — `drop` or `keep`, default unset — `drop` removes a trailing `.` `,` `।` from the line; unset keeps it as written and `validate` warns `WARN subs[i] ends with a full stop or comma`.
 - `subs[].size` — number, default `44` — font size in design px of a 1080-wide frame.
 - `subs[].color` — `cream`, `gold`, `ink` or `#rrggbb`, default `rgba(251,241,220,.92)` — `.sub` fill. Omit it to keep that translucent cream.
 - `tracks` — mapping, default none — slow global levels. Keys are piecewise curves like wall camera keys. Before the first key: first value; after the last: last value.
@@ -252,6 +254,8 @@ Photo fields (`crop`, `focus`, swirl `center`, wall `at`) are source-image pixel
 - `check.expect[].black` — `[start, end]` time expressions, black or frozen — a designed black window. Set this or `frozen`, not both. `end` must be later than `start`.
 - `check.expect[].frozen` — `[start, end]` time expressions, black or frozen — a designed hold. Set this or `black`, not both. `end` must be later than `start`.
 - `check.expect[].why` — string, default none — one line, added when this span matches a detected one.
+- `check.expect[].caption` — `[start, end]` time expressions — a designed caption exception: `check` silences `caption-*` findings inside it. Set exactly one of `black`, `frozen`, `caption`.
+- `check.safe` — mapping, default 9:16 top 0.12, bottom 0.22, right 0.14 (16:9 bottom 0.08) — platform safe-zone fractions for `WARN caption-safe chunk=N <side>`; keys `top` `bottom` `left` `right`.
 - `check.loudness` — mapping, default none — replaces the `-14` LUFS target used by `check`.
 - `check.loudness.i` — number, required with loudness — integrated-loudness target, in LUFS.
 - `check.loudness.tol` — number, default `1` — how far the measurement may sit from `i`, in LU.
