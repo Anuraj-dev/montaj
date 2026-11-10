@@ -195,10 +195,12 @@ def _window(cv, cx: float, cy: float, ex: float, ey: float) -> tuple[int, int, i
 
 def composite(cv, dst: torch.Tensor, source: LayerTexture, src_rect: tuple[float, float, float, float],
               dest_rect: tuple[float, float, float, float], state: LayerState, mode: str = "normal",
-              radius: float = 0.0, shadow: float = 0.0) -> None:
+              radius: float = 0.0, shadow: float = 0.0, post=None, post_pad: float = 0.0) -> None:
     """Draw `src_rect` of `source` (texture px) into `dest_rect` (device px) of `dst`, in place.
 
     `radius` is device px; `shadow` is the drop shadow's opacity. `dst` must be caller-owned.
+    `post(rgba, cx, cy)` filters the layer's premultiplied window (layer centre in window px) before the
+    blend: layer effects (#38). `post_pad` device px grows the window so the filter has room to spread.
     """
     x0, y0, x1, y1 = dest_rect
     hw, hh = (x1 - x0) / 2.0, (y1 - y0) / 2.0
@@ -210,7 +212,7 @@ def composite(cv, dst: torch.Tensor, source: LayerTexture, src_rect: tuple[float
     cos, sin = math.cos(th), math.sin(th)
     ex = (abs(cos) * hw + abs(sin) * hh) * s
     ey = (abs(sin) * hw + abs(cos) * hh) * s
-    pad = 2.0
+    pad = 2.0 + max(0.0, post_pad)
     off = sig = 0.0
     if shadow > 0:
         off, sig = SHADOW_OFFSET * cv.k, SHADOW_SIGMA * cv.k
@@ -242,6 +244,9 @@ def composite(cv, dst: torch.Tensor, source: LayerTexture, src_rect: tuple[float
         premul, a = smp[:3] * cov, smp[3:4] * cov
     else:
         premul, a = smp * cov, cov
+    if post is not None:
+        rgba = post(torch.cat((premul, a.expand(1, *premul.shape[1:])), dim=0), cx - wx0, cy - wy0)
+        premul, a = rgba[:3], rgba[3:4]
 
     view = dst[:, wy0:wy1, wx0:wx1]
     cb = view
