@@ -215,3 +215,14 @@ def test_added_font_files_reach_only_the_hash_of_segments_using_that_style():
     sans = _text_asset_shas(frozenset({"sans"}))
     assert "inter-latin-700-normal.woff2" in sans and not any(k.startswith("jetbrains") for k in sans)
     assert "text-ext.css" in sans
+
+
+def _lt_y(tmp_path: Path, size: str) -> float:
+    p = _write(tmp_path, "  - {photo: a, hold: 5s}\n", ["a"], extra="text:\n  - from: 0s\n    to: 2s\n    lower_third: {title: T}\n")
+    p.write_text(p.read_text().replace("1080x1920", size))
+    return load_spec(p).text[0].lines[0].y
+
+
+def test_lower_third_default_y_follows_the_frame(tmp_path):
+    assert _lt_y(tmp_path, "1080x1920") == 1500.0  # unchanged: existing hashes depend on it
+    assert _lt_y(tmp_path, "1920x1080") == pytest.approx(1080 * 1080 / 1920 - 210)  # 16:9: 397.5, room left for the subtitle

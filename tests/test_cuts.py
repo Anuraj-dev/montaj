@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import shutil
+import subprocess
 from pathlib import Path
 
 import numpy as np
@@ -222,3 +223,17 @@ def test_real_word_gaps_plan_the_same_with_energy() -> None:
     plain, _ = cuts.plan_spans(WORDS, "en")
     assert [sp["text"] for sp in with_db] == [sp["text"] for sp in plain]
     assert all(abs(a["s"] - b["s"]) <= 0.11 and abs(a["e"] - b["e"]) <= 0.11 for a, b in zip(with_db, plain))
+
+
+@needs_ffmpeg
+def test_black_spans_ignore_a_dark_ground_but_catch_black(tmp_path):
+    from montaj.qa import black_spans
+
+    def clip(color: str) -> Path:
+        out = tmp_path / f"{color.lstrip('#')}.mp4"
+        subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-f", "lavfi", "-i", f"color=c={color}:s=64x64:d=1:r=10",
+                        "-pix_fmt", "yuv420p", str(out)], check=True)
+        return out
+
+    assert black_spans(clip("0x0b1020")) == []
+    assert black_spans(clip("0x000000")) != []

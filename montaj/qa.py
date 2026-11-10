@@ -29,7 +29,7 @@ class Expect(NamedTuple):
     span: Span
     why: str | None = None
 BLACK_MIN_S = 0.10  # shorter than this is a fade, not a defect
-BLACK_PIX_TH = 0.10
+BLACK_PIX_TH = 0.05  # blackdetect pix_th: true black and the tail of a fade count; a dark ground (e.g. #0b1020, luma ~0.06) does not
 FREEZE_NOISE_DB = -60.0
 FREEZE_MIN_S = 0.5
 LOUDNESS_TARGET = -14.0
