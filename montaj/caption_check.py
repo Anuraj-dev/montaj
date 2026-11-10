@@ -12,7 +12,7 @@ import shutil
 from dataclasses import dataclass
 from pathlib import Path
 
-from montaj.captions import RATE_MAX_CPS, safe_zones
+from montaj.captions import RATE_MAX_CPS, safe_zones, window_cps
 from montaj.render.glyphs import DESIGN_W
 from montaj.spec import is_caption_block
 from montaj.timeline import ResolvedLine, Timeline
@@ -66,12 +66,15 @@ def _zones(tl: Timeline) -> dict[str, float]:
 
 
 def rate_lines(cs: list[Chunk], fps: int) -> list[tuple[Chunk, str]]:
-    out = []
-    for c in cs:
-        secs = (c.end - c.start) / fps
-        chars = len(c.text.replace(" ", ""))
-        if secs > 0 and chars / secs > RATE_MAX_CPS + 1e-9:
-            out.append((c, f"WARN caption-rate chunk={c.index} {chars / secs:.0f}cps"))
+    """Reading rate over a window of consecutive chunks (`captions.window_cps`), one WARN per fast window,
+    named by its first chunk; a window inside one already reported is not repeated."""
+    spans = [(len(c.text.replace(" ", "")), c.end - c.start) for c in cs]
+    out, reported = [], -1
+    for i in range(len(cs)):
+        a, b, cps = window_cps(spans, i, fps)
+        if cps > RATE_MAX_CPS + 1e-9 and a > reported:
+            out.append((cs[a], f"WARN caption-rate chunk={cs[a].index} {cps:.0f}cps"))
+            reported = b
     return out
 
 

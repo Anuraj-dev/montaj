@@ -9,7 +9,8 @@ Chunking: a pause >= 0.3 s, sentence punctuation and a `chunk_break_before` alwa
 the cut points are chosen together (a small dynamic programme) so that every chunk keeps the max word count,
 fits the line budget (the HarfBuzz width at the preset's size, via `glyphs.measure`, inside the caption's
 safe band) and never runs past a comma once it holds `words_per_chunk[0]` words; among those partitions the
-fewest chunks over RATE_MAX_CPS win, then the fewest chunks, then the most even on-screen times.
+fewest chunks whose reading window (`window_cps`, the measure `check` lints) is over RATE_MAX_CPS win, then
+the least excess, then the fewest chunks, then the most even on-screen times.
 """
 from __future__ import annotations
 
@@ -40,6 +41,10 @@ STOPWORDS = frozenset(
 )
 SQUARE_ASPECT = 1.15  # width/height under this counts as portrait-ish for the default y (and the 9:16 zones)
 RATE_MAX_CPS = 20.0  # characters per second a reader can follow (docs/CAPTIONS.md); `check` lints the same
+# Reading rate is measured over at least this much on-screen time, not per chunk: Netflix's Timed Text Style
+# Guide pairs its 20 cps adult limit with a 5/6 s minimum event duration, so a 0.3 s word is read with its
+# neighbours. A sustained fast stretch still exceeds the limit over any such window.
+RATE_WINDOW_S = 5 / 6
 # Platform UI on 9:16 (top bar, caption/title block, the right-hand button column) and on 16:9 (the seek bar).
 ZONES_PORTRAIT = {"top": 0.12, "bottom": 0.22, "right": 0.14, "left": 0.0}
 ZONES_LANDSCAPE = {"top": 0.0, "bottom": 0.08, "right": 0.0, "left": 0.0}
@@ -291,6 +296,21 @@ def _segments(words: list[Word], raw: dict[int, str], breaks: set[int]) -> list[
     return segs
 
 
+def window_cps(spans: list[tuple[int, int]], i: int, fps: int) -> tuple[int, int, float]:
+    """Reading rate from span `i`: `spans` are consecutive (characters, frames on screen). The window grows
+    forward from `i` until it holds RATE_WINDOW_S of on-screen time (backward from the end when the spans run
+    out first). Returns (first, last, cps) of the window."""
+    need = math.ceil(RATE_WINDOW_S * fps - 1e-9)
+    chars = frames = 0
+    a = b = i
+    while b < len(spans) and frames < need:
+        chars, frames, b = chars + spans[b][0], frames + spans[b][1], b + 1
+    while a > 0 and frames < need:
+        a -= 1
+        chars, frames = chars + spans[a][0], frames + spans[a][1]
+    return a, b - 1, chars * fps / frames if frames > 0 else 0.0
+
+
 def _tail_frame(seg: list[Word], nxt: list[Word] | None, fps: int) -> int:
     """Frame the segment's last chunk leaves on: the next segment's first word, or a hold after a long pause."""
     last = seg[-1]
@@ -308,10 +328,16 @@ def _chunk_words(words: list[Word], raw: dict[int, str], lo: int, hi: int, break
     cut decides each chunk's reading rate: a fast word joins a slower neighbour instead of flashing past.
     """
     segs = _segments(words, raw, breaks)
+    seg_frames = [[round(w.s * fps) for w in seg] + [_tail_frame(seg, segs[k + 1] if k + 1 < len(segs) else None, fps)]
+                  for k, seg in enumerate(segs)]
+    # Every word as its own span: the neighbours a candidate chunk's reading window reaches into (the finest
+    # cut; check measures over the final chunks, which differ only in where the window's edge falls).
+    spans = [(len(w.w), fr[k + 1] - fr[k]) for seg, fr in zip(segs, seg_frames) for k, w in enumerate(seg)]
+    reach = math.ceil(RATE_WINDOW_S * fps) + 1  # spans are >= 1 frame, so a window never needs more
     out: list[list[Word]] = []
-    for n_seg, seg in enumerate(segs):
+    first = 0  # index in `spans` of the segment's first word
+    for seg, frames in zip(segs, seg_frames):
         n = len(seg)
-        frames = [round(w.s * fps) for w in seg] + [_tail_frame(seg, segs[n_seg + 1] if n_seg + 1 < len(segs) else None, fps)]
         # best[b]: (cost, start of the last chunk) of the best split of seg[:b]
         best: list[tuple[tuple, int] | None] = [None] * (n + 1)
         best[0] = ((0, 0.0, 0, 0.0), 0)
@@ -326,7 +352,10 @@ def _chunk_words(words: list[Word], raw: dict[int, str], lo: int, hi: int, break
                 if b - a > 1 and width(group) > budget:
                     continue  # a single word too wide for the band is shrunk by `fit` instead
                 secs = max(frames[b] - frames[a], 1) / fps
-                cps = sum(len(w.w) for w in group) / secs
+                lo_i, hi_i = first + a, first + b
+                around = (spans[max(0, lo_i - reach):lo_i] + [(sum(len(w.w) for w in group), max(frames[b] - frames[a], 1))]
+                          + spans[hi_i:hi_i + reach])
+                cps = window_cps(around, min(lo_i, reach), fps)[2]
                 over = cps > RATE_MAX_CPS + 1e-9
                 c0 = best[a][0]
                 cost = (c0[0] + over, c0[1] + max(0.0, cps - RATE_MAX_CPS), c0[2] + 1, c0[3] + secs * secs)
@@ -338,6 +367,7 @@ def _chunk_words(words: list[Word], raw: dict[int, str], lo: int, hi: int, break
             cuts.append(seg[a:b])
             b = a
         out.extend(reversed(cuts))
+        first += n
     return out
 
 

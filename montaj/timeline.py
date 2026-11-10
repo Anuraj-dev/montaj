@@ -773,14 +773,14 @@ def _line_motion(line, path: str, times: dict[str, float], fps: int, to: float, 
 
 
 SLAM_MARGIN = 0.05  # fraction of the frame the zoomed ink must stay inside (matches inspect's safe margin)
-SLAM_NEIGHBOUR_MIN = 1.25  # a slam still lands as a slam when a neighbouring word limits it
 
 
 def _cap_slam(m: Motion, run: GlyphRun, size: str, stroke: float,
               box: tuple[float, float, float, float] | None = None) -> Motion:
     """Lower a slam's starting scale so the zoomed ink (stroke and shake included) stays inside `box`
-    (design px; default the frame less SLAM_MARGIN; captions pass their safe band), and, down to
-    SLAM_NEIGHBOUR_MIN, clear of the words beside it. No slam: `m` unchanged."""
+    (design px; default the frame less SLAM_MARGIN; captions pass their safe band), and keeps one space
+    width of clear ink from the words beside it, at their own entry peak (or their resting gap, when the
+    font sets them closer than a space). No slam: `m` unchanged."""
     from montaj.render.glyphs import DESIGN_W
 
     emph_slam, all_slam = m.emph_kind == "slam", m.kind == "slam"
@@ -797,6 +797,8 @@ def _cap_slam(m: Motion, run: GlyphRun, size: str, stroke: float,
         b[0], b[1], b[2], b[3] = min(b[0], g.ink[0]), min(b[1], g.ink[1]), max(b[2], g.ink[2]), max(b[3], g.ink[3])
     slamming = {g.unit for g in run.glyphs if all_slam or (emph_slam and g.emph)}
     pad = stroke + m.shake
+    space = max((g.advance for g in run.glyphs if g.ink[2] <= g.ink[0]), default=0.25 * run.size)
+    grow = max(1.0, m.overshoot) if m.kind in ("pop", "scale-in") else 1.0  # neighbours' own entry peak
     edge = neigh = M.SLAM_FROM
     for u in slamming & boxes.keys():
         x0, y0, x1, y1 = boxes[u]
@@ -807,11 +809,14 @@ def _cap_slam(m: Motion, run: GlyphRun, size: str, stroke: float,
         for v, (n0, n1, n2, n3) in boxes.items():
             if v in slamming or n3 <= y0 or n1 >= y1:
                 continue
+            half = (n2 - n0) / 2 * (grow - 1.0)
             if n2 <= x0:
-                neigh = min(neigh, (cx - n2) / (cx - x0 + pad))
+                gap = min(space, x0 - n2)
+                neigh = min(neigh, (cx - n2 - half - gap - m.shake) / (cx - x0))
             elif n0 >= x1:
-                neigh = min(neigh, (n0 - cx) / (x1 - cx + pad))
-    cap = max(1.0, min(edge, max(neigh, SLAM_NEIGHBOUR_MIN)))
+                gap = min(space, n0 - x1)
+                neigh = min(neigh, (n0 - half - gap - m.shake - cx) / (x1 - cx))
+    cap = max(1.0, min(edge, neigh))
     cap = round(cap, 3)
     return m if cap >= M.SLAM_FROM else replace(m, slam_from=cap)
 
