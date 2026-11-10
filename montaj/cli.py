@@ -79,6 +79,7 @@ def _parser() -> argparse.ArgumentParser:
     ing.add_argument("--photos", default=None)
     ing.add_argument("--fast", action="store_true")  # normalise only; no analysis
     ing.add_argument("--list", action="store_true")  # one line per analysed asset; no work
+    ing.add_argument("--matte", action="append", default=None, metavar="STEM")  # subject matte only (#36)
 
     rec = sub.add_parser("ingest-rec")
     rec.add_argument("video")
@@ -367,6 +368,10 @@ def _cmd_ingest(ns: argparse.Namespace, root: Path) -> list[str]:
         return [*lines, f"OK {len(lines)} assets"]
     if ns.photos is None and ns.fast:
         return ["ERR ingest: --fast needs --photos DIR"]
+    if ns.matte:
+        if ns.photos is not None or ns.fast:
+            return ["ERR ingest: --matte runs alone (ingest --photos first)"]
+        return _cmd_matte(ns.matte, root, assets)
     out = []
     if ns.photos is not None:
         infos = ingest(_at(root, ns.photos), assets, sheet_path=root / "build" / "ingest-sheet.jpg")
@@ -375,6 +380,36 @@ def _cmd_ingest(ns: argparse.Namespace, root: Path) -> list[str]:
         done = analyze_assets(assets, _make_analyzer, log=root / "build" / "ingest.log")
         out.append(f"analyzed={done.analyzed} cached={done.cached} -> {assets.name}/analysis.json")
     return ["OK " + " ".join(out)]
+
+
+def _cmd_matte(stems: list[str], root: Path, assets: Path) -> list[str]:
+    """`ingest --matte STEM`: compute (or reuse) each asset's subject matte on the GPU."""
+    import torch
+
+    from montaj.gpu_policy import resolve_device
+    from montaj.matte import JUMP_WARN, make_mattes
+    from montaj.project import find_clip, find_photo
+
+    sources = []
+    for stem in dict.fromkeys(stems):
+        for find in (find_clip, find_photo):
+            try:
+                sources.append((stem, find(assets, stem)))
+                break
+            except FileNotFoundError:
+                continue
+        else:
+            return [f"ERR ingest: no clip or photo {stem!r} in {assets.name}/ (montaj ingest --list)"]
+    policy = load_policy()
+    device = resolve_device(policy.device) if torch.cuda.is_available() else "cpu"
+    log = root / "build" / "ingest.log"
+    results = make_mattes(assets, sources, device=device, policy=policy, log=log)
+    made = [r for r in results if r.made]
+    frames = sum(r.frames for r in made)
+    out = [f"WARN matte {r.stem}: mean frame-to-frame change {r.jump:.3f}; check the cutout with montaj sheet"
+           for r in made if r.jump > JUMP_WARN]
+    out.append(f"OK mattes made={len(made)} cached={len(results) - len(made)} frames={frames} -> {assets.name}/mattes/")
+    return out
 
 
 def _cmd_inspect(ns: argparse.Namespace, root: Path, as_json: bool) -> list[str]:

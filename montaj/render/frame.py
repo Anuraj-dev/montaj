@@ -23,7 +23,8 @@ from PIL import Image
 
 from montaj.clipmap import camera_at, source_index
 from montaj.encode import probe
-from montaj.project import find_photo, resolve_clip, shot_clips
+from montaj.matte import find_matte
+from montaj.project import find_photo, matte_source, resolve_clip, shot_clips, shot_mattes
 from montaj.render.canvas import Canvas
 from montaj.render.clip import ClipSource, window_key
 from montaj.render.core import Photo, fit_s, sine, still
@@ -309,9 +310,14 @@ class Renderer:
         self._lut = None
         self._layer_images: _LRU = _LRU(caps["layer_images"])
         self._layer_plans_by_shot: dict[int, tuple[_LayerPlan, ...]] = {}
+        self._matte_files: dict[tuple[str, str], Path] = {}
+        # #36: text blocks drawn under the subject, and the rest; split once in `_ensure_rasters`.
+        self._behind: tuple[tuple, RasterSet, tuple, RasterSet] | None = None
         self._owners: dict[str, dict[tuple, set[int]]] = {"photos": {}, "bgs": {}, "cards": {}, "layer_images": {}}
         # A layer shot reads several clips in one frame; keep each one's reader (plus a neighbour's) open.
-        most = max((len(set(shot_clips(s.spec))) for s in tl.shots if s.spec.layers), default=0)
+        # A clip's subject matte (#36) is one more reader beside it, on a plain clip shot too.
+        most = max((len(set(shot_clips(s.spec))) + len(shot_mattes(s.spec))
+                    for s in tl.shots if s.spec.layers or shot_mattes(s.spec)), default=0)
         if most > 1:
             self._clips.cap = max(self._clips.cap, most + 1)
         video = tl.spec.video
@@ -416,16 +422,20 @@ class Renderer:
 
     def _drop_clips(self, needed: frozenset[int]) -> None:
         """Close windows this segment will not read. Same stem, different clip_in, is another window."""
-        wanted: dict[str, set[tuple]] = {}
+        wanted: dict[str | tuple, set[tuple]] = {}
         for index in needed:
-            plans = [lp.clip for lp in self._layer_plans(index) if lp.clip is not None]
-            plans.append(self._clip_plan(index))
-            for plan in plans:
+            sh = self.tl.shots[index].spec
+            layers = sh.layers or ()
+            plans = [(lp.clip, layer.mask is not None)
+                     for layer, lp in zip(layers, self._layer_plans(index)) if lp.clip is not None]
+            plans.append((self._clip_plan(index), sh.matte is not None))
+            for plan, matted in plans:
                 if plan is None:
                     continue
-                wanted.setdefault(plan.stem, set()).add(
-                    window_key(plan.clip_in, plan.w, plan.h, plan.count, plan.crop)
-                )
+                key = window_key(plan.clip_in, plan.w, plan.h, plan.count, plan.crop)
+                wanted.setdefault(plan.stem, set()).add(key)
+                if matted:  # its matte reads the same window of the matte file
+                    wanted.setdefault(("matte", plan.stem), set()).add(key)
         for stem in [stem for stem in self._clips if stem not in wanted]:
             src = self._clips.get(stem)
             del self._clips[stem]
@@ -593,6 +603,46 @@ class Renderer:
             self._clips[stem] = hit
         return hit
 
+    def _matte_file(self, kind: str, stem: str) -> Path:
+        hit = self._matte_files.get((kind, stem))
+        if hit is None:
+            src = matte_source(self._dir, self._assets, kind, stem)
+            hit = self._matte_files[(kind, stem)] = find_matte(self._assets, src, stem)
+        return hit
+
+    def _matte_reader(self, stem: str) -> ClipSource:
+        """A clip's matte decodes like the clip: same fps, window, crop and frame map."""
+        key = ("matte", stem)
+        hit = self._clips.get(key)
+        if hit is None:
+            hit = ClipSource(self._matte_file("clip", stem), self.tl.fps,
+                             device=self.cv.device, log=self._log, policy=self._policy)
+            self._clips[key] = hit
+        return hit
+
+    def _photo_matte(self, stem: str) -> torch.Tensor:
+        """(1, h, w) matte of a still, at the still's own size."""
+        key = ("matte", stem)
+        hit = self._layer_images.get(key)
+        if hit is None:
+            hit = LayerTexture(load_rgba(self._matte_file("photo", stem), self.cv.device, self._policy)[:1])
+            self._layer_images[key] = hit
+        self._note("layer_images", key)
+        return hit.tex
+
+    def _clip_matte(self, scene: Clip, t: float) -> torch.Tensor:
+        """(1, H, W) subject plane of a `matte:` clip shot, placed exactly like `_clip_frame`."""
+        plan = self._clip_plan(scene.shot)
+        m = self._matte_reader(plan.stem).frame(
+            t, float(scene.t0), plan.clip_in, plan.w, plan.h, nframes=plan.count, device=self.cv.device,
+            crop=plan.crop, src=plan.src,
+        )
+        if plan.box is not None:
+            keys = self._camera_keys(self.tl.shots[scene.shot].spec)
+            z, fx, fy = camera_at(keys, plan.box, t - scene.t0)
+            m = kenburns(self.cv, _ClipView(m[None]), fx, fy, z, 0.0, 0.0)
+        return m[:1]
+
     def _outgoing_frames(self, index: int) -> float:
         """Frames of this shot still visible after its hold, while the next transition plays.
 
@@ -680,6 +730,68 @@ class Renderer:
             t, plan.t_start, c.clip_in, c.w, c.h, nframes=c.count, device=self.cv.device, crop=c.crop,
         )
 
+    def _layer_matte(self, plan: _LayerPlan, t: float) -> torch.Tensor:
+        """(1, h, w) matte in the layer's texture px."""
+        c = plan.clip
+        if c is None:
+            return self._photo_matte(plan.stem)
+        return self._matte_reader(c.stem).frame(
+            t, plan.t_start, c.clip_in, c.w, c.h, nframes=c.count, device=self.cv.device, crop=c.crop,
+        )[:1]
+
+    def _layer_texture(self, layer, plan: _LayerPlan, t: float) -> LayerTexture:
+        """The layer's source; `mask: subject` multiplies it (premultiplied) by its matte."""
+        if layer.mask is None:
+            return LayerTexture(self._layer_clip(plan, t)) if plan.clip is not None else self._layer_image(plan.stem)
+        m = self._layer_matte(plan, t)
+        if plan.clip is not None:
+            rgb = self._layer_clip(plan, t)
+            return LayerTexture(torch.cat([rgb * m, m]))
+        key = ("cut", plan.stem)
+        hit = self._layer_images.get(key)
+        if hit is None:
+            tex = self._layer_image(plan.stem).tex
+            tex = tex if tex.shape[0] == 4 else torch.cat([tex, torch.ones_like(tex[:1])])
+            hit = self._layer_images[key] = LayerTexture(tex * m)
+        self._note("layer_images", key)
+        return hit
+
+    def _layers_subject(self, scene: Layers, t: float) -> torch.Tensor | None:
+        """(1, H, W): every `mask:` layer's matte where that layer lands, or None without one."""
+        shot = self.tl.shots[scene.shot]
+        hold = shot.end - shot.start
+        out: torch.Tensor | None = None
+        for layer, plan in zip(shot.spec.layers or (), self._layer_plans(scene.shot)):
+            if layer.mask is None:
+                continue
+            state = layer_state(layer, t - scene.t0, hold)
+            if state is None:
+                continue
+            if out is None:
+                out = torch.zeros(3, self.cv.H, self.cv.W, device=self.cv.device)
+            m = self._layer_matte(plan, t)
+            # Opacity and blend shape how the cutout looks, not where the subject is.
+            composite(self.cv, out, LayerTexture(m.expand(4, -1, -1)), plan.src, plan.dest,
+                      LayerState(state.scale, state.rotate, 1.0), "normal", float(layer.radius or 0.0) * self.cv.k)
+        return None if out is None else out[:1]
+
+    def _subject(self, scene: Scene, t: float) -> torch.Tensor | None:
+        """(1, H, W) in 0..1: where the on-screen subject is, for `behind:` text. None when no shot
+        on screen has a matte. A fade mixes both sides' planes; other transitions have none."""
+        if isinstance(scene, Clip):
+            return self._clip_matte(scene, t) if self.tl.shots[scene.shot].spec.matte is not None else None
+        if isinstance(scene, Layers):
+            return self._layers_subject(scene, t)
+        if isinstance(scene, Trans) and scene.kind == "fade":
+            a, b = self._subject(scene.a, t), self._subject(scene.b, t)
+            if a is None and b is None:
+                return None
+            zero = torch.zeros(1, self.cv.H, self.cv.W, device=self.cv.device)
+            x = (t - scene.t0) / scene.dur if scene.dur else 1.0
+            a3, b3 = (zero if a is None else a).expand(3, -1, -1), (zero if b is None else b).expand(3, -1, -1)
+            return self._fade(a3, b3, x, scene.blur)[:1]
+        return None
+
     def _layers_frame(self, scene: Layers, t: float) -> torch.Tensor:
         """Composite the shot's layers back to front. A bottom full-frame clip at rest is the base as-is,
         so a one-layer film matches the clip shot it replaces bit for bit."""
@@ -696,12 +808,12 @@ class Renderer:
             radius = float(layer.radius or 0.0) * k
             shadow = float(layer.shadow or 0.0)
             if (out is None and plan.full and state == _IDENTITY and mode == "normal"
-                    and radius == 0 and shadow == 0):
+                    and radius == 0 and shadow == 0 and layer.mask is None):
                 out = self._layer_clip(plan, t)
                 continue
             if out is None:
                 out = self._background()
-            tex = LayerTexture(self._layer_clip(plan, t)) if plan.clip is not None else self._layer_image(plan.stem)
+            tex = self._layer_texture(layer, plan, t)
             composite(self.cv, out, tex, plan.src, plan.dest, state, mode, radius, shadow)
         return out if out is not None else self._background()
 
@@ -928,12 +1040,27 @@ class Renderer:
         # Captions are card art, not the finish overlay. An empty RasterSet would still clone.
         if blocks or subs:
             self._rasters = RasterSet(rasters[:n_overlay], sub_r)
+            self._split_behind(rasters[:n_overlay], sub_r)
         self._card_rasters = {
             index: rasters[n_overlay + lo : n_overlay + hi] for index, (lo, hi) in card_index.items()
         }
         for caption in captions:
             self._sprite(caption)
         self._rasters_ready = True
+
+    def _split_behind(self, lines: tuple, sub_r: tuple) -> None:
+        """Partition blocks (and their line rasters) into `behind: subject` and the rest."""
+        flags = [block.behind is not None for block in self.tl.spec.text]
+        if not any(flags):
+            return
+        back, back_l, front, front_l = [], [], [], []
+        cursor = 0
+        for block, behind in zip(self._blocks, flags):
+            n = len(block.lines)
+            (back if behind else front).append(block)
+            (back_l if behind else front_l).extend(lines[cursor:cursor + n])
+            cursor += n
+        self._behind = (tuple(back), RasterSet(tuple(back_l), ()), tuple(front), RasterSet(tuple(front_l), sub_r))
 
     def text_layout(self) -> TextLayout:
         """The text this film shows, laid out (Chromium rasters, no frame rendered). Feeds `describe`."""
@@ -943,18 +1070,28 @@ class Renderer:
             float(self.cv.k), self.cv.H,
         )
 
-    def _overlay(self, f: int, above: list):
-        """Hook run inside `finish`: `above_finish` shapes, then text, so text always sits on top."""
+    def _overlay(self, f: int, above: list, scene: Scene | None = None):
+        """Hook run inside `finish`: `above_finish` shapes, then text, so text always sits on top.
+
+        With `behind:` blocks (#36) and a subject on screen: those blocks first, then the picture
+        again wherever the subject's matte is, then the other blocks and subs on top."""
         if self._rasters is None and not above:
             return None
+        subject = None
+        if self._behind is not None and scene is not None:
+            subject = self._subject(scene, float(f))
 
         def overlay(img: torch.Tensor) -> torch.Tensor:
             img = draw_overlays(self.cv, img, above, float(f))
             if self._rasters is None:
                 return img
-            return draw_text(
-                self.cv, img, self._blocks, self._subs, float(f), self._rasters, fps=float(self.tl.fps),
-            )
+            fps = float(self.tl.fps)
+            if subject is None:
+                return draw_text(self.cv, img, self._blocks, self._subs, float(f), self._rasters, fps=fps)
+            back, back_r, front, front_r = self._behind
+            under = draw_text(self.cv, img, back, (), float(f), back_r, fps=fps)
+            img = under + (img - under) * subject
+            return draw_text(self.cv, img, front, self._subs, float(f), front_r, fps=fps)
 
         return overlay
 
@@ -1081,4 +1218,4 @@ class Renderer:
             ovs = [self.tl.overlays[i] for i in plan.overlays]
             acc = draw_overlays(self.cv, acc, [o for o in ovs if not o.above_finish], float(f))
             above = [o for o in ovs if o.above_finish]
-            return finish(self.cv, acc, f, self._look(), plan, self._overlay(f, above))
+            return finish(self.cv, acc, f, self._look(), plan, self._overlay(f, above, plan.scene))
