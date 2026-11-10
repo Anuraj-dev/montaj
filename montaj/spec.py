@@ -27,6 +27,7 @@ from pydantic import (
 )
 
 from montaj.easing import NEW_EASES, parse_ease
+from montaj.grade import GRADE_TAGS, ColorSpec, Grade, GradeRef, check_grades
 from montaj.events import (
     Hit,
     Miss,
@@ -218,6 +219,8 @@ class Video(Frozen):
     outro: IntroOutro | None = None
     motion_blur: int = 1
     background: str = "#000000"
+    # #43: `{working: linear}` composites in linear light. Absent stays out of the hash.
+    color: ColorSpec | None = Field(default=None, exclude_if=_none_value)
 
 
 class Transition(Frozen):
@@ -644,6 +647,8 @@ class Shot(Frozen):
     freeze: DurationStr | int | None = Field(default=None, exclude_if=lambda v: v is None)
     drift: Drift | None = None
     tone: Tone | None = None
+    # #43 primary grade: inline, or a `grades:` name that `resolve_grades` replaces. Absent stays out.
+    grade: GradeRef | None = Field(default=None, exclude_if=_none_value)
     frame: FrameCard | None = None
     morph: Morph | None = None
     pulse: str | None = None
@@ -916,6 +921,7 @@ class Spec(Frozen):
     # Set by `expand_captions`: index of the first `text` block it made. Never dumped, so never hashed.
     caption_from: int | None = Field(default=None, exclude=True)
     captions: Captions | None = Field(default=None, exclude_if=_none_value)
+    grades: dict[str, Grade] | None = Field(default=None, exclude_if=_none_value)
 
 
 def _yaml_path(loc: tuple) -> str:
@@ -923,7 +929,7 @@ def _yaml_path(loc: tuple) -> str:
     for x in loc:
         if x == "in_":
             x = "in"
-        if x in ("look_name", "look_lut") or x in _SUGAR_TAGS:  # discriminator tags, not spec keys
+        if x in ("look_name", "look_lut") or x in _SUGAR_TAGS or x in GRADE_TAGS:  # discriminator tags, not spec keys
             continue
         if isinstance(x, int):
             if parts:
@@ -2592,6 +2598,7 @@ def validate_spec(
         holds.append(h)
 
     _validate_mattes(spec, spec_dir, errors)
+    check_grades(spec, errors)
     clip_ins: dict[int, str] = {}
     for i, sh in enumerate(spec.shots):
         h = holds[i]

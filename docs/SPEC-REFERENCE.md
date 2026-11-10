@@ -12,6 +12,8 @@ Photo fields (`crop`, `focus`, swirl `center`, wall `at`) are source-image pixel
 - `video.look.vignette` — number 0..1, default `0` — edge darkening, applied after the LUT. `0.1` is subtle.
 - `video.look.grain` — number 0..1, default `0` — film grain mix; `1` is the golden-film grain.
 - `video.background` — `#rrggbb`, default `#000000` — colour that shows through a fade from or to nothing.
+- `video.color` — mapping, default none — colour pipeline. Absent is display mode, unchanged from before.
+- `video.color.working` — `display` or `linear`, default `display` — `linear`: each shot is converted sRGB→linear on the GPU, then graded; effects, transitions (fades, dips, blurs, glows) and the motion-blur average run in linear light; the composite is converted back to sRGB before `look`, overlays and text, which stay display-referred. Fixes the dark mid-fade dip between bright shots. Order: input transform → `shots[].grade` → effects/transitions → output transform → `look` → text.
 - `video.intro` — mapping, default none — opening treatment on the first frames.
 - `video.intro.type` — `white-lift`, required with intro — a white bloom that settles onto the picture, plus a short lift from white.
 - `video.intro.dur` — duration, required with intro — how long the opening bloom lasts.
@@ -53,6 +55,19 @@ Photo fields (`crop`, `focus`, swirl `center`, wall `at`) are source-image pixel
 - `shots[].tone.brightness` — number, default `1` — CSS `brightness`.
 - `shots[].tone.saturate` — number, default `1` — CSS `saturate`.
 - `shots[].tone.contrast` — number, default `1` — CSS `contrast`.
+- `shots[].grade` — mapping or a `grades:` name, default none — primary grade on this shot's picture (any kind but `blank`), applied in linear light before its effects and transitions, in this order: exposure → temp/tint → contrast → lift/gamma/gain → saturation → vibrance → curves. Works in both `video.color.working` modes. A named grade is part of each using shot's cache key, so editing it re-renders only those shots.
+- `shots[].grade.exposure` — number −8..8, default `0` — stops; `1` doubles the light.
+- `shots[].grade.temp` — number −4000..4000, default `0` — white balance in kelvin from 6500 K; `+` is warmer. Gains keep a grey's luminance.
+- `shots[].grade.tint` — number −100..100, default `0` — `+` is magenta, `−` green.
+- `shots[].grade.contrast` — number > 0, default `1` — power curve about `pivot` in linear light.
+- `shots[].grade.pivot` — number 0..1, default `0.46` — display value contrast leaves fixed; `0.46` is 18% grey.
+- `shots[].grade.lift` — number or `[r, g, b]`, −1..1, default `0` — raises shadows: `y = gain·(x + lift·(1 − x))` on display values.
+- `shots[].grade.gamma` — number or `[r, g, b]`, > 0, default `1` — midtones: `y^(1/gamma)` after lift and gain; above 1 brightens.
+- `shots[].grade.gain` — number or `[r, g, b]`, 0..8, default `1` — scales highlights.
+- `shots[].grade.saturation` — number 0..4, default `1` — about Rec.709 luminance; `0` is monochrome.
+- `shots[].grade.vibrance` — number −1..1, default `0` — saturation that favours muted pixels.
+- `shots[].grade.curves.luma` — `[[x, y], …]`, default none — monotone cubic on display-encoded luminance, ≥ 2 points in 0..1 with x increasing; hue is kept. Beyond the end points it continues at slope 1.
+- `grades` — mapping of name → grade, default none — reusable grades; `shots[].grade: warm-day` uses one. Names are lowercase letters, digits, `-` and `_`.
 - `shots[].frame` — mapping, default none — polaroid card on a blurred copy of the photo. Needs `photo`.
 - `shots[].frame.caption` — string, default none — Great Vibes caption on the card.
 - `shots[].frame.tilt` — `[from, to]` degrees, default none — card rotation over the visible span.
