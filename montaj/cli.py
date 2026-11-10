@@ -854,7 +854,7 @@ def _audio_mix_lines(root: Path) -> list[str]:
     audio = spec.audio
     if audio is None or not (audio.clips or audio.edit or audio.duck or has_links(spec)):
         return []
-    return check_lines(json.loads(stats_file.read_text()))
+    return check_lines(json.loads(stats_file.read_text()), loudnorm=audio.loudnorm)
 
 
 def _join_lines(tl, root: Path, video: Path) -> list[str]:
@@ -1180,52 +1180,50 @@ def _cmd_cut(ns: argparse.Namespace, root: Path) -> list[str]:
             f"silence>{silence:g}s removed  fillers={plan['fillers']}"]
 
 
-BED_HEADROOM_DB = -6.0  # a composed bed's peak when the spec puts voice or SFX on top (#64)
+BED_HEADROOM_DB = -6.0  # a composed bed's peak: room for voice and SFX on top (#64)
 
 
-def _spec_has_clips(root: Path) -> bool:
-    """`montaj.yaml` in `root` places sound over the music: clips, linked clip audio, emphasis or `sfx: auto`.
+def _is_bed(root: Path, out: Path) -> bool:
+    """`out` is (or will be) the spec's music bed: no spec yet, no `audio.track`, or it is the track.
 
-    Raw YAML, not `load_spec`: the spec usually names the track this command is about to write, so it
-    would not validate yet.
+    It is not when the spec's track is another file, or an `audio.clips` src names it (extension
+    optional). Raw YAML, not `load_spec`: the spec often names a track that does not exist yet.
     """
     try:
         raw = yaml.safe_load((root / "montaj.yaml").read_text())
     except (OSError, yaml.YAMLError):
-        return False
-    if not isinstance(raw, dict):
-        return False
-    audio = raw.get("audio") if isinstance(raw.get("audio"), dict) else {}
-
-    def linked(node: object) -> bool:  # any shot, layer or component with `audio: true`
-        if isinstance(node, dict):
-            return node.get("audio") is True or any(linked(v) for v in node.values())
-        return isinstance(node, list) and any(linked(v) for v in node)
-
-    return bool(raw.get("emphasis") or audio.get("clips") or audio.get("sfx")
-                or linked(raw.get("shots")) or linked(raw.get("components")))
+        return True
+    audio = raw.get("audio") if isinstance(raw, dict) and isinstance(raw.get("audio"), dict) else {}
+    track = audio.get("track")
+    if isinstance(track, str) and track:
+        return (root / track).resolve() == out
+    clips = audio.get("clips") if isinstance(audio.get("clips"), list) else []
+    srcs = {(root / c["src"]).resolve() for c in clips if isinstance(c, dict) and isinstance(c.get("src"), str)}
+    return not ({out, out.with_suffix("")} & srcs)
 
 
 def _cmd_music_compose(ns: argparse.Namespace, root: Path) -> list[str]:
-    headroom = BED_HEADROOM_DB if _spec_has_clips(root) else None
+    out = _at(root, ns.out)
     try:
         result = compose_audio.compose(
             _at(root, ns.script),
-            _at(root, ns.out),
+            out,
             root=root,
             timeout=ns.timeout,
             log=root / "build" / "music.log",
-            headroom_db=headroom,
+            headroom_db=BED_HEADROOM_DB if _is_bed(root, out) else None,
         )
     except compose_audio.ComposeError as exc:
         return [f"ERR music compose: {exc}"]
     lines: list[str] = []
+    if result.scaled_db < 0:
+        lines.append(f"INFO music compose: bed turned down {-result.scaled_db:.1f} dB to "
+                     f"{BED_HEADROOM_DB:.0f} dBFS peak, room for voice/SFX (loudnorm at render restores the level)")
     if result.peak_dbfs >= -0.1:
         lines.append(f"WARN music compose: clipping (peak {compose_audio.format_db(result.peak_dbfs)} dBFS)")
     lines.append(
         f"OK {_rel(root, result.path)} {result.duration:.2f}s {result.sample_rate}Hz {result.channels}ch "
         f"peak {compose_audio.format_db(result.peak_dbfs)}dBFS {result.lufs:.1f}LUFS"
-        + (f" (scaled {result.scaled_db:.1f} dB: headroom for the spec's voice/SFX)" if result.scaled_db < 0 else "")
     )
     return lines
 

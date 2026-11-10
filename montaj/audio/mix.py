@@ -29,6 +29,7 @@ from pathlib import Path
 import numpy as np
 
 from montaj.encode import FFMPEG, FFPROBE, EncodeError
+from montaj.emphasis import SFX_ID
 from montaj.spec import _DUR, _assets_dir, _dur_frames, _line, _parse_time
 
 SR = 48000
@@ -129,7 +130,8 @@ class MixStats:
     hash: str = ""
     peak_s: float | None = None  # film time of the peak; None in stats written before #64
     peak_parts: tuple = ()  # ((label, dBFS), …) what each source adds at the peak sample, loudest first
-    fix: tuple = ()  # when clipped: (label, dB) — lowering that source by dB keeps the whole mix under the ceiling
+    # when clipped: (kind, name, placements, dB) from `_peak_fix`: a cut that keeps the mix under the ceiling
+    fix: tuple = ()
 
 
 def _span_s(raw: object, fps: int, bpm: float | None, path: str, errors: list[str],
@@ -998,13 +1000,33 @@ def _mix_parts(plan: MixPlan, cache: dict, log: Path | None) -> tuple[np.ndarray
     return bed, placed, duck_db
 
 
-def _label(c: Placed | Linked) -> str:
-    """How a check line names a placement: its id, else its file stem (`synth:hit` as is)."""
-    return c.id or (c.src if c.src.startswith("synth:") else Path(c.src).stem)
+TRACK = "music (track)"  # the bed in a check line; a clip may itself be called `music`
+
+
+def _key(c: Placed | Linked) -> tuple[str, str]:
+    """`(kind, name)` of the spec knob that sets a placement's level, as a check line names it.
+
+    `sfx`: emphasis / `sfx: auto` sounds, all set by `audio.sfx_gain`; `id`: every clip (or linked
+    shot) with that id; `src`: unnamed clips of that file (`synth:hit` as is).
+    """
+    if c.id == SFX_ID:
+        return ("sfx", "")
+    if c.id:
+        return ("id", c.id)
+    return ("src", c.src if c.src.startswith("synth:") else Path(c.src).name)
+
+
+def _shown(key: tuple[str, str]) -> str:
+    return {"track": TRACK, "sfx": "audio.sfx_gain"}.get(key[0], key[1])
 
 
 def _db_of(v: float) -> float:
     return 20 * math.log10(abs(v)) if v else -120.0
+
+
+def _cut_db(h: float) -> float:
+    """dB for scale `h`, rounded up to 0.1 dB so the printed cut clears it."""
+    return math.ceil((-20 * math.log10(h) + 0.005) * 10) / 10
 
 
 def _max_scale(other: np.ndarray, part: np.ndarray) -> float | None:
@@ -1023,31 +1045,44 @@ def _max_scale(other: np.ndarray, part: np.ndarray) -> float | None:
     return min(1.0, h) if h > 0 else None
 
 
-def _peak_fix(full: np.ndarray, placed: list, plan: MixPlan, order: list[str]) -> tuple:
-    """`(label, dB)`: the smallest single-source cut that keeps `full` under the ceiling everywhere.
+def _peak_fix(full: np.ndarray, placed: list, plan: MixPlan, order: list[tuple[str, str]]) -> tuple:
+    """`(kind, name, placements, dB)`: a cut that keeps `full` under the ceiling everywhere.
 
-    Candidates are the sources pushing the peak (`order`) and the music, minus duck sources (a quieter
-    voice moves the duck); the smallest cut wins. None clears it alone: every source by the overshoot.
+    Duck sources are never cut (a quieter voice moves the duck). The cheapest clip knob among the
+    sources pushing the peak (`order`) wins, since the spec sets it; else the track (no spec field
+    sets its level: re-compose or turn the file down); else every non-duck source together
+    (`name` lists the spared duck ids). If even that cannot clear it, every source by the overshoot.
     """
     ducked = set(plan.duck.under) if plan.duck is not None else set()
-    best: tuple = ()
-    for label in [n for n in order if n != "music" and n not in ducked] + ["music"]:
+    is_duck = [c.id in ducked for c, _, _ in placed]
+    clip_best: tuple = ()
+    for key in [k for k in order if k[0] != "track"]:
         part = np.zeros_like(full)
-        for c, s, x in placed:
-            if label == "music" or _label(c) == label:
+        n = 0
+        for (c, s, x), duck in zip(placed, is_duck):
+            if _key(c) == key and not duck:
                 part[s : s + len(x)] += x
-        if label == "music":
-            part = full - part  # the bed: everything that is not a placement
-        h = _max_scale(full - part, part)
-        if h is None:
+                n += 1
+        if not n or (h := _max_scale(full - part, part)) is None:
             continue
-        cut = math.ceil((-20 * math.log10(h) + 0.005) * 10) / 10  # round up so the printed cut clears it
-        if not best or cut < best[1]:
-            best = (label, cut)
-    if not best:
-        peak = float(np.max(np.abs(full)))
-        best = ("all", math.ceil((20 * math.log10(peak / PEAK_CEILING) + 0.005) * 10) / 10)
-    return best
+        if not clip_best or _cut_db(h) < clip_best[3]:
+            clip_best = (*key, n, _cut_db(h))
+    if clip_best:
+        return clip_best
+    duck_part = np.zeros_like(full)
+    for (c, s, x), duck in zip(placed, is_duck):
+        if duck:
+            duck_part[s : s + len(x)] += x
+    placed_sum = np.zeros_like(full)
+    for c, s, x in placed:
+        placed_sum[s : s + len(x)] += x
+    bed = full - placed_sum
+    track = Path(plan.track).name if plan.track else ""
+    if plan.track and (h := _max_scale(full - bed, bed)) is not None:
+        return ("track", track, 0, _cut_db(h))
+    if (h := _max_scale(duck_part, full - duck_part)) is not None:
+        return ("all", ", ".join(sorted(ducked)), 0, _cut_db(h))
+    return ("all", "", 0, _cut_db(PEAK_CEILING / float(np.max(np.abs(full)))))
 
 
 def mix_audio(plan: MixPlan, *, log: Path | None = None) -> tuple[np.ndarray, MixStats]:
@@ -1062,15 +1097,16 @@ def mix_audio(plan: MixPlan, *, log: Path | None = None) -> tuple[np.ndarray, Mi
     if peak > 0:
         i, ch = divmod(int(np.argmax(np.abs(bed))), bed.shape[1])
         peak_s = i / SR
-        at: dict[str, float] = {}
+        at: dict[tuple[str, str], float] = {}
         for c, s, x in placed:
             if s <= i < s + len(x):
-                at[_label(c)] = at.get(_label(c), 0.0) + float(x[i - s, ch])
-        at = {"music": float(bed[i, ch]) - sum(at.values()), **at}
-        parts = sorted(((n, v) for n, v in at.items() if abs(v) > 1e-3), key=lambda nv: -abs(nv[1]))
+                at[_key(c)] = at.get(_key(c), 0.0) + float(x[i - s, ch])
+        at = {("track", ""): float(bed[i, ch]) - sum(at.values()), **at}
+        keyed = sorted(((k, v) for k, v in at.items() if abs(v) > 1e-3), key=lambda kv: -abs(kv[1]))
+        parts = [(_shown(k), v) for k, v in keyed]
         if clipped:
             sign = math.copysign(1.0, float(bed[i, ch]))
-            fix = _peak_fix(bed, placed, plan, [n for n, v in parts if v * sign > 0])
+            fix = _peak_fix(bed, placed, plan, [k for k, v in keyed if v * sign > 0])
         if clipped:
             bed *= np.float32(PEAK_CEILING / peak)
     peak_db = 20 * math.log10(peak) if peak > 0 else -120.0
@@ -1153,27 +1189,38 @@ def render_mix(plan: MixPlan, build_dir: Path, *, log: Path | None = None) -> tu
     return wav, stats
 
 
-def check_lines(stats: dict) -> list[str]:
-    """`montaj check` lines from `build/audio-mix.json`."""
+def _fix_text(fix: list | tuple) -> str:
+    kind, name, n, cut = fix
+    if kind == "sfx":
+        return f"lower audio.sfx_gain by {cut:.1f} dB"
+    if kind in ("id", "src"):
+        what = f"clip {name}" if kind == "id" else f"{name} clip"
+        return f"lower gain on {'every ' if n > 1 else 'the '}{what} by {cut:.1f} dB"
+    if kind == "track":
+        return f"re-compose {name} or turn the file down by {cut:.1f} dB (no spec field sets the track level)"
+    spared = f" except duck sources ({name})" if name else ""
+    return f"lower the track and every clip{spared} by {cut:.1f} dB"
+
+
+def check_lines(stats: dict, *, loudnorm: bool = True) -> list[str]:
+    """`montaj check` lines from `build/audio-mix.json`; `loudnorm` is the spec's `audio.loudnorm`."""
     parts = [f"{stats['clips']} clips"]
     if stats["duck_db"] < 0:
         parts.append(f"duck {stats['duck_db']:.1f} dB")
     lines = [f"OK audio-mix {', '.join(parts)}, peak {stats['peak_dbfs']:+.1f} dBFS"]
     if stats["clipped"]:
-        # INFO, not WARN: the ceiling scale is one clean gain on the whole mix (no distortion) and
-        # loudnorm at mux sets the level anyway. The line says where the stack is and how to avoid it.
+        # The ceiling scale is one clean gain on the whole mix (no distortion). With loudnorm at mux
+        # the level comes back, so it is INFO; with loudnorm off the film really is quieter: WARN.
         scale = 20 * math.log10(PEAK_CEILING) - stats["peak_dbfs"]
-        line = f"INFO clip mix peak {stats['peak_dbfs']:+.1f} dBFS"
+        line = f"{'INFO' if loudnorm else 'WARN'} clip mix peak {stats['peak_dbfs']:+.1f} dBFS"
         if stats.get("peak_s") is not None:
             srcs = [f"{n} {v:+.1f}" for n, v in stats.get("peak_parts", ())]
             more = f", +{len(srcs) - 4} more" if len(srcs) > 4 else ""
             line += f" at {stats['peak_s']:.2f}s = {', '.join(srcs[:4])}{more}"
-        line += f"; whole mix scaled {scale:.1f} dB, clean"
-        fix = stats.get("fix") or ()
-        if fix:
-            who = "music and every clip" if fix[0] == "all" else "the music bed" if fix[0] == "music" \
-                else f"{fix[0]} gain"
-            line += f" (to skip the scale lower {who} by {fix[1]:.1f} dB)"
+        line += f"; whole mix scaled {scale:.1f} dB, clean" + ("" if loudnorm else ", and loudnorm is off: "
+                                                                "the film is that much quieter")
+        if len(stats.get("fix") or ()) == 4:
+            line += f" (to skip the scale {_fix_text(stats['fix'])})"
         lines.append(line)
     return lines
 

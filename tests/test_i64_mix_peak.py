@@ -69,38 +69,77 @@ def test_clipped_line_names_time_sources_and_a_clip_gain_that_clears_it_through_
     line = peak_line(stats)
     assert re.search(rf" at {stats.peak_s:.2f}s = ", line) and 1.0 <= stats.peak_s < 1.3
     labels = [n for n, _ in stats.peak_parts]
-    assert {"music", "synth:hit"} <= set(labels), line  # every source sounding at the peak sample
+    assert {"music (track)", "synth:hit"} <= set(labels), line  # every source sounding at the peak sample
     assert "whole mix scaled" in line and "clean" in line
     who, cut = FIX.search(line).groups()
-    assert who == "synth:hit gain", line
+    assert who == "gain on every synth:hit clip", line  # one spec entry, two placements, named by its src
     # One round: write the printed cut into the spec's `gain`, mix again, nothing left to scale.
     again = spec_mix(tmp_path, f"-{cut}dB")
     assert not again.clipped and again.peak_dbfs <= 20 * np.log10(mix.PEAK_CEILING)
     assert mix.check_lines(dataclasses.asdict(again))[1:] == []
 
 
-def test_a_bed_driven_peak_asks_for_a_quieter_music_bed_and_that_clears_it(tmp_path: Path) -> None:
-    music = tone(2.0, 0.96)
+def test_a_clip_wins_over_the_track_whenever_one_clears_it(tmp_path: Path) -> None:
     tick = Placed(None, float_wav(tmp_path / "t.wav", tone(0.2, 0.1)), 0, 0.0, None, 0.5, 0.0, 0.0)
-    stats = mix.mix_audio(MixPlan(float_wav(tmp_path / "m.wav", music), clips=(tick,)))[1]
-    who, cut = FIX.search(peak_line(stats)).groups()
-    assert who == "the music bed"  # cutting the tick alone would take ~20 dB; the bed needs < 1 dB
+    plan = MixPlan(float_wav(tmp_path / "m.wav", tone(2.0, 0.96)), clips=(tick,))
+    who, cut = FIX.search(peak_line(mix.mix_audio(plan)[1])).groups()
+    assert who == "gain on the t.wav clip"  # costlier than < 1 dB on the bed, but the spec can set it
+    quiet = dataclasses.replace(tick, gain_db=-float(cut))
+    assert not mix.mix_audio(dataclasses.replace(plan, clips=(quiet,)))[1].clipped
+
+
+def test_a_bed_only_peak_names_the_track_file_not_a_spec_field(tmp_path: Path) -> None:
+    music = tone(2.0, 1.0)  # the bed alone is over the ceiling: no clip cut can clear it
+    tick = Placed(None, float_wav(tmp_path / "t.wav", tone(0.2, 0.1)), 0, 0.0, None, 0.5, 0.0, 0.0)
+    line = peak_line(mix.mix_audio(MixPlan(float_wav(tmp_path / "m.wav", music), clips=(tick,)))[1])
+    m = re.search(r"\(to skip the scale re-compose m\.wav or turn the file down by ([\d.]+) dB "
+                  r"\(no spec field sets the track level\)\)$", line)
+    assert m, line
+    cut = m.group(1)
+    assert "music (track) " in line
     quieter = float_wav(tmp_path / "m2.wav", music * np.float32(10 ** (-float(cut) / 20)))
     assert not mix.mix_audio(MixPlan(quieter, clips=(tick,)))[1].clipped
 
 
-def test_no_single_source_can_clear_it_so_every_source_is_lowered(tmp_path: Path) -> None:
+def test_the_every_source_fallback_spares_duck_sources(tmp_path: Path) -> None:
     a = float_wav(tmp_path / "a.wav", tone(1.0, 0.6))
+    v = float_wav(tmp_path / "v.wav", tone(1.0, 0.1))
 
     def plan(db: float) -> MixPlan:
         bed = float_wav(tmp_path / f"m{db}.wav", tone(1.0, 0.6) * np.float32(10 ** (db / 20)))
         return MixPlan(bed, clips=(Placed("x", a, 0, 0.0, None, 0.0, db, 0.0),
-                                   Placed("y", a, 0, 0.0, None, 0.0, db, 0.0)))
+                                   Placed("y", a, 0, 0.0, None, 0.0, db, 0.0),
+                                   Placed("v", v, 0, 0.0, None, 0.0, 0.0, 0.0)),  # the voice keeps its gain
+                       duck=mix.DuckPlan(("v",), -1.0, 0.01, 0.05))
 
-    stats = mix.mix_audio(plan(0.0))[1]
+    _, stats = mix.mix_audio(plan(0.0))
     who, cut = FIX.search(peak_line(stats)).groups()
-    assert who == "music and every clip"  # any two of the three already clip
-    assert not mix.mix_audio(plan(-float(cut)))[1].clipped
+    assert who == "the track and every clip except duck sources (v)"  # any two of x, y, bed already clip
+    _, again = mix.mix_audio(plan(-float(cut)))
+    assert not again.clipped and again.duck_db == stats.duck_db  # the duck still triggers as before
+
+
+def test_emphasis_sounds_are_named_by_sfx_gain_and_a_clip_called_music_is_not_the_bed(tmp_path: Path) -> None:
+    from montaj.emphasis import SFX_ID
+
+    a = float_wav(tmp_path / "a.wav", tone(1.0, 0.7))
+    plan = MixPlan(float_wav(tmp_path / "m.wav", tone(1.0, 0.2)),
+                   clips=(Placed(SFX_ID, a, 0, 0.0, None, 0.0, 0.0, 0.0),
+                          Placed("music", float_wav(tmp_path / "b.wav", tone(1.0, 0.3)), 0, 0.0, None, 0.0, 0.0, 0.0)))
+    stats = mix.mix_audio(plan)[1]
+    line = peak_line(stats)
+    assert [n for n, _ in stats.peak_parts] == ["audio.sfx_gain", "music", "music (track)"], line
+    who, cut = FIX.search(line).groups()
+    assert who == "audio.sfx_gain", line
+    quiet = dataclasses.replace(plan.clips[0], gain_db=-float(cut))
+    assert not mix.mix_audio(dataclasses.replace(plan, clips=(quiet, plan.clips[1])))[1].clipped
+
+
+def test_with_loudnorm_off_the_scale_is_a_warn() -> None:
+    stats = {"clips": 1, "duck_db": 0.0, "peak_dbfs": 2.0, "clipped": True}
+    assert mix.check_lines(stats)[1].startswith("INFO clip mix peak +2.0 dBFS")
+    off = mix.check_lines(stats, loudnorm=False)[1]
+    assert off.startswith("WARN clip mix peak +2.0 dBFS") and "loudnorm is off" in off
 
 
 def test_stats_from_before_the_peak_detail_still_report_and_are_mixed_again(tmp_path: Path) -> None:
@@ -128,44 +167,51 @@ def _hot_bed_script(path: Path, peak_db: float = -1.0) -> None:
     )
 
 
-def _compose(project: Path, capsys: pytest.CaptureFixture[str]) -> str:
+def _compose(project: Path, capsys: pytest.CaptureFixture[str], out: str = "music/song.wav") -> list[str]:
     _hot_bed_script(project / "compose.py")
-    code = main(["-C", str(project), "music", "compose", "compose.py"])
-    out = capsys.readouterr().out.splitlines()
-    assert code == 0, out
-    return out[-1]
+    code = main(["-C", str(project), "music", "compose", "compose.py", "--out", out])
+    lines = capsys.readouterr().out.splitlines()
+    assert code == 0, lines
+    return lines
 
 
-def test_composed_bed_under_spec_clips_gets_headroom_and_sfx_on_top_do_not_clip(
+def test_composed_bed_gets_headroom_and_sfx_on_top_do_not_clip(
     tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.delenv("MONTAJ_CONFIG", raising=False)
     project = tmp_path / "p"
     (project / "build").mkdir(parents=True)
-    # The spec names the track compose is about to write, so it does not validate yet: still counts.
-    (project / "montaj.yaml").write_text(SPEC.format(hit="0dB"))
-    line = _compose(project, capsys)
-    assert " peak -6.0dBFS " in line and line.endswith("(scaled -5.0 dB: headroom for the spec's voice/SFX)"), line
+    lines = _compose(project, capsys)  # no spec yet: the skill composes before writing it
+    assert lines[0].startswith("INFO music compose: bed turned down 5.0 dB to -6 dBFS peak"), lines
+    assert " peak -6.0dBFS " in lines[-1] and lines[-1].endswith("LUFS"), lines
     with wave.open(str(project / "music" / "song.wav"), "rb") as w:
         assert (w.getnchannels(), w.getsampwidth()) == (2, 2)  # same format, just quieter
     # SFX at the gain Montaj gives the sounds it places, every 37 ms so some land on the bed's crests.
     hits = tuple(Placed(None, "synth:hit", 0, 0.0, None, t, float(DEFAULT_SFX_GAIN[:-2]), 0.0)
                  for t in np.arange(0.0, 1.8, 0.037))
     assert not mix.mix_audio(MixPlan(str(project / "music" / "song.wav"), clips=hits))[1].clipped
-    # Control: the same SFX over the bed as composed (-1 dBFS) do clip.
-    hot = tmp_path / "hot"
-    (hot / "build").mkdir(parents=True)
-    assert " peak -1.0dBFS " in _compose(hot, capsys)
-    assert mix.mix_audio(MixPlan(str(hot / "music" / "song.wav"), clips=hits))[1].clipped
+    # Control: the same SFX over the bed at the -1 dBFS the script wrote do clip.
+    hot = tmp_path / "hot.wav"
+    _hot_bed_script(tmp_path / "hot.py")
+    import subprocess, sys
+    subprocess.run([sys.executable, str(tmp_path / "hot.py"), str(hot)], check=True)
+    assert mix.mix_audio(MixPlan(str(hot), clips=hits))[1].clipped
 
 
-def test_compose_without_clips_in_the_spec_keeps_the_bed_level(
+@pytest.mark.parametrize(("spec", "out", "scaled"), [
+    ("audio: {track: music/song.wav}\n", "music/song.wav", True),  # the track, no clips: still the bed
+    ("video: {fps: 30}\n", "music/song.wav", True),  # a spec without a track yet
+    ("audio: {track: music/other.wav}\n", "music/song.wav", False),  # plainly not the track
+    ("audio:\n  clips:\n    - {src: sfx/sting, at: 1s}\n", "sfx/sting.wav", False),  # a clip src
+])
+def test_compose_headroom_applies_to_the_bed_only(
     tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch,
+    spec: str, out: str, scaled: bool,
 ) -> None:
     monkeypatch.delenv("MONTAJ_CONFIG", raising=False)
     project = tmp_path / "p"
     (project / "build").mkdir(parents=True)
-    (project / "montaj.yaml").write_text("video: {size: 64x64, fps: 30}\naudio: {track: music/song.wav}\n"
-                                         "shots:\n  - {blank: true, hold: 2s}\n")
-    line = _compose(project, capsys)
-    assert " peak -1.0dBFS " in line and "scaled" not in line
+    (project / "montaj.yaml").write_text(spec)
+    lines = _compose(project, capsys, out)
+    assert (" peak -6.0dBFS " in lines[-1]) == scaled and (" peak -1.0dBFS " in lines[-1]) != scaled, lines
+    assert any(line.startswith("INFO music compose") for line in lines) == scaled
