@@ -187,6 +187,46 @@ def test_recipe_is_under_ten_lines_and_is_a_valid_block() -> None:
     assert data["captions"]["source"] == "voice"
 
 
+def _voice_film(tmp: Path, shot: str = "{clip: voice, range: [0s, 6s]}", extra: str = "", audio: bool = True) -> Path:
+    from tests.test_linked_audio import make_clip
+
+    make_clip(tmp / "assets" / "voice.mov", audio=audio)
+    _words(tmp / "assets", name="voice.words.json")
+    p = tmp / "montaj.yaml"
+    p.write_text(f"video: {{size: 64x64, fps: 30, look: clean}}\nshots:\n  - {shot}\n"
+                 f"captions: {{source: voice}}\n{extra}")
+    return p
+
+
+def test_captions_of_a_clip_link_its_voice_when_the_film_has_no_audio(tmp_path: Path) -> None:
+    """recipes/captions-short.yaml rendered silent: captions named the clip, nothing linked its sound."""
+    spec = load_spec(_voice_film(tmp_path))
+    assert spec.shots[0].audio is True and spec.audio is not None and spec.audio.track is None
+    from montaj.audio import mix
+
+    tl = resolve(spec, tmp_path)
+    plan = mix.plan_audio(tl.spec, tmp_path, tl.markers, FPS, None, 0.0, [], shots=tl.shots)
+    assert plan is not None and plan.active and len(plan.links) == 1
+    # Pixels do not move: the same film with the shot muted hashes alike.
+    muted = tmp_path / "muted"
+    muted.mkdir()
+    off = resolve(load_spec(_voice_film(muted, "{clip: voice, range: [0s, 6s], audio: false}")), muted)
+    sha = {"clip:voice": "x"}
+    assert [segment_hash(tl, s, sha, "e1") for s in tl.segments] == [
+        segment_hash(off, s, sha, "e1") for s in off.segments]
+
+
+@pytest.mark.parametrize("shot, extra, audio", [
+    ("{clip: voice, range: [0s, 6s], audio: false}", "", True),  # the author muted the shot
+    ("{clip: voice, range: [0s, 6s]}", "audio: {clips: [{src: voice.mov, at: 0s}]}\n", True),  # voice placed by hand
+    ("{clip: voice, range: [0s, 6s]}", "", False),  # a clip without sound stays a silent film
+])
+def test_captions_leave_audio_alone_when_the_author_decided(tmp_path: Path, shot: str, extra: str, audio: bool) -> None:
+    spec = load_spec(_voice_film(tmp_path, shot, extra, audio))
+    assert not spec.shots[0].audio
+    assert (spec.audio is None) == (not extra)
+
+
 def test_transcribe_is_a_callable_that_writes_words(tmp_path: Path, monkeypatch) -> None:
     import montaj.audio.analyze as A
 

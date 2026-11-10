@@ -680,7 +680,35 @@ def expand_captions(spec: Spec, spec_dir: Path | None, errors: list[str] | None 
         if own:
             raise SpecError(errors[before:])
         return spec
-    return spec.model_copy(update={"text": [*spec.text, *parsed], "captions": None, "caption_from": len(spec.text)})
+    update = {"text": [*spec.text, *parsed], "captions": None, "caption_from": len(spec.text)}
+    update.update(_link_voice(spec, spec_dir))
+    return spec.model_copy(update=update)
+
+
+def _link_voice(spec: Spec, spec_dir: Path | None) -> dict:
+    """Captions of a clip's speech over a silent film is never the intent: when `captions.source` is a
+    clip id and the spec has no `audio` block, the shots showing that clip get `audio: true` (their own
+    sound, over a silent bed). Any `audio` block, or `audio: false` on the shot, means the author has
+    decided, and nothing is added. Audio fields are outside the segment hash, so pixels do not move."""
+    cap = spec.captions
+    assert cap is not None
+    if spec.audio is not None or cap.source == "audio.markers" or ((spec_dir or Path(".")) / cap.source).is_file():
+        return {}
+    from montaj.audio.mix import _audio_start, _link_src
+    from montaj.spec import Audio
+
+    shots, heard = [], {}
+    for sh in spec.shots:
+        if sh.clip is not None and sh.audio is None and Path(sh.clip).stem == cap.source:
+            if sh.clip not in heard:
+                src = _link_src(spec, spec_dir, sh.clip)
+                heard[sh.clip] = src is not None and _audio_start(src) is not None
+            if heard[sh.clip]:
+                sh = sh.model_copy(update={"audio": True})
+        shots.append(sh)
+    if not any(heard.values()):
+        return {}
+    return {"shots": shots, "audio": Audio()}
 
 
 # --- review as text ----------------------------------------------------------------------------------------
