@@ -1260,6 +1260,17 @@ def line_extent(block: TextBlock, line: TextLine, raster: RasterLine | GlyphLine
     if glyph:  # gpu engine: the shaped outlines' boxes, already design px
         rects = [g.ink for g in raster.run.glyphs
                  if g.ink[2] > g.ink[0] and (ks[g.unit] if g.unit < n else 1.0) > 1e-4]
+        if rects and raster.run.rotate:  # the turned boxes' bounds, about the line box centre
+            px, py = raster.run.pivot
+            a = math.radians(raster.run.rotate)
+            c, sn = math.cos(a), math.sin(a)
+            turned = []
+            for x0, y0, x1, y1 in rects:
+                pts = [(px + (x - px) * c - (y - py) * sn, py + (x - px) * sn + (y - py) * c)
+                       for x, y in ((x0, y0), (x1, y0), (x0, y1), (x1, y1))]
+                turned.append((min(q[0] for q in pts), min(q[1] for q in pts),
+                               max(q[0] for q in pts), max(q[1] for q in pts)))
+            rects = turned
     else:
         rects = [r for u, uk in zip(raster.units, ks) if uk > 1e-4 and (r := _ink(u, k, memo)) is not None]
     if not glyph and raster.chip is not None and ks and ks[0] > 1e-4 and raster.chip_box is not None:
