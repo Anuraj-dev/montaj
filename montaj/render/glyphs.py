@@ -402,6 +402,127 @@ def layout_line(
     )
 
 
+# --- fit and wrap ---------------------------------------------------------------------------------
+# Measurement is the shaping above and nothing else, so `validate` needs no GPU and no browser. The
+# bundled woff2 files are the ones Chromium loads (text.css), and shaped widths match its layout boxes
+# to the pixel for every style, so legacy Chromium lines are measured the same way. A chip's padding is
+# not counted.
+
+FIT_MARGIN = 72.0  # design px each side; the default `max_width` is DESIGN_W - 2 * FIT_MARGIN
+MIN_FIT_SIZE = 8.0
+MAX_WRAP_WORDS = 24
+
+
+@dataclass(frozen=True)
+class FitPlan:
+    """The lines a text becomes at `size` (design px): one per entry of `lines`, `pitch` apart."""
+
+    size: float
+    lines: tuple[str, ...]
+    pitch: float
+    width: float  # widest line
+    fits: bool
+
+
+def default_max_width() -> float:
+    return DESIGN_W - 2.0 * FIT_MARGIN
+
+
+def measure(book: FontBook, text: str, *, style: str, size: float, weight=None, italic=False, tracking=None,
+            line_height=None, align="center", indent=0.0) -> tuple[float, float, float]:
+    """(x, width, line box height) of one shaped line, as `layout_line` places it. ValueError if a glyph is missing."""
+    run = layout_line(book, text, style=style, y=0.0, size=size, weight=weight, italic=italic, tracking=tracking,
+                      line_height=line_height, align=align, indent=indent)
+    return run.box[0], run.box[2], run.box[3]
+
+
+def frame_overflow(x: float, width: float) -> float:
+    """Design px of a line box outside the 1080-wide frame (both sides summed)."""
+    return max(0.0, x + width - DESIGN_W) + max(0.0, -x)
+
+
+def _partitions(n_words: int, n_lines: int):
+    """Every way to cut `n_words` words into `n_lines` non-empty runs, as tuples of start indices."""
+    from itertools import combinations
+
+    for cuts in combinations(range(1, n_words), n_lines - 1):
+        yield (0, *cuts)
+
+
+def _break(words: list[str], width_of, max_width: float, max_lines: int) -> list[str]:
+    """Balanced lines: the fewest lines (up to `max_lines`) that fit, then the narrowest widest line, then
+    the most even widths. A last line of one word much narrower than the widest is an orphan; any
+    partition without one wins over any with one."""
+    whole = " ".join(words)
+    if len(words) < 2 or width_of(whole) <= max_width:
+        return [whole]
+    best: list[str] | None = None
+    for n in range(2, min(max_lines, len(words)) + 1):
+        scored = []
+        for starts in _partitions(len(words), n):
+            ends = (*starts[1:], len(words))
+            lines = [" ".join(words[a:b]) for a, b in zip(starts, ends)]
+            ws = [width_of(ln) for ln in lines]
+            top = max(ws)
+            orphan = ends[-1] - starts[-1] == 1 and ws[-1] < 0.4 * top
+            scored.append((orphan, top, sum((top - w) ** 2 for w in ws), lines))
+        scored.sort(key=lambda r: r[:3])
+        best = scored[0][3]
+        if scored[0][1] <= max_width:
+            break
+    return best or [whole]
+
+
+def plan_text(
+    book: FontBook,
+    text: str,
+    *,
+    style: str,
+    size: float | None = None,
+    weight: float | None = None,
+    italic: bool = False,
+    tracking: float | None = None,
+    line_height: float | None = None,
+    fit: bool = False,
+    balance: bool = False,
+    max_width: float | None = None,
+    max_lines: int = 2,
+) -> FitPlan:
+    """Resolve `fit` / `wrap: balance` for one line. Without either, one line at `size`.
+
+    `fit` shrinks the size (whole design px, never below MIN_FIT_SIZE) until every line is within
+    `max_width`; `balance` breaks at spaces first, so a long text wraps before it shrinks.
+    """
+    limit = float(max_width) if max_width is not None else default_max_width()
+    cur = float(size if size is not None else STYLE_METRICS[style].size)
+    kw = dict(style=style, weight=weight, italic=italic, tracking=tracking, line_height=line_height)
+    words = text.split(" ")
+    if balance and len(words) > MAX_WRAP_WORDS:
+        raise ValueError(f"wrap: balance takes at most {MAX_WRAP_WORDS} words, got {len(words)}")
+    while True:
+        memo: dict[str, float] = {}
+
+        def width_of(t: str, _size=cur, _memo=memo) -> float:
+            if t not in _memo:
+                _memo[t] = measure(book, t, size=_size, **kw)[1]
+            return _memo[t]
+
+        lines = _break(words, width_of, limit, max_lines) if balance else [text]
+        widest = max(width_of(ln) for ln in lines)
+        if widest <= limit + 1e-6 or not fit or cur <= MIN_FIT_SIZE:
+            pitch = measure(book, lines[0], size=cur, **kw)[2]
+            return FitPlan(cur, tuple(lines), pitch, widest, widest <= limit + 1e-6)
+        nxt = math.floor(cur * limit / widest)
+        cur = float(max(MIN_FIT_SIZE, min(nxt, math.ceil(cur) - 1)))
+
+
+def fitting_size(book: FontBook, text: str, *, style: str, size: float | None = None, weight=None, italic=False,
+                 tracking=None, line_height=None, max_width: float | None = None) -> float:
+    """Largest whole design-px size at which `text` fits on one line (the number `validate` suggests)."""
+    return plan_text(book, text, style=style, size=size, weight=weight, italic=italic, tracking=tracking,
+                     line_height=line_height, fit=True, max_width=max_width).size
+
+
 # --- distance-field cells ------------------------------------------------------------------------
 
 
