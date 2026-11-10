@@ -198,10 +198,13 @@ def link_skill() -> list[str]:
         if os.path.lexists(link) and not link.is_symlink():
             lines.append(f"ERR skill {SKILL}: {link} is not a symlink: remove it first")
             continue
+        # Build the new link beside the old one and rename it over, so a failure never loses the old link.
+        tmp = d / f".{SKILL}.tmp"
         try:
-            if link.is_symlink():
-                link.unlink()
-            link.symlink_to(source, target_is_directory=True)
+            if os.path.lexists(tmp):
+                tmp.unlink()
+            tmp.symlink_to(source, target_is_directory=True)
+            os.replace(tmp, link)
         except OSError as e:
             lines.append(f"ERR skill {SKILL}: {link}: {e.strerror or e}")
             continue

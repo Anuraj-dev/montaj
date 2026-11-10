@@ -158,3 +158,18 @@ def test_link_is_left_alone_when_it_resolves_to_this_checkout(home: Path, tmp_pa
     link.symlink_to(alias / "make-video")
     assert doctor.link_skill()[-1].startswith("OK skill make-video linked in 1 dir")
     assert os.readlink(link) == str(alias / "make-video")
+
+
+def test_unwritable_dir_reports_per_dir_error_and_links_the_rest(home: Path, tmp_path: Path) -> None:
+    claude = home / ".claude" / "skills"
+    (claude / "make-video").symlink_to(tmp_path / "gone")
+    codex = _codex(home)
+    claude.chmod(0o555)
+    try:
+        lines = doctor.link_skill()
+    finally:
+        claude.chmod(0o755)
+    assert any(ln.startswith(f"ERR skill make-video: {claude / 'make-video'}:") for ln in lines)
+    assert lines[-1].startswith("ERR skill link: 1 of 2 dirs not linked")
+    assert os.readlink(claude / "make-video") == str(tmp_path / "gone")  # old link kept
+    assert (codex / "make-video").resolve() == doctor.skill_source().resolve()
