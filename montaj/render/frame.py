@@ -33,7 +33,7 @@ from montaj.render.custom import CustomRunner
 from montaj.render import effects as fxlib
 from montaj.render.finish import LOOKS, finish, lut_texture
 from montaj.render.layers import (
-    LayerState, LayerTexture, base_box, base_pos, box_growth, composite, load_rgba, peak_scale_world, sample, world_state,
+    LayerState, LayerTexture, base_box, base_pos, box_samples, composite, is_keyed, load_rgba, peak_scale_world, sample, world_state,
 )
 from montaj.render.shots import (
     card_frame,
@@ -135,6 +135,8 @@ class _LayerPlan:
     clip: _ClipPlan | None
     t_start: float
     full: bool
+    # Keyed `box` (cover): (source w, h, texture px per source px x, y). `src` is then cut per frame to the box's aspect.
+    dyn: tuple[float, float, float, float] | None = None
 
 
 _IDENTITY = LayerState(1.0, 0.0, 1.0)
@@ -700,29 +702,42 @@ class Renderer:
                 with Image.open(find_photo(self._assets, layer.image)) as im:  # header only
                     sw, sh = im.size
                 dest, src = _place(layer, sw, sh, W, H, k)
-                plans.append(_LayerPlan(layer.image, dest, src, None, float(shot.start + start), False))
+                dyn = (float(sw), float(sh), 1.0, 1.0) if is_keyed(layer.box) else None
+                plans.append(_LayerPlan(layer.image, dest, src, None, float(shot.start + start), False, dyn))
                 continue
             count = (layer.to - start if layer.to is not None
                      else clip_read_frames(hold - start, self._outgoing_frames(index)))
             clip_in = 0.0 if layer.clip_in is None else self._frames(layer.clip_in) / self.tl.fps
             full = (layer.box is None and layer.pos is None and layer.fit in (None, "cover")
                     and layer.focus is None)
+            dyn = None
             if full:
                 clip = _ClipPlan(layer.clip, clip_in, count, W, H, None, None, None)
                 dest, src = (0.0, 0.0, float(W), float(H)), (0.0, 0.0, float(W), float(H))
             else:
                 sw, sh = self._clip_size(layer.clip)
                 dest, crop = _place(layer, sw, sh, W, H, k)
+                dyn = is_keyed(layer.box)
+                if dyn:  # the box changes shape: decode the whole source and cover-crop it per frame
+                    crop = (0, 0, sw, sh)
                 crop = tuple(int(round(v)) for v in crop)
                 cw, ch = max(1, crop[2] - crop[0]), max(1, crop[3] - crop[1])
-                grow = max(1.0, peak_scale_world(shot.spec.layers, idx)) * box_growth(layer) * (1.1 if "pop" in (
-                    getattr(layer.in_, "type", None), getattr(layer.out, "type", None)) else 1.0)
+                pop = 1.1 if "pop" in (getattr(layer.in_, "type", None), getattr(layer.out, "type", None)) else 1.0
+                grow = max(1.0, peak_scale_world(shot.spec.layers, idx, hold)) * pop
                 # Decode no finer than the layer is drawn (pop overshoot included); never upscale.
-                d = min(1.0, max((dest[2] - dest[0]) / cw, (dest[3] - dest[1]) / ch) * grow)
+                if dyn:
+                    need = 0.0
+                    for bx in box_samples(layer, hold):
+                        a0, b0, a1, b1 = _cover_crop(sw, sh, max(1e-6, (bx[2] - bx[0]) / max(1e-6, bx[3] - bx[1])), None)
+                        need = max(need, (bx[2] - bx[0]) * k / (a1 - a0), (bx[3] - bx[1]) * k / (b1 - b0))
+                    d = min(1.0, need * grow)
+                else:
+                    d = min(1.0, max((dest[2] - dest[0]) / cw, (dest[3] - dest[1]) / ch) * grow)
                 w, h = max(2, round(cw * d)), max(2, round(ch * d))
                 clip = _ClipPlan(layer.clip, clip_in, count, w, h, crop, None, None)
                 src = (0.0, 0.0, float(w), float(h))
-            plans.append(_LayerPlan(layer.clip, dest, src, clip, float(shot.start + start), full))
+                dyn = (float(sw), float(sh), w / cw, h / ch) if dyn else None
+            plans.append(_LayerPlan(layer.clip, dest, src, clip, float(shot.start + start), full, dyn))
         hit = self._layer_plans_by_shot[index] = tuple(plans)
         return hit
 
@@ -784,7 +799,8 @@ class Renderer:
             m = self._layer_matte(plan, t)
             local = t - scene.t0
             # Opacity and blend shape how the cutout looks, not where the subject is.
-            composite(self.cv, out, LayerTexture(m.expand(4, -1, -1)), plan.src, self._dest_at(layer, plan, local),
+            dest = self._dest_at(layer, plan, local)
+            composite(self.cv, out, LayerTexture(m.expand(4, -1, -1)), self._src_at(layer, plan, dest), dest,
                       LayerState(state.scale, state.rotate, 1.0), "normal", _radius(layer, local) * self.cv.k)
         return None if out is None else out[:1]
 
@@ -859,9 +875,18 @@ class Renderer:
 
     def _dest_at(self, layer, plan, local: float) -> tuple[float, float, float, float]:
         """The layer's rect on the shot clock: fixed, or a keyed `box` stretching the first key's source window."""
-        if not isinstance(layer.box, list):
+        if not is_keyed(layer.box):
             return plan.dest
         return tuple(v * self.cv.k for v in sample(layer.box, local, None))
+
+    def _src_at(self, layer, plan, dest) -> tuple[float, float, float, float]:
+        """The texture window for `dest`: fixed, or (keyed `box`) the source's cover crop at the box's aspect, so a
+        box that changes shape reveals more or less of the source instead of stretching it."""
+        if plan.dyn is None:
+            return plan.src
+        sw, sh, kx, ky = plan.dyn
+        x0, y0, x1, y1 = _cover_crop(sw, sh, max(1e-6, dest[2] - dest[0]) / max(1e-6, dest[3] - dest[1]), layer.focus)
+        return x0 * kx, y0 * ky, x1 * kx, y1 * ky
 
     def _draw_layer(self, out, layer, plan, state, t, local, mode, radius, shadow) -> None:
         """One layer at film time `t` (`local` on the shot clock), with its shake and pixel effects."""
@@ -884,7 +909,7 @@ class Renderer:
                 self._seam_effect("layer")
                 pad = fxlib.layer_pad(self.cv, fxs, local)
         tex = self._layer_texture(layer, plan, t)
-        composite(self.cv, out, tex, plan.src, dest, state, mode, radius, shadow, post=post, post_pad=pad or 0.0)
+        composite(self.cv, out, tex, self._src_at(layer, plan, dest), dest, state, mode, radius, shadow, post=post, post_pad=pad or 0.0)
 
     def _seam_effect(self, what: str) -> None:
         """Built-in effects are torch on the canvas device: gpu on CUDA, a CPU fallback otherwise."""

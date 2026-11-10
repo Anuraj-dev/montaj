@@ -148,37 +148,81 @@ def _run(root, at, shot, rng, every, fast, problems) -> dict:
 
 
 TRACK_SAMPLES = 12
+MAX_SAMPLES = 500
 
 
-def track(root: Path, ref: str) -> dict:
-    """The sampled curve of one keyed layer property. `ref` is `SHOT.LAYER.PROP` (shot and layer as in
-    `--shot`: zero-based; LAYER may be a layer `id`). Frames are shot-local; no render, no GPU."""
-    from montaj.render.layers import sample
+def _spread(first: int, last: int, samples: int) -> list[int]:
+    count = min(samples, max(2, last - first + 1))
+    return sorted({round(first + (last - first) * i / (count - 1)) for i in range(count)})
+
+
+def _round(v):
+    return [round(x, 4) for x in v] if isinstance(v, tuple) else round(v, 4)
+
+
+def track(root: Path, ref: str, samples: int = TRACK_SAMPLES) -> dict:
+    """The sampled curve of one animated value, no render and no GPU. `ref` is `SHOT.LAYER.PROP` (a keyed or
+    `expr` layer property; shot and layer as in `--shot`: zero-based, LAYER may be a layer `id`),
+    `SHOT.camera.zoom` / `SHOT.camera.focus` (a clip shot's camera keys; focus in source px) or
+    `tracks.dust|glow|bars`. Frames are shot-local, except `tracks.*` (film frames)."""
+    from montaj.clipmap import camera_at
+    from montaj.render.core import key as eval_key
+    from montaj.render.layers import is_keyed, sample
     from montaj.spec import LAYER_KEYED
 
-    try:
-        shot_s, layer_s, prop = ref.split(".")
-        n = int(shot_s)
-    except ValueError:
-        raise ValueError("--track wants SHOT.LAYER.PROP, e.g. 1.0.scale") from None
+    if not 2 <= samples <= MAX_SAMPLES:
+        raise ValueError(f"--samples {samples}: use 2 to {MAX_SAMPLES}")
+    parts = ref.split(".")
+    if len(parts) not in (2, 3) or not (parts[0] == "tracks" or parts[0].isdigit()):
+        raise ValueError("--track wants SHOT.LAYER.PROP (1.0.scale), SHOT.camera.zoom|focus or tracks.NAME")
     tl = resolve(load_spec(root / "montaj.yaml"), root)
+    if parts[0] == "tracks":
+        keys = tl._tracks.get(parts[1])
+        if keys is None:
+            raise ValueError(f"no track {parts[1]!r} (dust, glow, bars)")
+        if not keys:
+            raise ValueError(f"{ref} has no keys")
+        frames = _spread(round(keys[0][0]), round(keys[-1][0]), samples)
+        values = [float(eval_key(float(f), keys)) for f in frames]
+        return {"track": ref, "keys": [round(k[0]) for k in keys], "frames": frames, "values": [_round(v) for v in values]}
+    n = int(parts[0])
     if not 0 <= n < len(tl.shots):
         raise ValueError(f"no shot {n} (0..{len(tl.shots) - 1})")
-    layers = tl.shots[n].spec.layers or []
+    shot = tl.shots[n]
+    if parts[1] == "camera":
+        cam = shot.spec.camera
+        what = parts[2] if len(parts) == 3 else ""
+        if what not in ("zoom", "focus"):
+            raise ValueError("--track camera wants SHOT.camera.zoom or SHOT.camera.focus")
+        if not cam or (what == "focus" and not any(k.focus for k in cam)):
+            raise ValueError(f"shot {n} has no camera {what} keys")
+        keys = [(float(k.t), k.zoom, k.focus, k.ease) for k in cam]
+        frames = _spread(cam[0].t, cam[-1].t, samples)
+        crop = tuple(shot.spec.crop or (0, 0, 1, 1))
+        out = [camera_at(keys, crop, float(f)) for f in frames]
+        cw, ch = crop[2] - crop[0], crop[3] - crop[1]
+        values = [v[0] for v in out] if what == "zoom" else [
+            (crop[0] + v[1] * cw, crop[1] + v[2] * ch) for v in out]
+        return {"track": ref, "keys": [k.t for k in cam], "frames": frames, "values": [_round(v) for v in values]}
+    if len(parts) != 3:
+        raise ValueError("--track wants SHOT.LAYER.PROP, e.g. 1.0.scale")
+    layer_s, prop = parts[1], parts[2]
+    layers = shot.spec.layers or []
     idx = next((i for i, l in enumerate(layers) if l.id == layer_s), int(layer_s) if layer_s.isdigit() else -1)
     if not 0 <= idx < len(layers):
         raise ValueError(f"shot {n} has no layer {layer_s}")
     if prop not in LAYER_KEYED:
         raise ValueError(f"{prop} is not keyable (one of {', '.join(LAYER_KEYED)})")
-    keys = getattr(layers[idx], prop)
-    if not isinstance(keys, list):
+    val = getattr(layers[idx], prop)
+    if not is_keyed(val):
         raise ValueError(f"{ref} is not keyed")
-    first, last = keys[0].t, keys[-1].t
-    count = min(TRACK_SAMPLES, max(2, last - first + 1))
-    frames = sorted({round(first + (last - first) * i / (count - 1)) for i in range(count)})
-    values = [sample(keys, f, None) for f in frames]
-    return {"track": ref, "keys": [k.t for k in keys], "frames": frames,
-            "values": [[round(x, 4) for x in v] if isinstance(v, tuple) else round(v, 4) for v in values]}
+    if isinstance(val, list):
+        keys = [k.t for k in val]
+        frames = _spread(keys[0], keys[-1], samples)
+    else:  # an expression has no keys: sample the whole hold
+        keys = []
+        frames = _spread(0, max(1, shot.end - shot.start - 1), samples)
+    return {"track": ref, "keys": keys, "frames": frames, "values": [_round(sample(val, f, None)) for f in frames]}
 
 
 def lines(payload: dict) -> list[str]:
