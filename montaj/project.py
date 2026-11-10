@@ -85,11 +85,11 @@ def file_sha(path: Path) -> str:
 
 
 def _scene_shots(scene: object) -> set[int]:
-    from montaj.timeline import Blank, Card, Clip, Sequence, Still, Trans, Wall
+    from montaj.timeline import Blank, Card, Clip, Layers, Sequence, Still, Trans, Wall
 
     if isinstance(scene, Blank):
         return set()
-    if isinstance(scene, (Still, Wall, Clip, Sequence, Card)):
+    if isinstance(scene, (Still, Wall, Clip, Sequence, Card, Layers)):
         return {scene.shot}
     if isinstance(scene, Trans):
         return _scene_shots(scene.a) | _scene_shots(scene.b)
@@ -106,6 +106,14 @@ def _shot_photos(shot) -> list[str]:
         ids.append(shot.morph.photo)
     if shot.sequence is not None:
         ids.extend(item.photo for item in shot.sequence.items if item.photo)
+    ids.extend(layer.image for layer in shot.layers or () if layer.image is not None)
+    return ids
+
+
+def shot_clips(shot) -> list[str]:
+    """Clip stems (or paths) a shot reads: its own clip, then its layers' clips."""
+    ids = [shot.clip] if shot.clip is not None else []
+    ids.extend(layer.clip for layer in shot.layers or () if layer.clip is not None)
     return ids
 
 
@@ -258,8 +266,8 @@ def segment_hash(
         shot = tl.shots[i].spec
         for pid in _shot_photos(shot):
             photos[pid] = _lookup_sha(asset_sha, pid, "photo")
-        if shot.clip is not None:
-            clips[shot.clip] = _lookup_sha(asset_sha, shot.clip, "clip")
+        for cid in shot_clips(shot):
+            clips[cid] = _lookup_sha(asset_sha, cid, "clip")
     payload = {
         "engine_version": engine_version,
         "video": tl.spec.video.model_dump(mode="json"),

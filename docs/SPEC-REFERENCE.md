@@ -59,6 +59,24 @@ Photo fields (`crop`, `focus`, swirl `center`, wall `at`) are source-image pixel
 - `shots[].card` — mapping, one source: photo, wall, clip, blank, sequence or card — a solid colour and text as this shot's picture, with no blank shot and no `text` block. Mutually exclusive with the other sources.
 - `shots[].card.color` — `#rrggbb`, required — the card's background.
 - `shots[].card.text` — list, required — lines with the same fields as `text[].lines[]`. `at`, `stagger`, `dur` and `sweep` are durations from this shot's start (`0s`, `12f`, `1b`), not film markers. The colour and the lines are one picture, so a fade or whip carries both.
+- `shots[].layers` — list, default none — several sources composited back to front over `video.background`; replaces the shot's single source and its `crop`/`focus`/`zoom`/`camera`/`speed`/`freeze`. A transition carries the whole stack. One full-frame clip layer renders bit-identical to a clip shot.
+- `shots[].layers[].clip` — string, one of clip or image — a video stem. Without `from` it starts with the shot, so it plays through the incoming transition like a clip shot. The source must last the layer's span.
+- `shots[].layers[].image` — string, one of clip or image — a PNG (alpha honoured, decoded on the GPU) or JPEG stem.
+- `shots[].layers[].clip_in` — duration, default `0s` — source time shown at the layer's first frame. Needs `clip`.
+- `shots[].layers[].focus` — `[x, y]` source px, default the source centre — the point kept centred when `cover` crops the source to the box.
+- `shots[].layers[].from` — duration, default the shot's start — when the layer appears, from this shot's start. Must fall inside the hold.
+- `shots[].layers[].to` — duration, default past the shot's end — when the layer disappears. After `from`, at most the hold.
+- `shots[].layers[].box` — `[x0, y0, x1, y1]` design px, default the full frame — where the layer sits. Fully off-frame is an error, partly off-frame a `validate` warning. Mutually exclusive with `pos`.
+- `shots[].layers[].fit` — `cover` or `contain`, default `cover` — how the source fills the box: crop to fill, or fit whole inside it. Not with `pos`.
+- `shots[].layers[].pos` — `[x, y]` design px, default none — centre of the layer at its natural size (1 source px = 1 design px). Mutually exclusive with `box`.
+- `shots[].layers[].scale` — number > 0, default `1` — size multiple about the layer's centre.
+- `shots[].layers[].rotate` — degrees, default `0` — clockwise rotation about the layer's centre.
+- `shots[].layers[].opacity` — number 0 to 1, default `1` — layer alpha, multiplied with a PNG's own alpha.
+- `shots[].layers[].blend` — `normal`, `screen`, `add`, `multiply`, `overlay`, `soft-light` or `difference`, default `normal` — how the layer mixes with what is below (W3C formulas, in display sRGB).
+- `shots[].layers[].radius` — design px >= 0, default `0` — antialiased rounded corners on the layer's rectangle.
+- `shots[].layers[].shadow` — number 0 to 1, default `0` — soft drop shadow under the layer's rectangle, this strong.
+- `shots[].layers[].in` — `{type, dur}`, default none — how the layer arrives at `from`: `fade` (opacity) or `pop` (overshoot scale and quick fade). `dur` is a duration > 0.
+- `shots[].layers[].out` — `{type, dur}`, default none — how the layer leaves, ending at `to` (or the hold's end). Same types as `in`.
 - `shots[].crop` — `[x0, y0, x1, y1]`, default the full image — the part of the photo that is shown. On a clip it is a box of the source video frame, in source px, inside the video.
 - `shots[].focus` — `[x, y]`, `face`, `face:N` or `subject`, default the crop centre — the photo point placed at the screen centre. On a clip it is a source-video pixel inside the crop, a one-key `camera`. `face` is the centre of the largest face box, `face:N` the N-th largest, `subject` the saliency peak, all read from `assets/analysis.json` and written into the shot as `[x, y]` before hashing; on a clip they come from the scene holding the shot's start. A photo with no face is `ERR shots[i].focus: no face in <stem> (use subject or [x, y])`.
 - `shots[].zoom` — number, default cover — design pixels per photo pixel. Cover fits the crop with a hair of overscan. On a clip it is a multiple of cover (>= 1), a one-key `camera`, as in `camera[].zoom`.

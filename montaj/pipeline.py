@@ -13,11 +13,11 @@ from montaj.audio.mix import plan_audio, render_mix
 from montaj.encode import Encoder, concat, mux
 from montaj.gpu_policy import GpuPolicy, load_policy, resolve_device
 from montaj.gpulock import hold as gpu_hold
-from montaj.project import file_sha, find_photo, resolve_clip, segment_hash
+from montaj.project import file_sha, find_photo, resolve_clip, segment_hash, shot_clips
 from montaj.render.canvas import Canvas
 from montaj.render.frame import Renderer
 from montaj.spec import Spec, _dur_frames, _parse_beat0, load_spec
-from montaj.timeline import Card, Clip, Segment, Sequence, Still, Trans, Wall, resolve
+from montaj.timeline import Card, Clip, Layers, Segment, Sequence, Still, Trans, Wall, resolve
 
 # Bump when a pixel changes. Concatenated onto __version__ inside every segment hash.
 RENDER_REV = "+4"  # duration hash, photo/clip shas, sine fades, zoom, clip tail, warm fade
@@ -71,8 +71,8 @@ def _asset_shas(spec: Spec, spec_dir: Path) -> dict[str, str]:
             photos.append(shot.morph.photo)
         if shot.sequence is not None:
             photos.extend(item.photo for item in shot.sequence.items if item.photo)
-        if shot.clip:
-            clips.append(shot.clip)
+        photos.extend(layer.image for layer in shot.layers or () if layer.image is not None)
+        clips.extend(shot_clips(shot))
     # A still and a clip can share a stem (`reel.jpg` and `reel.mp4`). One dict
     # keyed by stem kept the photo sha and skipped the clip.
     out: dict[str, str] = {}
@@ -97,7 +97,7 @@ def _log(path: Path, message: str) -> None:
 
 
 def _shots_in(scene) -> set[int]:
-    if isinstance(scene, (Still, Wall, Clip, Sequence, Card)):
+    if isinstance(scene, (Still, Wall, Clip, Sequence, Card, Layers)):
         return {scene.shot}
     if isinstance(scene, Trans):
         return _shots_in(scene.a) | _shots_in(scene.b)

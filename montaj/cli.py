@@ -38,8 +38,8 @@ from montaj.sheet import (
     transition_rows,
 )
 from montaj.project import resolve_clip
-from montaj.spec import INCOMING_TRANS, SpecError, _dur_frames, load_spec, text_warnings
-from montaj.timeline import Blank, Card, Sequence, Still, Wall, resolve, sequence_index, wall_static_spans
+from montaj.spec import INCOMING_TRANS, SpecError, _dur_frames, layer_warnings, load_spec, text_warnings
+from montaj.timeline import Blank, Card, Layers, Sequence, Still, Wall, resolve, sequence_index, wall_static_spans
 from montaj.watch import watch
 
 RECIPES = Path(__file__).resolve().parents[1] / "recipes"
@@ -394,7 +394,7 @@ def _cmd_validate(root: Path, expand: bool = False) -> list[str]:
     tl = resolve(spec, root)
     seconds = tl.n_frames / tl.fps
     n_shots, n_segs = len(tl.shots), len(tl.segments)
-    return [*text_warnings(spec), f"OK montaj.yaml {tl.n_frames}f {seconds:.2f}s {n_shots} shots {n_segs} segments"]
+    return [*text_warnings(spec), *layer_warnings(spec, root), f"OK montaj.yaml {tl.n_frames}f {seconds:.2f}s {n_shots} shots {n_segs} segments"]
 
 
 def _cmd_render(ns: argparse.Namespace, root: Path) -> list[str]:
@@ -540,6 +540,9 @@ def _intended_freeze(root: Path) -> list[tuple[float, float]]:
             intended = True
         elif isinstance(scene, Card):
             intended = _card_settled(tl.shots[scene.shot], f, fps, tl.spec.video.bpm, scene)
+        elif isinstance(scene, Layers):
+            # Only stills on screen: a designed hold, like a still shot.
+            intended = all(layer.clip is None for layer in tl.shots[scene.shot].spec.layers)
         else:
             intended = isinstance(scene, Wall) and wall_hold(f)
         if intended:

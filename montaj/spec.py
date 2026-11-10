@@ -6,6 +6,7 @@ import json
 import math
 import re
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Annotated, Any, Literal
 
 import yaml
@@ -513,6 +514,46 @@ def _expand_lower_third(data: object) -> object:
     return data
 
 
+LAYER_BLENDS = ("normal", "screen", "add", "multiply", "overlay", "soft-light", "difference")
+LAYER_FITS = ("cover", "contain")
+LAYER_ANIMS = ("fade", "pop")
+
+
+class LayerAnim(Frozen):
+    """A layer's entrance or exit. `dur` becomes whole frames in `resolve`."""
+
+    type: str
+    dur: DurationStr | int
+
+
+class Layer(Frozen):
+    """One source composited over the layers before it (#34): source + placement + transform + opacity + blend.
+
+    Unset fields stay out of the dump, so only what a film sets reaches its segment hash. Placement is a
+    `box` (design px) or a `pos` (centre, natural size: one source px per design px); neither is the full frame.
+    `scale`, `rotate` and `opacity` are per-frame values the renderer evaluates (`render.layers.layer_state`).
+    """
+
+    clip: PhotoId | None = Field(default=None, exclude_if=_none)
+    image: PhotoId | None = Field(default=None, exclude_if=_none)
+    clip_in: DurationStr | None = Field(default=None, exclude_if=_none)
+    focus: Focus | None = Field(default=None, exclude_if=_none)
+    # Shot clock: frames from the shot start. Ints after resolve.
+    from_: DurationStr | int | None = Field(default=None, alias="from", exclude_if=_none)
+    to: DurationStr | int | None = Field(default=None, exclude_if=_none)
+    box: tuple[RealNum, RealNum, RealNum, RealNum] | None = Field(default=None, exclude_if=_none)
+    fit: str | None = Field(default=None, exclude_if=_none)
+    pos: tuple[RealNum, RealNum] | None = Field(default=None, exclude_if=_none)
+    scale: RealNum | None = Field(default=None, exclude_if=_none)
+    rotate: RealNum | None = Field(default=None, exclude_if=_none)
+    opacity: RealNum | None = Field(default=None, exclude_if=_none)
+    blend: str | None = Field(default=None, exclude_if=_none)
+    radius: RealNum | None = Field(default=None, exclude_if=_none)
+    shadow: RealNum | None = Field(default=None, exclude_if=_none)
+    in_: LayerAnim | None = Field(default=None, alias="in", exclude_if=_none)
+    out: LayerAnim | None = Field(default=None, exclude_if=_none)
+
+
 class CardSpec(Frozen):
     """One shot's picture: a solid colour with text lines on it."""
 
@@ -548,6 +589,8 @@ class Shot(Frozen):
     # Absent stays out of model_dump so films without a sequence keep their segment hash.
     sequence: SequenceSpec | None = Field(default=None, exclude_if=lambda v: v is None)
     card: CardSpec | None = Field(default=None, exclude_if=lambda v: v is None)
+    # Back to front; replaces the single source (#34). Absent stays out of model_dump.
+    layers: list[Layer] | None = Field(default=None, exclude_if=lambda v: v is None)
     in_: Transition | None = Field(default=None, alias="in")
     flash: float | None = None
 
@@ -986,6 +1029,11 @@ def _duration_fields(spec: Spec) -> list[tuple[str, str]]:
         if isinstance(sh.speed, list):
             for k, skey in enumerate(sh.speed):
                 out.append((f"shots[{i}].speed[{k}].t", skey.t))
+        for k, layer in enumerate(sh.layers or ()):
+            for name, raw in (("from", layer.from_), ("to", layer.to),
+                              ("in.dur", layer.in_ and layer.in_.dur), ("out.dur", layer.out and layer.out.dur)):
+                if raw is not None:
+                    out.append((f"shots[{i}].layers[{k}].{name}", raw))
         if sh.wall is not None:
             for k, key in enumerate(sh.wall.camera.pos):
                 out.append((f"shots[{i}].wall.camera.pos[{k}].t", key.t))
@@ -1003,6 +1051,9 @@ def _unrounded_durs(spec: Spec) -> list[tuple[str, str]]:
             out.append((f"shots[{i}].clip_in", sh.clip_in))
         if sh.pre is not None:
             out.append((f"shots[{i}].pre", sh.pre))
+        for k, layer in enumerate(sh.layers or ()):
+            if layer.clip_in is not None:
+                out.append((f"shots[{i}].layers[{k}].clip_in", layer.clip_in))
         if sh.morph is not None:
             out.append((f"shots[{i}].morph.at", sh.morph.at))
             out.append((f"shots[{i}].morph.dur", sh.morph.dur))
@@ -1216,6 +1267,27 @@ def _collect_photos(data: object, assets_dir: Path, spec_dir: Path, errors: list
                         _require_photo(
                             assets_dir, pid, f"shots[{i}].sequence.items[{j}]{suffix}", errors, find_photo
                         )
+        layers = shot.get("layers")
+        for j, layer in enumerate(layers if isinstance(layers, list) else ()):
+            if not isinstance(layer, dict):
+                continue
+            path = f"shots[{i}].layers[{j}]"
+            if layer.get("image") is not None:
+                pid = _photo_id(layer["image"])
+                if isinstance(pid, str):
+                    _require_photo(assets_dir, pid, f"{path}.image", errors, find_photo)
+            if layer.get("clip") is not None:
+                pid = _photo_id(layer["clip"])
+                if isinstance(pid, str):
+                    if clip_is_file(pid):
+                        from montaj.project import AssetMissing, resolve_clip
+
+                        try:
+                            resolve_clip(spec_dir, assets_dir, pid)
+                        except AssetMissing as e:
+                            errors.append(_line(f"{path}.clip", str(e), e.hint))
+                    else:
+                        _require_photo(assets_dir, pid, f"{path}.clip", errors, find_clip)
 
 
 def _sequence_photo_id(item: object) -> tuple[str, str] | None:
@@ -1359,6 +1431,8 @@ def _snap_forward_to_grid(u: float, beat0: float, period: float) -> float:
 def _has_sugar(sh: Shot) -> bool:
     if isinstance(sh.focus, str) or isinstance(sh.range, str):
         return True
+    if any(isinstance(layer.focus, str) for layer in sh.layers or ()):
+        return True
     return sh.camera is not None and any(isinstance(k.focus, str) for k in sh.camera)
 
 
@@ -1477,6 +1551,19 @@ def _resolve_shot_sugar(spec: Spec, sh: Shot, i: int, spec_dir: Path | None, boo
                 if isinstance(key.focus, str) else key
                 for k, key in enumerate(sh.camera)
             ]
+    if sh.layers and any(isinstance(layer.focus, str) for layer in sh.layers):
+        layers = []
+        for k, layer in enumerate(sh.layers):
+            if isinstance(layer.focus, str):
+                path = f"{at}.layers[{k}].focus"
+                # A layer is its own source: read its image or clip, at its own clip_in.
+                src = SimpleNamespace(photo=layer.image, clip=layer.clip)
+                got = _sugar_row(spec, src, spec_dir, book, path, errors)
+                t = _clip_start_s(spec, layer.clip_in)
+                xy = None if got is None else _focus_point(layer.focus, got[0], got[1], got[2], t, path, errors)
+                layer = layer.model_copy(update={"focus": xy})
+            layers.append(layer)
+        update["layers"] = layers
     return sh.model_copy(update=update)
 
 
@@ -2272,7 +2359,9 @@ def validate_spec(
         has_s = sh.sequence is not None
         has_card = sh.card is not None
         n_src = has_p + has_w + has_c + has_b + has_s + has_card
-        if n_src > 1:
+        if sh.layers is not None and n_src:
+            errors.append(_line(f"shots[{i}].layers", "layers replace the shot's single source", "move it into a layer"))
+        elif n_src > 1:
             errors.append(
                 _line(
                     f"shots[{i}]",
@@ -2280,10 +2369,12 @@ def validate_spec(
                     "remove extra",
                 )
             )
-        elif n_src == 0:
+        elif n_src == 0 and sh.layers is None:
             errors.append(_line(f"shots[{i}]", "need photo, wall, clip, blank, sequence or card", "add one"))
         if sh.card is not None:
             _validate_card(sh.card, i, fps, bpm, errors)
+        if sh.layers is not None:
+            _validate_layers(spec, i, sh, h, parsed, times, spec_dir, errors)
         if not has_p:
             for name in ("drift", "frame", "morph", "tone", "pulse"):
                 if getattr(sh, name) is not None:
@@ -2838,6 +2929,165 @@ def _validate_card(
         if line.sweep:
             for k, raw in enumerate(line.sweep):
                 _card_duration(raw, fps, bpm, f"{p}.sweep[{k}]", errors)
+
+
+def _design_frame(spec: Spec) -> tuple[float, float] | None:
+    """(width, height) of the frame in design px: 1080 wide, the film's aspect."""
+    m = _WH.match(str(spec.video.size))
+    if not m or int(m.group(1)) <= 0:
+        return None
+    w, h = int(m.group(1)), int(m.group(2))
+    return 1080.0, h * 1080.0 / w
+
+
+def _layer_source_size(spec: Spec, spec_dir: Path | None, layer: Layer) -> tuple[int, int] | None:
+    """Pixel size of a layer's image (header only) or clip (probe), or None when unknown."""
+    if spec_dir is None:
+        return None
+    if layer.clip is not None:
+        info = _probe_clip(spec, spec_dir, layer.clip)
+        return None if info is None else (info[0], info[1])
+    if layer.image is None:
+        return None
+    from PIL import Image
+
+    from montaj.project import find_photo
+
+    try:
+        with Image.open(find_photo(spec_dir / spec.assets, layer.image)) as im:
+            return im.size
+    except (FileNotFoundError, OSError, ValueError):
+        return None
+
+
+def _layer_extent(spec: Spec, spec_dir: Path | None, layer: Layer) -> tuple[float, float, float, float] | None:
+    """Screen bounding box (design px) of a layer at its set scale and rotation, or None when unknown."""
+    frame = _design_frame(spec)
+    if frame is None:
+        return None
+    if layer.box is not None:
+        x0, y0, x1, y1 = (float(v) for v in layer.box)
+    elif layer.pos is not None:
+        size = _layer_source_size(spec, spec_dir, layer)
+        if size is None:
+            return None
+        cx, cy = float(layer.pos[0]), float(layer.pos[1])
+        x0, y0, x1, y1 = cx - size[0] / 2, cy - size[1] / 2, cx + size[0] / 2, cy + size[1] / 2
+    else:
+        x0, y0, x1, y1 = 0.0, 0.0, frame[0], frame[1]
+    s = float(layer.scale) if layer.scale is not None else 1.0
+    th = math.radians(float(layer.rotate or 0.0))
+    hw, hh = (x1 - x0) / 2 * s, (y1 - y0) / 2 * s
+    ex = abs(math.cos(th)) * hw + abs(math.sin(th)) * hh
+    ey = abs(math.sin(th)) * hw + abs(math.cos(th)) * hh
+    cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
+    return cx - ex, cy - ey, cx + ex, cy + ey
+
+
+def _validate_layers(
+    spec: Spec, i: int, sh: Shot, hold: int | None, parsed: dict[str, int], times: dict[str, float],
+    spec_dir: Path | None, errors: list[str],
+) -> None:
+    at = f"shots[{i}]"
+    if not sh.layers:
+        errors.append(_line(f"{at}.layers", "need at least one layer", "add {clip: stem} or {image: stem}"))
+        return
+    for name in ("crop", "focus", "zoom"):
+        if getattr(sh, name) is not None:
+            errors.append(_line(f"{at}.{name}", "not used on a layers shot", "set it on the layer"))
+    frame = _design_frame(spec)
+    for k, layer in enumerate(sh.layers):
+        p = f"{at}.layers[{k}]"
+        n_err = len(errors)
+        if (layer.clip is None) == (layer.image is None):
+            errors.append(_line(p, "need exactly one of clip or image", "set clip: or image:"))
+        if layer.clip_in is not None and layer.clip is None:
+            errors.append(_line(f"{p}.clip_in", "clip_in needs clip", "add clip:"))
+        if layer.box is not None and layer.pos is not None:
+            errors.append(_line(p, "box and pos are mutually exclusive", "box sizes the layer; pos keeps its natural size"))
+        if layer.fit is not None and layer.fit not in LAYER_FITS:
+            errors.append(_line(f"{p}.fit", f"unknown {layer.fit!r}", f"use {_choices(LAYER_FITS)}"))
+        if layer.fit is not None and layer.pos is not None:
+            errors.append(_line(f"{p}.fit", "fit is for a box or the full frame", "remove fit or use box"))
+        if layer.blend is not None and layer.blend not in LAYER_BLENDS:
+            errors.append(_line(f"{p}.blend", f"unknown {layer.blend!r}", f"use {_choices(LAYER_BLENDS)}"))
+        for name, lo, hi in (("opacity", 0.0, 1.0), ("shadow", 0.0, 1.0)):
+            v = getattr(layer, name)
+            if v is not None and (not math.isfinite(v) or not lo <= v <= hi):
+                errors.append(_line(f"{p}.{name}", f"must be 0 to 1, got {_fmt_num(v)}", "use a value like 0.8"))
+        if layer.scale is not None and (not math.isfinite(layer.scale) or layer.scale <= 0):
+            errors.append(_line(f"{p}.scale", f"must be finite and > 0, got {_fmt_num(layer.scale)}", "use 0.5 for half size"))
+        if layer.rotate is not None and not math.isfinite(layer.rotate):
+            errors.append(_line(f"{p}.rotate", "must be finite", "use degrees, clockwise"))
+        if layer.radius is not None and (not math.isfinite(layer.radius) or layer.radius < 0):
+            errors.append(_line(f"{p}.radius", f"must be finite and >= 0, got {_fmt_num(layer.radius)}", "use design px"))
+        if layer.box is not None:
+            x0, y0, x1, y1 = layer.box
+            if not _finite_all(layer.box) or x1 <= x0 or y1 <= y0:
+                errors.append(_line(f"{p}.box", f"{[_fmt_num(v) for v in layer.box]} is not a box",
+                                    "use [x0, y0, x1, y1] in design px with x0 < x1, y0 < y1"))
+        if layer.pos is not None and not _finite_all(layer.pos):
+            errors.append(_line(f"{p}.pos", "must be finite", "use [x, y] in design px"))
+        if layer.focus is not None and not _finite_point(layer.focus):
+            errors.append(_line(f"{p}.focus", "must be finite", "use [x, y] in source px"))
+        for name, anim in (("in", layer.in_), ("out", layer.out)):
+            if anim is None:
+                continue
+            if anim.type not in LAYER_ANIMS:
+                errors.append(_line(f"{p}.{name}.type", f"unknown {anim.type!r}", f"use {_choices(LAYER_ANIMS)}"))
+            d = parsed.get(f"{p}.{name}.dur")
+            if d is not None and d <= 0:
+                errors.append(_line(f"{p}.{name}.dur", f"must be > 0, got {d}f", "lengthen dur"))
+        f0 = parsed.get(f"{p}.from", 0)
+        f1 = parsed.get(f"{p}.to")
+        if f1 is not None and f1 <= f0:
+            errors.append(_line(f"{p}.to", f"{f1}f is not after from {f0}f", "to must be later than from"))
+        if hold is not None:
+            if f0 >= hold:
+                errors.append(_line(f"{p}.from", f"{f0}f is at or after the end of the {hold}f hold", "use a time inside the hold"))
+            if f1 is not None and f1 > hold:
+                errors.append(_line(f"{p}.to", f"{f1}f is after the end of the {hold}f hold", "use a time inside the hold"))
+        if len(errors) > n_err:
+            continue
+        if frame is not None:
+            ext = _layer_extent(spec, spec_dir, layer)
+            if ext is not None and (ext[2] <= 0 or ext[3] <= 0 or ext[0] >= frame[0] or ext[1] >= frame[1]):
+                errors.append(_line(p, "layer is entirely off-frame",
+                                    f"keep the box inside 0..{_fmt_num(frame[0])} x 0..{_fmt_num(frame[1])} design px"))
+        if layer.clip is None or spec_dir is None:
+            continue
+        info = _probe_clip(spec, spec_dir, layer.clip)
+        if info is None:
+            continue
+        w, h, seconds = info
+        if layer.focus is not None and not (0 <= layer.focus[0] <= w and 0 <= layer.focus[1] <= h):
+            errors.append(_line(f"{p}.focus", f"[{_fmt_num(layer.focus[0])}, {_fmt_num(layer.focus[1])}] is outside the {w}x{h} source", "focus is in source px"))
+        fps = spec.video.fps
+        end = f1 if f1 is not None else hold
+        if end is None or fps <= 0:
+            continue
+        needs = (times.get(f"{p}.clip_in", 0.0) + end - f0) / fps
+        if needs > seconds + 1.5 / fps:
+            errors.append(_line(p, f"clip ends at {seconds:.1f}s of source, needs {needs:.1f}s", "shorten the layer or lower clip_in"))
+
+
+def layer_warnings(spec: Spec, spec_dir: Path | None = None) -> list[str]:
+    """`WARN` lines for layers that validate but sit partly off-frame."""
+    frame = _design_frame(spec)
+    if frame is None:
+        return []
+    out: list[str] = []
+    for i, sh in enumerate(spec.shots):
+        for k, layer in enumerate(sh.layers or ()):
+            ext = _layer_extent(spec, spec_dir, layer)
+            if ext is None:
+                continue
+            eps = 1e-6
+            if ext[0] < -eps or ext[1] < -eps or ext[2] > frame[0] + eps or ext[3] > frame[1] + eps:
+                box = ", ".join(_fmt_num(round(v, 1)) for v in ext)
+                out.append(f"WARN shots[{i}].layers[{k}]: partly off-frame (spans [{box}] in a "
+                           f"{_fmt_num(frame[0])}x{_fmt_num(round(frame[1], 1))} frame)")
+    return out
 
 
 def _sec_label(frames: float, fps: int) -> str:
