@@ -1,4 +1,4 @@
-"""ffmpeg/ffprobe seam: RGB frames in (converted to NV12 here), finished MP4s out.
+"""ffmpeg/ffprobe seam: RGB frames in (converted to NV12 or P010 here), finished MP4s out.
 
 Every function that shells out to ffmpeg tees stderr into a log file
 (`<log argument>` or `build/<name>.log`) and returns parsed data, never prints.
@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -30,6 +31,7 @@ NVENC_ARGS = ("-preset", "p7", "-tune", "hq", "-rc", "vbr", "-b:v", "0", "-profi
 X264_CRF = 16
 X264_PRESET = "slow"
 AUDIO_ARGS = ("-c:a", "aac", "-ar", "48000")
+LOUDNESS_I = -14.0  # LUFS, the render's own target; an export target may pick another
 LOUDNORM = "loudnorm=I=-14:TP=-1.5:LRA=11"
 # The film is rendered in sRGB/bt709 and must say so, or players guess. ffmpeg's h264 encoders in
 # this build drop -color_primaries/-color_trc (only -colorspace survives to the container), so the
@@ -37,6 +39,18 @@ LOUDNORM = "loudnorm=I=-14:TP=-1.5:LRA=11"
 BT709_ARGS = ("-colorspace", "bt709", "-color_primaries", "bt709", "-color_trc", "bt709")
 BT709_BSF = ("-bsf:v", "h264_metadata=colour_primaries=1:transfer_characteristics=1:matrix_coefficients=1")
 NVENC_PROBE_SIZE = "320x240"  # NVENC rejects frames below ~145 px a side
+# HEVC and AV1 carry the same VUI through their own metadata filters. Both also state limited range.
+HEVC_BSF = ("-bsf:v", "hevc_metadata=colour_primaries=1:transfer_characteristics=1:matrix_coefficients=1"
+            ":video_full_range_flag=0")
+AV1_BSF = ("-bsf:v", "av1_metadata=color_primaries=1:transfer_characteristics=1:matrix_coefficients=1"
+           ":color_range=tv")
+
+# `--codec` names (what the film is) -> the NVENC encoder that makes it. h264 keeps its libx264
+# fallback; the 10-bit codecs are NVENC only (a CPU HEVC/AV1 encode of a film takes hours).
+CODECS = ("h264", "hevc10", "av1")
+TEN_BIT_ENCODERS = {"hevc10": "hevc_nvenc", "av1": "av1_nvenc"}
+# ffmpeg encoder -> PyNvVideoCodec codec name; only these can take the zero-copy route.
+_DIRECT_CODEC = {"h264_nvenc": "h264", "hevc_nvenc": "hevc", "av1_nvenc": "av1"}
 
 # Zero-copy route: PyNvVideoCodec encodes the CUDA NV12 surface in-process. These keys mirror
 # NVENC_ARGS (ffmpeg's -g default for h264_nvenc is 250; P7 picks the same 3 B-frames and High
@@ -52,6 +66,46 @@ ROUTE_PIPE = "ffmpeg-pipe"
 ZERO_COPY_ENV = "MONTAJ_ZERO_COPY"  # "0" forces the ffmpeg pipe (A/B timing, debugging)
 
 _MOV_EXTS = {".mp4", ".m4v", ".mov"}
+
+
+@dataclass(frozen=True)
+class VideoSettings:
+    """How a film's frames are encoded. The default is the render's historical H.264 (cq 16, no
+    cap, no dither); only a non-default value reaches the segment hash (`hash_key`), so every
+    existing film keeps its cache.
+
+    `maxrate` caps the constant-quality VBR in Mbit/s (platform upload limits). `dither` adds an
+    ordered dither before the 8-bit rounding, so a float gradient does not band; it has no effect
+    on the 10-bit codecs, whose 1023 steps do not band in the first place.
+    """
+
+    codec: str = "h264"
+    cq: int = NVENC_CQ
+    maxrate: int | None = None
+    dither: bool = False
+
+    def __post_init__(self) -> None:
+        if self.codec not in CODECS:
+            raise EncodeError(f"codec: unknown '{self.codec}' (have: {', '.join(CODECS)})")
+
+    @property
+    def ten_bit(self) -> bool:
+        return self.codec in TEN_BIT_ENCODERS
+
+    @property
+    def depth(self) -> int:
+        return 10 if self.ten_bit else 8
+
+    def hash_key(self) -> dict | None:
+        """None for the default, so the segment hash payload stays exactly what it was."""
+        if self == VideoSettings():
+            return None
+        return {"codec": self.codec, "cq": self.cq, "maxrate": self.maxrate, "dither": self.dither}
+
+    def describe(self) -> str:
+        cap = f" max{self.maxrate}M" if self.maxrate else ""
+        dither = " dither" if self.dither and not self.ten_bit else ""
+        return f"{self.codec} {self.depth}-bit cq{self.cq}{cap}{dither}"
 
 
 class EncodeError(RuntimeError):
@@ -148,13 +202,54 @@ def nvenc_usable() -> bool:
     return proc.returncode == 0
 
 
-def vcodec_args(encoder: str, *, cq: int = NVENC_CQ, crf: int = X264_CRF, preset: str = X264_PRESET) -> list[str]:
-    """Encoder flags for `encoder`; NVENC keeps film2's settings, libx264 is the parity fallback."""
+def vcodec_args(encoder: str, *, cq: int = NVENC_CQ, crf: int = X264_CRF, preset: str = X264_PRESET,
+                maxrate: int | None = None) -> list[str]:
+    """Encoder flags for `encoder`; NVENC keeps film2's settings, libx264 is the parity fallback.
+    The 10-bit NVENC encoders take the same rate control; hevc gets the Main10 profile and the
+    `hvc1` tag (QuickTime and Safari refuse `hev1`), av1_nvenc is 10-bit from its P010 input."""
+    cap = ["-maxrate", f"{maxrate}M", "-bufsize", f"{2 * maxrate}M"] if maxrate else []
     if encoder == "h264_nvenc":
-        return ["-c:v", "h264_nvenc", *NVENC_ARGS, "-cq", str(cq)]
+        return ["-c:v", "h264_nvenc", *NVENC_ARGS, "-cq", str(cq), *cap]
+    if encoder == "hevc_nvenc":
+        return ["-c:v", "hevc_nvenc", *NVENC_ARGS[:-1], "main10", "-cq", str(cq), *cap, "-tag:v", "hvc1"]
+    if encoder == "av1_nvenc":
+        return ["-c:v", "av1_nvenc", *NVENC_ARGS[:-2], "-cq", str(cq), *cap]
     if encoder == "libx264":
-        return ["-c:v", "libx264", "-crf", str(crf), "-preset", preset]
+        return ["-c:v", "libx264", "-crf", str(crf), "-preset", preset, *cap]
     return ["-c:v", encoder]
+
+
+def vui_bsf(encoder_or_codec: str) -> tuple[str, ...]:
+    """The bitstream filter that writes bt709 limited-range VUI for this codec's stream."""
+    name = encoder_or_codec.removesuffix("_nvenc")
+    if name in ("hevc", "hevc10"):
+        return HEVC_BSF
+    if name == "av1":
+        return AV1_BSF
+    return BT709_BSF
+
+
+@cache
+def ten_bit_error(codec: str) -> str | None:
+    """None when ffmpeg's NVENC encodes a 10-bit `codec` (hevc10|av1) frame here, else why not.
+    AV1 encode needs an Ada (RTX 40) or newer NVENC; HEVC Main10 needs Pascal or newer."""
+    encoder = TEN_BIT_ENCODERS[codec]
+    if not has_encoder(encoder):
+        return f"this ffmpeg has no {encoder}; install an ffmpeg built with NVENC (`montaj doctor`)"
+    try:
+        proc = subprocess.run(
+            [FFMPEG, "-hide_banner", "-loglevel", "error", "-f", "lavfi",
+             "-i", f"color=c=black:size={NVENC_PROBE_SIZE}", "-frames:v", "1",
+             *vcodec_args(encoder), "-pix_fmt", "p010le", "-f", "null", "-"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=60, check=False,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        return f"{encoder} probe failed ({type(exc).__name__})"
+    if proc.returncode == 0:
+        return None
+    why = " ".join(proc.stderr.decode("utf-8", "replace").split())[-160:]
+    gpu = "an RTX 40-series or newer GPU" if codec == "av1" else "a Pascal or newer GPU"
+    return f"this GPU's NVENC cannot encode 10-bit {codec} (needs {gpu}): {why}"
 
 
 NVENC_MIN_SIDE = 160  # NVENC rejects frames under ~145 px a side (docs/STATE.md); round up
@@ -186,6 +281,21 @@ class MediaInfo:
     audio_codec: str | None
     audio_duration: float | None
     sample_rate: int | None
+    # The video stream as the file states it (None when ffprobe reports nothing); `check` reads these.
+    vcodec: str | None = None
+    pix_fmt: str | None = None
+    color_space: str | None = None
+    color_primaries: str | None = None
+    color_transfer: str | None = None
+    color_range: str | None = None
+
+    @property
+    def bit_depth(self) -> int | None:
+        """From the pixel format: `yuv420p10le` / `p010le` are 10, plain `yuv420p` / `nv12` 8."""
+        if not self.pix_fmt:
+            return None
+        m = re.search(r"p(\d{2})(le|be)?$", self.pix_fmt) or re.match(r"p0(\d{2})", self.pix_fmt)
+        return int(m.group(1)) if m else 8
 
     @property
     def size(self) -> tuple[int, int]:
@@ -241,6 +351,12 @@ def probe(path: Path | str, *, log: Path | str | None = None) -> MediaInfo:
         audio_codec=(audio or {}).get("codec_name"),
         audio_duration=_dur((audio or {}).get("duration")) if audio else None,
         sample_rate=int((audio or {}).get("sample_rate") or 0) or None,
+        vcodec=video.get("codec_name"),
+        pix_fmt=video.get("pix_fmt"),
+        color_space=video.get("color_space"),
+        color_primaries=video.get("color_primaries"),
+        color_transfer=video.get("color_transfer"),
+        color_range=video.get("color_range"),
     )
 
 
@@ -260,20 +376,16 @@ def frame_count(path: Path | str, *, log: Path | str | None = None) -> int:
     raise EncodeError(f"frame_count: no frame count for {path}", out)
 
 
-def rgb_to_nv12(frame: torch.Tensor | np.ndarray) -> torch.Tensor:
-    """R'G'B' frame -> NV12 bytes (bt709 matrix, limited range), on the frame's own device.
-
-    Takes the renderer's (3, H, W) float in 0..1 or an (H, W, 3) uint8 image. Returns a flat uint8
-    tensor: the H×W luma plane, then ceil(H/2)×ceil(W/2) interleaved CbCr pairs. Chroma is the 2×2
-    box mean (centre-sited); an odd edge is replicated so the buffer is the size ffmpeg expects and
-    odd sizes fail (or not) in the encoder exactly as they did with rgb24.
-    """
+def _ycbcr420(frame: torch.Tensor | np.ndarray) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """bt709 Y' (H, W) and 4:2:0 B'-Y', R'-Y' (ceil(H/2), ceil(W/2)) of the renderer's (3, H, W)
+    float in 0..1 or an (H, W, 3) uint8 image, on the frame's own device. Chroma is the 2×2 box mean
+    (centre-sited); an odd edge is replicated so the buffer is the size ffmpeg expects."""
     t = torch.as_tensor(frame)
     if t.dtype == torch.uint8:
         t = t.permute(2, 0, 1).float() / 255.0
     rgb = t.float().clamp(0.0, 1.0)
     _, H, W = rgb.shape
-    luma = 16.0 + 219.0 * (0.2126 * rgb[0] + 0.7152 * rgb[1] + 0.0722 * rgb[2])
+    y = 0.2126 * rgb[0] + 0.7152 * rgb[1] + 0.0722 * rgb[2]
     # Cb/Cr are linear in R'G'B', so subsampling RGB first equals subsampling Cb/Cr, at a quarter
     # of the arithmetic.
     sub = rgb.unsqueeze(0)
@@ -281,11 +393,53 @@ def rgb_to_nv12(frame: torch.Tensor | np.ndarray) -> torch.Tensor:
         sub = F.pad(sub, (0, W % 2, 0, H % 2), mode="replicate")
     sub = F.avg_pool2d(sub, 2).squeeze(0)
     ys = 0.2126 * sub[0] + 0.7152 * sub[1] + 0.0722 * sub[2]
-    cb = 128.0 + 224.0 / 1.8556 * (sub[2] - ys)
-    cr = 128.0 + 224.0 / 1.5748 * (sub[0] - ys)
+    return y, sub[2] - ys, sub[0] - ys
+
+
+# 8×8 Bayer thresholds in (0, 1), mean 0.5: added in place of the rounding +0.5, an ordered dither
+# that keeps the mean level, is the same every frame (cache-stable, cheap to encode) and lives on
+# the GPU like the rest of the conversion.
+_BAYER8 = [[0, 32, 8, 40, 2, 34, 10, 42], [48, 16, 56, 24, 50, 18, 58, 26],
+           [12, 44, 4, 36, 14, 46, 6, 38], [60, 28, 52, 20, 62, 30, 54, 22],
+           [3, 35, 11, 43, 1, 33, 9, 41], [51, 19, 59, 27, 49, 17, 57, 25],
+           [15, 47, 7, 39, 13, 45, 5, 37], [63, 31, 55, 23, 61, 29, 53, 21]]
+
+
+def _bayer(h: int, w: int, device: torch.device) -> torch.Tensor:
+    m = (torch.tensor(_BAYER8, dtype=torch.float32, device=device) + 0.5) / 64.0
+    return m.repeat((h + 7) // 8, (w + 7) // 8)[:h, :w]
+
+
+def rgb_to_nv12(frame: torch.Tensor | np.ndarray, *, dither: bool = False) -> torch.Tensor:
+    """R'G'B' frame -> NV12 bytes (bt709 matrix, limited range), on the frame's own device.
+
+    Returns a flat uint8 tensor: the H×W luma plane, then ceil(H/2)×ceil(W/2) interleaved CbCr
+    pairs (see `_ycbcr420`); odd sizes fail (or not) in the encoder exactly as they did with rgb24.
+    `dither` swaps round-to-nearest for the ordered dither (`_BAYER8`), for 8-bit exports.
+    """
+    y, db, dr = _ycbcr420(frame)
+    luma = 16.0 + 219.0 * y
+    cb = 128.0 + 224.0 / 1.8556 * db
+    cr = 128.0 + 224.0 / 1.5748 * dr
+    if dither:
+        luma = (luma + _bayer(*luma.shape, luma.device)).clamp_(16.0, 235.0)
+        th = _bayer(*cb.shape, cb.device)
+        chroma = torch.stack(((cb + th).clamp_(16.0, 240.0), (cr + th).clamp_(16.0, 240.0)), dim=-1)
+        return torch.cat((luma.reshape(-1), chroma.reshape(-1))).to(torch.uint8)
     chroma = torch.stack((cb, cr), dim=-1)
     # Every value is inside 16..240 by construction; +0.5 then truncation rounds to nearest.
     return torch.cat((luma.reshape(-1), chroma.reshape(-1))).add_(0.5).to(torch.uint8)
+
+
+def rgb_to_p010(frame: torch.Tensor | np.ndarray) -> torch.Tensor:
+    """R'G'B' frame -> P010 words (bt709, limited range, 10 bits in the high bits of each
+    little-endian uint16), on the frame's own device. Same layout as `rgb_to_nv12`, two bytes a
+    sample: the 64..940 luma plane, then interleaved 64..960 CbCr pairs."""
+    y, db, dr = _ycbcr420(frame)
+    luma = 64.0 + 876.0 * y
+    chroma = torch.stack((512.0 + 896.0 / 1.8556 * db, 512.0 + 896.0 / 1.5748 * dr), dim=-1)
+    words = torch.cat((luma.reshape(-1), chroma.reshape(-1))).add_(0.5).to(torch.int32)
+    return (words << 6).to(torch.uint16)
 
 
 @dataclass(frozen=True)
@@ -313,14 +467,24 @@ def _pynvc():
     return PyNvVideoCodec
 
 
-def _nvenc_direct_config(fps: float, cq: int, device_index: int) -> dict[str, str]:
-    return {"codec": "h264", **NVENC_DIRECT_CONFIG, "cq": str(cq), "fps": f"{fps:g}", "gpu_id": str(device_index)}
+def _nvenc_direct_config(fps: float, cq: int, device_index: int, codec: str = "h264",
+                         maxrate: int | None = None) -> dict[str, str]:
+    """PyNvVideoCodec keys. The h264 default is exactly the historical dict; a 10-bit codec is
+    chosen by `codec` plus the P010 input format (Main10 / AV1 Main 10-bit follow from it)."""
+    cfg = {"codec": codec, **NVENC_DIRECT_CONFIG, "cq": str(cq), "fps": f"{fps:g}", "gpu_id": str(device_index)}
+    if maxrate:
+        cfg["maxbitrate"] = str(maxrate * 1_000_000)
+    return cfg
+
+
+def _direct_format(codec: str) -> str:
+    return "NV12" if codec == "h264" else "P010"
 
 
 @cache
-def zero_copy_error(device_index: int = 0) -> str | None:
-    """None when PyNvVideoCodec can open an NVENC session on this CUDA device, else why not.
-    Probed once per process, like `nvenc_usable`."""
+def zero_copy_error(device_index: int = 0, codec: str = "h264") -> str | None:
+    """None when PyNvVideoCodec can open an NVENC session for `codec` (h264|hevc|av1) on this CUDA
+    device, else why not. Probed once per process, like `nvenc_usable`."""
     if not torch.cuda.is_available():
         return "no CUDA device"
     try:
@@ -329,7 +493,8 @@ def zero_copy_error(device_index: int = 0) -> str | None:
         return f"PyNvVideoCodec unavailable ({type(exc).__name__}: {exc})"
     try:
         w, h = (int(v) for v in NVENC_PROBE_SIZE.split("x"))
-        nvc.CreateEncoder(w, h, "NV12", False, **_nvenc_direct_config(25, NVENC_CQ, device_index)).EndEncode()
+        nvc.CreateEncoder(w, h, _direct_format(codec), False,
+                          **_nvenc_direct_config(25, NVENC_CQ, device_index, codec)).EndEncode()
     except Exception as exc:
         return f"NVENC session failed ({' '.join(str(exc).split())[:200]})"
     return None
@@ -340,7 +505,8 @@ def choose_route(codec: str, W: int, H: int, device: str | torch.device | None) 
     the pipe's ceil-chroma NV12 layout and its encoder behaviour) and PyNvVideoCodec works here.
     Everything else takes the step-1 pipe; #29's strict mode turns that fallback into an error."""
     dev = torch.device(device) if device is not None else None
-    if codec != "h264_nvenc":
+    direct = _DIRECT_CODEC.get(codec)
+    if direct is None:
         return Route(ROUTE_PIPE, f"codec {codec}")
     if dev is None or dev.type != "cuda":
         return Route(ROUTE_PIPE, f"frames on {dev or 'cpu'}")
@@ -349,7 +515,7 @@ def choose_route(codec: str, W: int, H: int, device: str | torch.device | None) 
     if W % 2 or H % 2:
         return Route(ROUTE_PIPE, f"odd size {W}x{H}")
     index = dev.index if dev.index is not None else torch.cuda.current_device()
-    error = zero_copy_error(index)
+    error = zero_copy_error(index) if direct == "h264" else zero_copy_error(index, direct)
     if error is not None:
         return Route(ROUTE_PIPE, error)
     from importlib.metadata import version
@@ -358,19 +524,21 @@ def choose_route(codec: str, W: int, H: int, device: str | torch.device | None) 
 
 
 class _PipeSink:
-    """Step-1 route: NV12 bytes copied to the host and piped into ffmpeg, which encodes."""
+    """Step-1 route: NV12 (or P010) bytes copied to the host and piped into ffmpeg, which encodes."""
 
     def __init__(self, enc: "Encoder", cq: int, crf: int, preset: str) -> None:
         self.log = enc.log
+        self.enc = enc
+        pix = "p010le" if enc.video.ten_bit else "nv12"
         cmd = [
             FFMPEG, "-y", "-hide_banner", "-loglevel", "error",
             # Tag the input as what rgb_to_nv12 produced. Untagged, ffmpeg's colorspace negotiation
             # treats it as unspecified and swscale re-converts it to the bt709 output.
-            "-f", "rawvideo", "-pix_fmt", "nv12", "-s", f"{enc.W}x{enc.H}",
+            "-f", "rawvideo", "-pix_fmt", pix, "-s", f"{enc.W}x{enc.H}",
             "-color_range", "tv", *BT709_ARGS,
             "-r", f"{enc.fps:g}", "-i", "-",
-            *vcodec_args(enc.codec, cq=cq, crf=crf, preset=preset),
-            "-pix_fmt", "nv12", *BT709_ARGS, *BT709_BSF,
+            *vcodec_args(enc.codec, cq=cq, crf=crf, preset=preset, maxrate=enc.video.maxrate),
+            "-pix_fmt", pix, *BT709_ARGS, *vui_bsf(enc.codec),
         ]
         if enc.path.suffix.lower() in _MOV_EXTS:
             cmd += ["-movflags", "+faststart"]
@@ -384,7 +552,7 @@ class _PipeSink:
             self.finish()
 
     def write(self, t: torch.Tensor) -> None:
-        data = rgb_to_nv12(t).cpu().numpy()
+        data = self.enc.convert(t).cpu().numpy()
         assert self._proc.stdin is not None
         try:
             self._proc.stdin.write(memoryview(data))
@@ -430,11 +598,16 @@ class _CAI:
 
 
 class _NV12Planes:
-    """NVENC's NV12 input: a (H, W, 1) luma plane and an (H/2, W/2, 2) CbCr plane in one buffer."""
+    """NVENC's NV12 input: a (H, W, 1) luma plane and an (H/2, W/2, 2) CbCr plane in one buffer.
+    P010 is the same shape in uint16 words. PyNvVideoCodec accepts P010 planes only with typestr
+    `|u2`; torch reports `<u2` and that is rejected ("Invalid typestr: <u2")."""
 
     def __init__(self, nv12: torch.Tensor, W: int, H: int) -> None:
         self._keep = nv12
         self._planes = [_CAI(nv12[: W * H].view(H, W, 1)), _CAI(nv12[W * H:].view(H // 2, W // 2, 2))]
+        if nv12.dtype == torch.uint16:
+            for plane in self._planes:
+                plane.__cuda_array_interface__ = {**plane.__cuda_array_interface__, "typestr": "|u2"}
 
     def cuda(self) -> list[_CAI]:
         return self._planes
@@ -458,6 +631,7 @@ class _NvencDirectSink:
         if self.device.index is None:
             self.device = torch.device("cuda", torch.cuda.current_device())
         nvc = _pynvc()
+        self._codec = _DIRECT_CODEC[enc.codec]
         rate = Fraction(enc.fps).limit_denominator(1001)
         self._es = enc.path.with_name(f".{enc.path.name}.es.mp4")
         self._stream = torch.cuda.Stream(self.device)
@@ -467,11 +641,11 @@ class _NvencDirectSink:
             # The encoder copies its input on _stream, so writes only have to order _stream after
             # the renderer's stream; no host sync.
             self._nvenc = nvc.CreateEncoder(
-                enc.W, enc.H, "NV12", False, cudastream=self._stream.cuda_stream,
-                **_nvenc_direct_config(enc.fps, cq, self.device.index),
+                enc.W, enc.H, _direct_format(self._codec), False, cudastream=self._stream.cuda_stream,
+                **_nvenc_direct_config(enc.fps, cq, self.device.index, self._codec, enc.video.maxrate),
             )
             self._mux = nvc.FFmpegMuxer(
-                file_path=str(self._es), media_format=nvc.MEDIA_FORMAT.MP4, codec="h264",
+                file_path=str(self._es), media_format=nvc.MEDIA_FORMAT.MP4, codec=self._codec,
                 width=enc.W, height=enc.H, fps_num=rate.numerator, fps_den=rate.denominator,
                 timebase_num=1, timebase_den=rate.numerator * self._TICKS,
                 extradata=self._nvenc.GetSequenceParams(),
@@ -492,7 +666,7 @@ class _NvencDirectSink:
         self._stream.wait_stream(producer)
         with torch.cuda.stream(self._stream):
             src = t.to(self.device)
-            nv12 = rgb_to_nv12(src)
+            nv12 = self.enc.convert(src)
         if t.device == self.device:
             # The caller frees the frame after write; keep its memory until _stream has read it.
             t.record_stream(self._stream)
@@ -513,8 +687,10 @@ class _NvencDirectSink:
             self._queue(self._nvenc.EndEncode())
             self._mux.Finalize()
             del self._mux, self._nvenc
+            vui = NVENC_DIRECT_BSF if self._codec == "h264" else vui_bsf(self._codec)
+            tag = ["-tag:v", "hvc1"] if self._codec == "hevc" else []
             cmd = [FFMPEG, "-y", "-hide_banner", "-loglevel", "error", "-i", str(self._es),
-                   "-map", "0:v", "-c:v", "copy", *BT709_ARGS, *NVENC_DIRECT_BSF]
+                   "-map", "0:v", "-c:v", "copy", *tag, *BT709_ARGS, *vui]
             if self.enc.path.suffix.lower() in _MOV_EXTS:
                 cmd += ["-movflags", "+faststart"]
             run([*cmd, str(self.enc.path)], log=self.enc.log, desc="encode")
@@ -544,7 +720,8 @@ def _log_tail(path: Path) -> str:
 
 
 class Encoder:
-    """Context manager: RGB frames in, an H.264 MP4 out, by one of two routes (see `choose_route`).
+    """Context manager: RGB frames in, an H.264 (or 10-bit HEVC/AV1, see `VideoSettings`) MP4 out,
+    by one of two routes (see `choose_route`).
 
     `write` takes the renderer's (3, H, W) float tensor or an (H, W, 3) uint8 image; either is
     converted to bt709 limited NV12 where it lives. Pass `device="cuda"` when frames arrive on the
@@ -567,12 +744,20 @@ class Encoder:
         preset: str = X264_PRESET,
         device: str | torch.device | None = None,
         policy: GpuPolicy | None = None,
+        video: VideoSettings | None = None,
     ) -> None:
         self.path = Path(path)
         self.W, self.H, self.fps = int(W), int(H), float(fps)
-        self.codec = encoder or prefer_encoder()
+        self.video = video or VideoSettings()
+        if video is not None:
+            cq = video.cq
+        if self.video.ten_bit:
+            # NVENC or nothing: no CPU fallback to police, so strict mode has nothing to refuse.
+            self.codec = TEN_BIT_ENCODERS[self.video.codec]
+        else:
+            self.codec = encoder or prefer_encoder()
         if policy is not None:
-            if self.codec == "h264_nvenc":
+            if self.codec in _DIRECT_CODEC:
                 policy.gpu("encode")
             else:
                 policy.cpu("encode", f"{self.codec} encode of {self.path.name}", nvenc_hint())
@@ -580,12 +765,22 @@ class Encoder:
         self.log = log_file("encode", log)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.route = choose_route(self.codec, self.W, self.H, device)
+        if self.video.ten_bit and not self.route.zero_copy:
+            error = ten_bit_error(self.video.codec)
+            if error is not None:
+                raise EncodeError(f"encode: {self.video.codec} unavailable: {error}")
         with open(self.log, "a", encoding="utf-8") as fh:
             fh.write(f"encode route {self.route}\n")
         self._closed = False
         self._sink: _PipeSink | _NvencDirectSink = (
             _NvencDirectSink(self, cq) if self.route.zero_copy else _PipeSink(self, cq, crf, preset)
         )
+
+    def convert(self, t: torch.Tensor) -> torch.Tensor:
+        """The encoder's input surface for one frame, computed where the frame lives."""
+        if self.video.ten_bit:
+            return rgb_to_p010(t)
+        return rgb_to_nv12(t, dither=self.video.dither)
 
     def write(self, frame: torch.Tensor | np.ndarray) -> None:
         """Append one frame: float (3, H, W) in 0..1 on any device, or uint8 (H, W, 3)."""
@@ -621,6 +816,12 @@ class Encoder:
             self.abort()
 
 
+def _hvc1(vcodec: str | None) -> list[str]:
+    """`-tag:v hvc1` for an HEVC stream: a stream copy into MP4 otherwise writes the mp4 muxer's
+    default `hev1`, which QuickTime/Safari (and some upload pipelines) refuse."""
+    return ["-tag:v", "hvc1"] if vcodec in ("hevc", "hevc10") else []
+
+
 def _concat_quote(path: Path) -> str:
     """concat demuxer quoting: single quotes, escaped as '\\''."""
     return "'" + path.resolve().as_posix().replace("'", "'\\''") + "'"
@@ -633,12 +834,14 @@ def concat(
     fps: float,
     frames: Sequence[int],
     log: Path | str | None = None,
+    vcodec: str | None = None,
 ) -> Path:
     """Join segments with the concat demuxer and `-c copy` (no re-encode).
 
     Each file gets a `duration` of n/fps from the caller so the next file starts on
     the 1/fps grid, even when a muxer stored a slightly short last-packet duration.
-    Frame counts are passed in: probing them would decode every chunk.
+    Frame counts are passed in: probing them would decode every chunk. So is `vcodec` (`hevc10`
+    or `hevc` gets the `hvc1` tag), for the same reason.
     """
     chunks = [Path(c) for c in chunks]
     if not chunks:
@@ -662,7 +865,7 @@ def concat(
     listing.write_text("".join(lines))
     run(
         [FFMPEG, "-y", "-hide_banner", "-loglevel", "error", "-f", "concat", "-safe", "0",
-         "-i", str(listing), "-c", "copy", "-movflags", "+faststart", str(out)],
+         "-i", str(listing), "-c", "copy", *_hvc1(vcodec), "-movflags", "+faststart", str(out)],
         log=log,
         desc="concat",
     )
@@ -696,7 +899,13 @@ def _loudnorm_field(stats: dict, key: str) -> str:
     return text
 
 
-def _measure_loudnorm(audio: Path | str, duration: float, log: Path | str | None) -> dict:
+def loudnorm_filter(lufs: float = LOUDNESS_I) -> str:
+    """`LOUDNORM` at another integrated target; -14 gives exactly `LOUDNORM`."""
+    return LOUDNORM.replace("I=-14", f"I={lufs:g}")
+
+
+def _measure_loudnorm(audio: Path | str, duration: float, log: Path | str | None,
+                      lufs: float = LOUDNESS_I) -> dict:
     """Pass 1: integrated loudness of the trimmed track. No fade and no apad.
 
     The fade is applied after the gain, so it must not change the measurement.
@@ -704,7 +913,7 @@ def _measure_loudnorm(audio: Path | str, duration: float, log: Path | str | None
     """
     af = (
         f"atrim=start=0:end={duration:.6f},asetpts=PTS-STARTPTS,"
-        f"{LOUDNORM}:print_format=json"
+        f"{loudnorm_filter(lufs)}:print_format=json"
     )
     _code, stderr = run(
         [FFMPEG, "-y", "-hide_banner", "-i", str(audio), "-af", af, "-f", "null", "-"],
@@ -714,9 +923,9 @@ def _measure_loudnorm(audio: Path | str, duration: float, log: Path | str | None
     return _parse_loudnorm(stderr)
 
 
-def _linear_loudnorm(stats: dict) -> str:
+def _linear_loudnorm(stats: dict, lufs: float = LOUDNESS_I) -> str:
     return (
-        f"{LOUDNORM}:measured_I={_loudnorm_field(stats, 'input_i')}:"
+        f"{loudnorm_filter(lufs)}:measured_I={_loudnorm_field(stats, 'input_i')}:"
         f"measured_TP={_loudnorm_field(stats, 'input_tp')}:"
         f"measured_LRA={_loudnorm_field(stats, 'input_lra')}:"
         f"measured_thresh={_loudnorm_field(stats, 'input_thresh')}:"
@@ -732,8 +941,10 @@ def mux(
     fade_out: float = 0.0,
     *,
     log: Path | str | None = None,
+    lufs: float = LOUDNESS_I,
+    audio_kbps: int = 256,
 ) -> Path:
-    """Attach audio to a finished video: video copied, audio at -14 LUFS as AAC 256k/48k.
+    """Attach audio to a finished video: video copied, audio at -14 LUFS (`lufs`) as AAC 256k/48k.
 
     Loudnorm is two-pass and linear. Pass 1 measures the track trimmed to the film.
     Pass 2 applies `measured_I/TP/LRA/thresh` and `offset` with `linear=true`.
@@ -754,11 +965,11 @@ def mux(
     out = Path(out)
     out.parent.mkdir(parents=True, exist_ok=True)
     if loudnorm:
-        stats = _measure_loudnorm(audio, info.duration, log)
+        stats = _measure_loudnorm(audio, info.duration, log, lufs)
         chain = [
             f"atrim=start=0:end={info.duration:.6f}",
             "asetpts=PTS-STARTPTS",
-            _linear_loudnorm(stats),
+            _linear_loudnorm(stats, lufs),
         ]
     else:
         chain = []
@@ -770,14 +981,42 @@ def mux(
     cmd = [
         FFMPEG, "-y", "-hide_banner", "-loglevel", "error", "-i", str(video), "-i", str(audio),
         "-filter_complex", f"[1:a]{','.join(chain)}[a]", "-map", "0:v", "-map", "[a]",
-        "-c:v", "copy", *AUDIO_ARGS, "-b:a", "256k", "-t", f"{info.duration:.6f}",
+        "-c:v", "copy", *_hvc1(info.vcodec), *AUDIO_ARGS, "-b:a", f"{audio_kbps}k", "-t", f"{info.duration:.6f}",
         "-movflags", "+faststart", str(out),
     ]
     run(cmd, log=log, desc="mux")
     return out
 
 
-PRESETS = ("master", "whatsapp")
+@dataclass(frozen=True)
+class Target:
+    """One delivery preset. `width` caps the frame width (the film is rendered at that size, not
+    scaled after); `lufs` is the integrated loudness target. Every target is tagged bt709."""
+
+    name: str
+    video: VideoSettings
+    lufs: float = LOUDNESS_I
+    audio_kbps: int = 256
+    width: int | None = None
+    tags: str = "bt709"
+
+    def describe(self) -> str:
+        width = f" w{self.width}" if self.width else ""
+        return f"target={self.name} {self.video.describe()}{width} {self.lufs:g}LUFS aac{self.audio_kbps}k {self.tags}"
+
+
+# The one export table. 10-bit HEVC where the platform takes it (YouTube and Shorts keep it, so
+# their re-encode starts from a master that does not band); H.264 with dither where the player or
+# re-encoder is 8-bit (Instagram, WhatsApp). Caps sit at or under each platform's upload advice.
+TARGETS: dict[str, Target] = {
+    "youtube": Target("youtube", VideoSettings("hevc10", cq=18, maxrate=40)),
+    "shorts": Target("shorts", VideoSettings("hevc10", cq=18, maxrate=30), width=1080),
+    "reels": Target("reels", VideoSettings("h264", cq=19, maxrate=25, dither=True), width=1080),
+    "whatsapp": Target("whatsapp", VideoSettings("h264", cq=27, maxrate=4, dither=True),
+                       audio_kbps=160, width=720),
+    "master": Target("master", VideoSettings("hevc10", cq=12), audio_kbps=320),
+}
+PRESETS = tuple(TARGETS)
 
 
 def export(
@@ -787,20 +1026,34 @@ def export(
     *,
     log: Path | str | None = None,
 ) -> Path:
-    """Delivery copy: `master` copies both streams untouched, `whatsapp` is 720 wide / cq 27 / aac 160k."""
-    if preset not in PRESETS:
+    """Delivery copy of an existing *file* (no spec to render from): `master` copies both streams
+    untouched (a file cannot be made 10-bit after the fact); every other target transcodes with
+    its `TARGETS` codec, cap, width and audio bitrate. Loudness was set when the file was muxed.
+    With a spec, `montaj export` renders the target from the float compositor instead."""
+    if preset not in TARGETS:
         raise EncodeError(f"export: unknown preset '{preset}' (have: {', '.join(PRESETS)})")
     if not Path(src).exists():
         raise EncodeError(f"export: {src} does not exist")
+    spec = TARGETS[preset]
     target = Path(target)
     target.parent.mkdir(parents=True, exist_ok=True)
-    codec = (
+    if preset == "master":
         # A master copy stays bit-identical, so it only gets the container tags; the bitstream
         # filter would rewrite the SPS and break "copy" into a re-mux.
-        ["-c", "copy", *BT709_ARGS] if preset == "master"
-        else [*vcodec_args(prefer_encoder(), cq=27, crf=24), "-vf", "scale=720:-2",
-              "-c:a", "aac", "-b:a", "160k", *BT709_ARGS, *BT709_BSF]
-    )
+        codec = ["-c", "copy", *_hvc1(probe(src, log=log).vcodec), *BT709_ARGS]
+    else:
+        v = spec.video
+        if v.ten_bit:
+            error = ten_bit_error(v.codec)
+            if error is not None:
+                raise EncodeError(f"export: {v.codec} unavailable: {error}")
+            encoder, pix = TEN_BIT_ENCODERS[v.codec], "p010le"
+        else:
+            encoder, pix = prefer_encoder(), "yuv420p"
+        scale = [f"scale={spec.width}:-2"] if spec.width else []
+        codec = [*vcodec_args(encoder, cq=v.cq, crf=24, maxrate=v.maxrate),
+                 "-vf", ",".join([*scale, f"format={pix}"]),
+                 "-c:a", "aac", "-b:a", f"{spec.audio_kbps}k", *BT709_ARGS, *vui_bsf(encoder)]
     cmd = [FFMPEG, "-y", "-hide_banner", "-loglevel", "error", "-i", str(src), *codec,
            "-movflags", "+faststart", str(target)]
     run(cmd, log=log, desc="export")

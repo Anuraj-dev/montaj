@@ -12,7 +12,8 @@ from pathlib import Path
 from montaj.config import Config, ConfigError
 from montaj.config import load as load_config
 from montaj.encode import (
-    FFMPEG, FFPROBE, choose_route, has_encoder, nvenc_hint, nvenc_usable, prefer_encoder, tool_version,
+    FFMPEG, FFPROBE, TEN_BIT_ENCODERS, choose_route, has_encoder, nvenc_hint, nvenc_usable, prefer_encoder,
+    ten_bit_error, tool_version,
 )
 from montaj.gpu_policy import GpuPolicy, load_policy, resolve_device
 
@@ -26,6 +27,8 @@ TRAPS: tuple[str, ...] = (
     "TRAP ace-step-path: ACE-Step lives at ~/.local/share/montaj/ACE-Step-1.5 (18 GB) - reference via config, don't move",
     "TRAP gpu-lock: music gen/analyze and render share the one GPU - montaj locks ~/.cache/montaj/gpu.lock, don't run them side by side",
     "TRAP gpu-strict: [gpu] strict=true in config.toml turns every CPU pixel fallback (ffmpeg decode, Chromium text, PIL photo, libx264) into ERR gpu-strict; page raster in capture stays CPU",
+    "TRAP p010-typestr: PyNvVideoCodec takes P010 planes only with __cuda_array_interface__ typestr '|u2'; torch's '<u2' fails 'Invalid typestr'",
+    "TRAP hevc-tag: a stream copy of HEVC into MP4 writes 'hev1' unless -tag:v hvc1 - QuickTime/Safari refuse hev1; concat/mux/export pass it",
     "TRAP still-photos: no warp/drift/depth-parallax on stills - motion lives in transitions, cuts on a beat grid",
 )
 
@@ -75,6 +78,15 @@ def nvenc_line() -> str:
     return "WARN nvenc: h264_nvenc listed but cannot encode (no usable driver), libx264 fallback"
 
 
+def ten_bit_line() -> str:
+    """`render --codec hevc10|av1` and the 10-bit export targets: can this NVENC encode them?"""
+    ok = [c for c in TEN_BIT_ENCODERS if ten_bit_error(c) is None]
+    bad = [c for c in TEN_BIT_ENCODERS if c not in ok]
+    if not bad:
+        return f"OK nvenc 10-bit: {', '.join(f'{c} ({TEN_BIT_ENCODERS[c]})' for c in ok)}"
+    return f"WARN nvenc 10-bit: {', '.join(bad)} unavailable ({ten_bit_error(bad[0])}); those codecs and targets ERR"
+
+
 def encode_route_line() -> str:
     """The route a 1080x1920 GPU render encodes through. WARN means frames cross to the host."""
     import torch
@@ -87,7 +99,7 @@ def encode_route_line() -> str:
 
 def doctor() -> list[str]:
     """Environment report for the CLI (or an agent) to print as-is."""
-    lines = [cuda_line(), nvenc_line(), encode_route_line()]
+    lines = [cuda_line(), nvenc_line(), ten_bit_line(), encode_route_line()]
     lines.extend(stage_lines())
 
     lines.append(_version(FFMPEG, "ffmpeg"))

@@ -21,4 +21,6 @@
 - 8 GB VRAM: ACE-Step needs `offload_to_cpu` + `offload_dit_to_cpu`, else the LM phase OOMs. Don't render at the same time.
 - ACE-Step location: `design-test/voice-bot/tools/ACE-Step-1.5` (19 GB) — reference via config, don't move.
 - `[gpu] strict = true` makes every CPU pixel fallback an `ERR gpu-strict` (ffmpeg decode, Chromium text, PIL photo/print shadow, libx264). Page raster in `capture` is the one named CPU exception. A cached segment is not rechecked.
+- PyNvVideoCodec P010 input: planes must report `__cuda_array_interface__` typestr `|u2`; torch's `<u2` fails `Invalid typestr`.
+- HEVC stream-copied into MP4 is tagged `hev1` unless `-tag:v hvc1` (QuickTime/Safari refuse `hev1`); concat, mux and master export pass it.
 - Taste: no photo warp/drift/depth-parallax on stills; motion lives in transitions; cuts on a beat grid.

@@ -234,6 +234,7 @@ def segment_hash(
     seg: Segment,
     asset_sha: dict[str, str],
     engine_version: str,
+    encode: dict | None = None,
 ) -> str:
     referenced: set[int] = set()
     text_ids: set[int] = set()
@@ -324,5 +325,7 @@ def segment_hash(
         payload["markers"] = {k: tl.markers[k] for k in sorted(tl.markers)}
     if clips:
         payload["clips"] = clips
+    if encode:  # `VideoSettings.hash_key()`: absent for the default H.264, so old films keep hashes
+        payload["encode"] = encode
     blob = json.dumps(payload, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(blob.encode()).hexdigest()

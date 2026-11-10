@@ -10,6 +10,7 @@ from PIL import Image, ImageDraw, ImageFont
 
 from montaj import guards
 from montaj.cli import main
+from montaj.encode import BT709_ARGS, BT709_BSF
 from montaj.spec import SpecError, load_spec
 
 SPEC = (
@@ -40,7 +41,8 @@ def _video(path: Path, digits: str | None) -> None:
     for name, src, out in (("a", png, "a.mp4"), ("b", white, "b.mp4")):
         subprocess.run(
             ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-loop", "1", "-framerate", "30",
-             "-i", str(src), "-t", "1", "-pix_fmt", "yuv420p", str(path.with_name(out))],
+             "-i", str(src), "-t", "1", "-pix_fmt", "yuv420p", "-color_range", "tv", *BT709_ARGS, *BT709_BSF,
+             str(path.with_name(out))],
             check=True,
         )
     lst = path.with_name("l.txt")

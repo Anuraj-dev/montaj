@@ -14,7 +14,7 @@ import re
 from pathlib import Path
 from typing import NamedTuple, Sequence
 
-from montaj.encode import FFMPEG, FFPROBE, capture, probe, run
+from montaj.encode import FFMPEG, FFPROBE, MediaInfo, VideoSettings, capture, probe, run
 from montaj.project import resolve_clip
 from montaj.spec import _dur_frames
 from montaj.timeline import Timeline, clip_read_frames, transition_overlap
@@ -163,6 +163,24 @@ def _note_expects(lines: list[str], kind: str, detected: Sequence[Span], expect:
             lines.append(f"INFO expect {kind} {label} not found")
 
 
+def video_line(info: MediaInfo, want: VideoSettings | None = None) -> str:
+    """Codec, bit depth and colour tags as the file states them. bt709 primaries, transfer and
+    matrix plus limited (tv) range on every target; `want` (an export target's settings) also
+    pins the codec and depth, so a youtube file that came out 8-bit is a WARN, not a silent pass."""
+    codec = info.vcodec or "unknown"
+    depth = info.bit_depth
+    tags = (info.color_space, info.color_primaries, info.color_transfer)
+    shown = f"{codec} {depth or '?'}-bit {info.pix_fmt or '?'}"
+    if any(t != "bt709" for t in tags) or info.color_range != "tv":
+        got = "/".join(t or "unset" for t in tags) + f" range={info.color_range or 'unset'}"
+        return f"WARN video {shown} colour tags {got} (want bt709/bt709/bt709 range=tv)"
+    if want is not None:
+        want_codec = "hevc" if want.codec == "hevc10" else want.codec
+        if codec != want_codec or depth != want.depth:
+            return f"WARN video {shown} bt709 (want {want_codec} {want.depth}-bit)"
+    return f"OK video {shown} bt709"
+
+
 def _loudness_want(target: float) -> str:
     if abs(target - round(target)) < 1e-6:
         return f"{target:.0f}"
@@ -172,7 +190,7 @@ def _loudness_want(target: float) -> str:
 def check(video: Path | str, intended_freeze: Sequence[Span] = (), *, log: Path | str | None = None,
           av_tol: float | None = None, intended_black: Sequence[Span] = (),
           expect: Sequence[Expect] = (), loudness_target: float | None = None,
-          loudness_tol: float | None = None) -> list[str]:
+          loudness_tol: float | None = None, want: VideoSettings | None = None) -> list[str]:
     """One short line per check; the only stdout surface of the QA stage.
 
     `av_tol` overrides the 0.5 s default. The CLI passes one frame when the spec has audio.
@@ -180,6 +198,7 @@ def check(video: Path | str, intended_freeze: Sequence[Span] = (), *, log: Path 
     from a dark ground, a dark blank and its transitions, the outro fade, `check.expect`).
     `expect` is that same declaration plus its `why`: a match names the reason, a miss is
     `INFO expect … not found`. `loudness_target` / `loudness_tol` override -14 LUFS ± 1.
+    `want` is the codec/depth the file must have (see `video_line`).
     """
     info = probe(video, log=log)
     tol = AV_TOL_S if av_tol is None else av_tol
@@ -189,6 +208,7 @@ def check(video: Path | str, intended_freeze: Sequence[Span] = (), *, log: Path 
         f"OK duration {info.duration:.2f}s",
         f"OK size {info.width}x{info.height}",
         f"OK fps {info.fps:.1f}",
+        video_line(info, want),
     ]
     ignored_black = 0
     detected_black = black_spans(video, log=log)

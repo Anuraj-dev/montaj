@@ -24,7 +24,7 @@ from montaj.audio.mix import check_lines
 from montaj.audio.music import parse_duration
 from montaj.capture import run as run_capture
 from montaj.doctor import doctor
-from montaj.encode import MediaInfo, export, probe
+from montaj.encode import CODECS, TARGETS, MediaInfo, VideoSettings, export, probe
 from montaj.analysis import analyze_assets, describe_all
 from montaj.gpu_policy import GpuStrictError, load_policy
 from montaj.ingest import IngestError, ingest, ingest_rec
@@ -91,6 +91,7 @@ def _parser() -> argparse.ArgumentParser:
     group = ren.add_mutually_exclusive_group()
     group.add_argument("--preview", action="store_true")
     group.add_argument("--final", action="store_true")
+    ren.add_argument("--codec", choices=CODECS, default=None)
 
     sh = sub.add_parser("sheet")
     when = sh.add_mutually_exclusive_group()
@@ -107,7 +108,7 @@ def _parser() -> argparse.ArgumentParser:
     ck.add_argument("--video", default=None)
 
     ex = sub.add_parser("export")
-    ex.add_argument("--target", required=True, choices=("master", "whatsapp"))
+    ex.add_argument("--target", required=True, choices=tuple(TARGETS))
 
     music_p = sub.add_parser("music")
     music_sub = music_p.add_subparsers(dest="music_cmd", required=True, metavar="gen|analyze|compose")
@@ -402,15 +403,16 @@ def _cmd_render(ns: argparse.Namespace, root: Path) -> list[str]:
 
     mode = "final" if ns.final else "preview"
     t0 = time.perf_counter()
-    result = render(root / "montaj.yaml", mode)
+    result = render(root / "montaj.yaml", mode, **({"video": VideoSettings(ns.codec)} if ns.codec else {}))
     dt = time.perf_counter() - t0
     mb = result.path.stat().st_size / (1024 * 1024)
     rel = result.path.resolve().relative_to(root.resolve()).as_posix()
     n = result.rendered + result.cached
     w, h = result.size
     audio = " audio" if result.audio else ""
+    codec = f" {result.video}" if ns.codec else ""  # omitted when unset: the default line is unchanged
     return [
-        f"OK {rel} {result.seconds:.2f}s {w}x{h} {mb:.1f}MB "
+        f"OK {rel} {result.seconds:.2f}s {w}x{h} {mb:.1f}MB{codec} "
         f"rendered {result.rendered}/{n} cached {result.cached}/{n} in {dt:.1f}s gpu={result.gpu}{audio}"
     ]
 
@@ -763,11 +765,17 @@ def _cmd_check(ns: argparse.Namespace, root: Path, numbers: dict | None = None) 
     expects, loud_i, loud_tol = _check_overrides(root)
     black = union([*_intended_black(root), *(item.span for item in expects if item.kind == "black")])
     freeze = union([*_intended_freeze(root), *(item.span for item in expects if item.kind == "frozen")])
+    video = _video(root, ns.video)
+    # out/<target>.mp4 is checked against its export preset: codec, bit depth and LUFS target.
+    preset = TARGETS.get(video.stem) if video.parent.resolve() == (root / "out").resolve() else None
+    if preset is not None and loud_i is None:
+        loud_i = preset.lufs
     lines = check(
-        _video(root, ns.video), freeze,
+        video, freeze,
         log=root / "build" / "qa.log", av_tol=_av_tol(root),
         intended_black=black, expect=expects,
         loudness_target=loud_i, loudness_tol=loud_tol,
+        want=preset.video if preset is not None else None,
     )
     spec_file = root / "montaj.yaml"
     spec = load_spec(spec_file) if spec_file.is_file() else None
@@ -796,10 +804,30 @@ def _cmd_check(ns: argparse.Namespace, root: Path, numbers: dict | None = None) 
 
 
 def _cmd_export(ns: argparse.Namespace, root: Path) -> list[str]:
+    """With a spec, the target is rendered from the float compositor (10-bit or dithered 8-bit,
+    all on the GPU); without one, the newest out/ file is copied (master) or transcoded."""
+    preset = TARGETS[ns.target]
+    spec_file = root / "montaj.yaml"
+    if spec_file.is_file():
+        from montaj.pipeline import render
+
+        t0 = time.perf_counter()
+        result = render(spec_file, "final", target=preset)
+        dt = time.perf_counter() - t0
+        mb = result.path.stat().st_size / (1024 * 1024)
+        n = result.rendered + result.cached
+        w, h = result.size
+        return [
+            f"OK out/{ns.target}.mp4 {result.seconds:.2f}s {w}x{h} {mb:.1f}MB {preset.describe()} "
+            f"rendered {result.rendered}/{n} cached {result.cached}/{n} in {dt:.1f}s gpu={result.gpu}"
+        ]
     target = root / "out" / f"{ns.target}.mp4"
     export(_export_source(root), target, ns.target, log=root / "build" / "export.log")
     mb = target.stat().st_size / (1024 * 1024)
-    return [f"OK out/{ns.target}.mp4 {mb:.1f}MB"]
+    # Loudness was fixed when the file was muxed, so a file export does not claim a LUFS target.
+    width = f" w{preset.width}" if preset.width else ""
+    how = "copy" if ns.target == "master" else f"{preset.video.describe()}{width} aac{preset.audio_kbps}k"
+    return [f"OK out/{ns.target}.mp4 {mb:.1f}MB target={ns.target} {how} {preset.tags} from file"]
 
 
 def _rel(root: Path, path: Path) -> str:
