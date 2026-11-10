@@ -98,7 +98,7 @@ moves with the voice. A static rectangle behind the whole caption is never a pre
 - A film subtitle (`subs`) used where a caption was wanted.
 
 ## How to look before writing (#26)
-1. `montaj captions --gallery` — every preset over this project's own footage, one image. Pick by eye, once.
-2. `montaj ref <video>` — a sheet and cut rate from a reference the user points to.
+1. `montaj captions --gallery` → `build/captions-gallery.jpg` — every preset over this project's own footage (brightest and darkest caption moment), one 1536-px image. Pick by eye, once.
+2. `montaj ref <video>` → `build/ref-<stem>.jpg` — a sheet sampled at the cuts of a reference the user points to, and `cut_rate=<cuts per 10 s>` and `median_shot=<s>` on the `OK` line.
 3. `montaj captions --print` — review the chunking as text, at no image cost.
-4. `montaj captions --strip <chunk>` — one entrance as frames, only when the motion is new.
+4. `montaj captions --strip <chunk>` (chunk index from `--print`) → `build/captions-strip.jpg` — eight frames from the frame before the chunk starts, only when the motion is new.
