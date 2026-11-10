@@ -4,6 +4,8 @@
 | Doc | What it's for |
 |-----|----------------|
 | STATE.md | Current state — read this first on any fresh session |
+| ROADMAP.md | Plan from M5 on: agent-first editor (type, all-dGPU, agent eyes, motion, editing, colour); issues #20–#49 |
+| CAPTIONS.md | What a good YouTube caption looks like: anatomy, colour, motion, presets, slop list (contract for #20–#26) |
 | PLAN.md | Scope, self-interrogation, architecture, CLI, milestones, targets |
 | decisions.md | Append-only log of load-bearing choices + why |
 | conventions.md | Stack, run/test commands, naming |

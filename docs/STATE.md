@@ -2,6 +2,8 @@
 > Agent-native video harness: YAML spec in, finished video out, zero-token re-render/review · Last checkpoint: 2026-10-21
 
 ## 🚧 In progress / next
+- Next: `docs/ROADMAP.md` (M5–M11, issues #20–#48, tracker #49). Start with #28 step 1, #30, #31, then M5
+  (#20 GPU text engine first). Caption design contract: `docs/CAPTIONS.md`.
 - GitHub issues #1–19 all merged into `main` and pushed (2026-10-21); issues closed with their merge sha.
 - Open worktrees with uncommitted, unmerged work (keep): `montaj-wt/launch-film` (`feat/engine-launch-film`),
   `montaj-wt/export-wa-audio` (`fix/export-whatsapp-audio-copy`). Both branch from `6b1caaf`, 82 commits behind
@@ -53,8 +55,8 @@
 - Agents write a YAML spec, never engine code; every capability is a spec field. Music may be agent-written Python.
 - One engine: Python + torch GPU compositor; film2.py / film.html are parity oracles.
 - Segment-hash cache: renderer reads only FramePlan + shots + assets, so one edit re-renders its segments.
-- Engine built in waves by external models, scored in `docs/BENCHMARK.md`; Sol reviews.
-- Issue work: one worktree `~/Anuraj-dev/montaj-wt/g47-i<N>` per issue, Sol review, Sonnet fixes, `--no-ff` local merge.
+- Issue work (from 2026-11-10): Claude models only, routed per `docs/ROADMAP.md`; one worktree
+  `~/Anuraj-dev/montaj-wt/i<N>` per issue, workers self-verify, `--no-ff` local merge, one review at the end.
 
 ## Gotchas
 - Leave alone: the `launch-film` and `export-wa-audio` worktrees (uncommitted work). Workers never `git stash`.
@@ -62,9 +64,6 @@
   (`timeline.mux_fade`, sample-exact vs ffmpeg). Loudnorm (one constant gain) is deliberately not mirrored.
 - Hash compatibility: new optional fields use `Field(default=None, exclude_if=lambda v: v is None)` or
   `project._HASH_OMIT_NONE/_EMPTY`; existing films' segment hashes must not change.
-- Model routing: grok-4.6 tight-spec logic, grok-4.7 render work, gpt-5.6-luna xhigh fast-tier implementer
-  (CLI/audio), Sol (gpt-6.1-sol) medium review. Fix rounds resume the worker (`grok -r <id>`); a resumed grok
-  session keeps its old cwd, so name the worktree path in the prompt and check the diff landed there.
 - No model names in commit messages (only BENCHMARK.md).
 - Anything the renderer reads must reach the segment hash; derived values (beat grid) are materialised onto
   `Timeline.spec` so the hash and runtime see the same thing.
