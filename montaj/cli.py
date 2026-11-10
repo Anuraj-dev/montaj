@@ -26,7 +26,7 @@ from montaj.capture import run as run_capture
 from montaj.doctor import doctor
 from montaj.encode import MediaInfo, export, probe
 from montaj.ingest import IngestError, ingest, ingest_rec
-from montaj import taste
+from montaj import inspector, taste
 from montaj.guards import content_guards
 from montaj.qa import BLACK_PIX_TH, FREEZE_MIN_S, Expect, check, clip_overruns, subtract, union
 from montaj.review.server import serve as serve_review
@@ -47,7 +47,7 @@ class _Usage(Exception):
 
 _COMMANDS = (
     "doctor", "new", "ingest", "ingest-rec", "validate", "render", "sheet", "check", "export", "music",
-    "review", "watch", "taste", "capture",
+    "review", "watch", "taste", "capture", "inspect",
 )
 
 
@@ -131,6 +131,14 @@ def _parser() -> argparse.ArgumentParser:
 
     cap = sub.add_parser("capture")
     cap.add_argument("script")
+
+    ins = sub.add_parser("inspect")
+    ins.add_argument("--at", default=None)
+    ins.add_argument("--shot", type=int, default=None)
+    ins.add_argument("--range", nargs=2, metavar=("FROM", "TO"), default=None)
+    ins.add_argument("--every", default=None)
+    ins.add_argument("--fast", action="store_true")
+    ins.add_argument("--problems", action="store_true")
     return p
 
 
@@ -305,6 +313,24 @@ def _cmd_ingest(ns: argparse.Namespace, root: Path) -> list[str]:
     assets = _assets_dir(root, _assets_rel(root / "montaj.yaml"))
     infos = ingest(photos, assets, sheet_path=root / "build" / "ingest-sheet.jpg")
     return [f"OK {len(infos)} photos sheet=build/ingest-sheet.jpg"]
+
+
+def _cmd_inspect(ns: argparse.Namespace, root: Path, as_json: bool) -> list[str]:
+    modes = [ns.at is not None, ns.shot is not None, ns.range is not None, ns.problems]
+    if sum(modes) != 1:
+        return ["ERR inspect: give exactly one of --at T, --shot N, --range A B, --problems"]
+    if ns.every is not None and ns.range is None:
+        return ["ERR inspect: --every goes with --range"]
+    payload = inspector.inspect(
+        root, at=None if ns.at is None else _seconds(ns.at), shot=ns.shot,
+        rng=ns.range, every=ns.every, fast=ns.fast, problems=ns.problems,
+    )
+    if as_json:
+        # The payload is the product here; one frame prints bare, like the issue's example.
+        frames = payload.get("frames")
+        shown = frames[0] if frames is not None and ns.range is None else (frames if frames is not None else payload)
+        return [json.dumps(shown, ensure_ascii=False)]
+    return inspector.lines(payload)
 
 
 def _cmd_validate(root: Path) -> list[str]:
@@ -862,7 +888,13 @@ def main(argv: list[str] | None = None) -> int:
             lines, digest = review_summary(root)
             print(json.dumps({"status": _status(lines), "lines": lines, "review": digest}, ensure_ascii=False))
             return 0 if _status(lines) != "ERR" else 1
-        lines = _dispatch(ns, root)
+        if ns.cmd == "inspect":
+            lines = _cmd_inspect(ns, root, as_json)
+            if as_json and not lines[0].startswith("ERR"):
+                print(lines[0])
+                return 0
+        else:
+            lines = _dispatch(ns, root)
     except SpecError as exc:
         lines = [f"ERR {err}" for err in exc.errors]
     except (yaml.YAMLError, RuntimeError, OSError, ValueError) as exc:
