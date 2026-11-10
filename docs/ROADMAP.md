@@ -167,7 +167,7 @@ Review (once, at the end):
   (#20, #28, #34, #37, #43), `opus-high` for the rest. Diffs inlined.
 - One fix round for all findings, then the fresh-agent benchmark as the product test.
 - Escalation: a worker whose result fails the driver's checks goes up one step (sonnet-medium → opus-medium →
-  opus-high → fable-high); never a third patch by the same route.
+  opus-high); a big blocker goes to `fable-medium`. Never a third patch by the same route.
 
 ## Targets
 | Metric | Today | Target after M11 |

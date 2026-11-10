@@ -56,7 +56,7 @@
 - One engine: Python + torch GPU compositor; film2.py / film.html are parity oracles.
 - Segment-hash cache: renderer reads only FramePlan + shots + assets, so one edit re-renders its segments.
 - Issue work (from 2026-11-10): Claude models only, routed per `docs/ROADMAP.md`; one worktree
-  `~/Anuraj-dev/montaj-wt/i<N>` per issue, workers self-verify, `--no-ff` local merge, one review at the end.
+  `~/Projects/active/montaj-wt/i<N>` per issue, workers self-verify, `--no-ff` local merge, one review at the end.
 
 ## Gotchas
 - Leave alone: the `launch-film` and `export-wa-audio` worktrees (uncommitted work). Workers never `git stash`.
