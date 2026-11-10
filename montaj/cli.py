@@ -26,12 +26,15 @@ from montaj.capture import run as run_capture
 from montaj.doctor import doctor
 from montaj.encode import MediaInfo, export, probe
 from montaj.ingest import IngestError, ingest, ingest_rec
-from montaj import taste
+from montaj import inspector, taste
 from montaj.guards import content_guards
 from montaj.qa import BLACK_PIX_TH, FREEZE_MIN_S, Expect, check, clip_overruns, subtract, union
 from montaj.review.server import serve as serve_review
 from montaj.review.summary import summary as review_summary
-from montaj.sheet import MAX_TILES, every_times, pick_times, sheet, sheets
+from montaj.sheet import (
+    BASE_DIR, MAX_TILES, every_times, motion_sheet, pick_times, sheet, sheets, step_frames, strip_row,
+    transition_rows,
+)
 from montaj.spec import INCOMING_TRANS, SpecError, _dur_frames, load_spec
 from montaj.timeline import Blank, Card, Sequence, Still, Wall, resolve, sequence_index, wall_static_spans
 from montaj.watch import watch
@@ -47,7 +50,7 @@ class _Usage(Exception):
 
 _COMMANDS = (
     "doctor", "new", "ingest", "ingest-rec", "validate", "render", "sheet", "check", "export", "music",
-    "review", "watch", "taste", "capture",
+    "review", "watch", "taste", "capture", "inspect",
 )
 
 
@@ -87,6 +90,11 @@ def _parser() -> argparse.ArgumentParser:
     when = sh.add_mutually_exclusive_group()
     when.add_argument("--at", default=None)
     when.add_argument("--every", default=None)
+    when.add_argument("--strip", default=None)
+    when.add_argument("--transitions", action="store_true")
+    sh.add_argument("--diff", action="store_true")
+    sh.add_argument("--frames", type=int, default=8)
+    sh.add_argument("--step", default="1f")
     sh.add_argument("--video", default=None)
 
     ck = sub.add_parser("check")
@@ -131,6 +139,14 @@ def _parser() -> argparse.ArgumentParser:
 
     cap = sub.add_parser("capture")
     cap.add_argument("script")
+
+    ins = sub.add_parser("inspect")
+    ins.add_argument("--at", default=None)
+    ins.add_argument("--shot", type=int, default=None)
+    ins.add_argument("--range", nargs=2, metavar=("FROM", "TO"), default=None)
+    ins.add_argument("--every", default=None)
+    ins.add_argument("--fast", action="store_true")
+    ins.add_argument("--problems", action="store_true")
     return p
 
 
@@ -307,6 +323,24 @@ def _cmd_ingest(ns: argparse.Namespace, root: Path) -> list[str]:
     return [f"OK {len(infos)} photos sheet=build/ingest-sheet.jpg"]
 
 
+def _cmd_inspect(ns: argparse.Namespace, root: Path, as_json: bool) -> list[str]:
+    modes = [ns.at is not None, ns.shot is not None, ns.range is not None, ns.problems]
+    if sum(modes) != 1:
+        return ["ERR inspect: give exactly one of --at T, --shot N, --range A B, --problems"]
+    if ns.every is not None and ns.range is None:
+        return ["ERR inspect: --every goes with --range"]
+    payload = inspector.inspect(
+        root, at=None if ns.at is None else _seconds(ns.at), shot=ns.shot,
+        rng=ns.range, every=ns.every, fast=ns.fast, problems=ns.problems,
+    )
+    if as_json:
+        # The payload is the product here; one frame prints bare, like the issue's example.
+        frames = payload.get("frames")
+        shown = frames[0] if frames is not None and ns.range is None else (frames if frames is not None else payload)
+        return [json.dumps(shown, ensure_ascii=False)]
+    return inspector.lines(payload)
+
+
 def _cmd_validate(root: Path) -> list[str]:
     spec = load_spec(root / "montaj.yaml")
     tl = resolve(spec, root)
@@ -352,10 +386,41 @@ def _shown_frames(times: list[float], info: MediaInfo) -> int:
     return len({min(max(0, int(round(t * info.fps))), n_frames - 1) for t in times})
 
 
+def _cmd_motion_sheet(ns: argparse.Namespace, root: Path, video: Path, info: MediaInfo, log: Path) -> list[str]:
+    """`sheet --strip / --transitions / --diff`: one image of consecutive frames or transition rows."""
+    if ns.at or ns.every:
+        raise ValueError("sheet --diff: combine it with --strip or --transitions, not --at/--every")
+    spec_file = root / "montaj.yaml"
+    tl = resolve(load_spec(spec_file), root) if spec_file.is_file() else None
+    n_frames = int(round(info.duration * info.fps)) or 1
+    note = ""
+    if ns.strip is not None:
+        center = int(round(_seconds(str(ns.strip), flag="--strip") * info.fps))
+        rows = strip_row(tl, min(max(0, center), n_frames - 1), ns.frames, step_frames(ns.step, info.fps), n_frames, info.fps)
+        name = "sheet-strip.jpg"
+    else:
+        if tl is None:
+            raise FileNotFoundError("sheet --transitions: no montaj.yaml in the project")
+        rows, total = transition_rows(tl, info.fps)
+        if not rows:
+            raise ValueError("sheet --transitions: the spec has no transitions")
+        note = f" of {total}" if total > len(rows) else ""
+        name = "sheet-transitions.jpg"
+    if ns.diff:
+        name = "sheet-diff.jpg"
+    out = root / "build" / name
+    motion_sheet(video, out, rows, base_dir=root / "build" / BASE_DIR, diff=ns.diff, log=log)
+    shown = sum(len(r.tiles) for r in rows)
+    n_rows = sum(1 for r in rows if r.label)
+    return [f"OK build/{name} {n_rows} rows{note} {shown} frames"]
+
+
 def _cmd_sheet(ns: argparse.Namespace, root: Path) -> list[str]:
     video = _video(root, ns.video)
     log = root / "build" / "sheet.log"
     info = probe(video, log=log)
+    if ns.strip is not None or ns.transitions or ns.diff:
+        return _cmd_motion_sheet(ns, root, video, info, log)
     out = root / "build" / "sheet.jpg"
     if ns.every is not None:
         interval = _seconds(str(ns.every), flag="--every")
@@ -862,7 +927,13 @@ def main(argv: list[str] | None = None) -> int:
             lines, digest = review_summary(root)
             print(json.dumps({"status": _status(lines), "lines": lines, "review": digest}, ensure_ascii=False))
             return 0 if _status(lines) != "ERR" else 1
-        lines = _dispatch(ns, root)
+        if ns.cmd == "inspect":
+            lines = _cmd_inspect(ns, root, as_json)
+            if as_json and not lines[0].startswith("ERR"):
+                print(lines[0])
+                return 0
+        else:
+            lines = _dispatch(ns, root)
     except SpecError as exc:
         lines = [f"ERR {err}" for err in exc.errors]
     except (yaml.YAMLError, RuntimeError, OSError, ValueError) as exc:

@@ -202,6 +202,24 @@ def test_cell_disk_cache_round_trip(tmp_path: Path, monkeypatch: pytest.MonkeyPa
     assert G.glyph_cell(G.FontBook(), tmp_path, ref, space.gid) is None
 
 
+def test_inspect_extent_of_a_gpu_line_is_its_revealed_glyph_ink() -> None:
+    # `montaj inspect` reads `line_extent` over the renderer's rasters; a gpu line arrives as a GlyphLine.
+    from montaj.render.text import TextBlock, TextLine, line_extent
+    from montaj.render.type import GlyphLine, TextStyle
+
+    run = G.layout_line(G.FontBook(), "Hello world", style="sans", y=900)
+    line = TextLine("Hello world", "sans", 900, 0.0)
+    block = TextBlock(0.0, 90.0, 0.0, 0.0, 0.0, (line,))
+    gl = GlyphLine(run, TextStyle(), atlas=None)  # extent never touches cells
+    inks = [g.ink for g in run.glyphs if g.ink[2] > g.ink[0]]
+    alpha, box = line_extent(block, line, gl, 60.0, 30.0, 1.0, {})
+    assert alpha == 1.0
+    assert box == (min(i[0] for i in inks), min(i[1] for i in inks), max(i[2] for i in inks), max(i[3] for i in inks))
+    _, early = line_extent(block, line, gl, 1.0, 30.0, 1.0, {})  # only "Hello " has started
+    assert early[0] == box[0] and early[2] < run.box[0] + run.box[2] / 2
+    assert line_extent(block, line, gl, 91.0, 30.0, 1.0, {}) is None
+
+
 # --- GPU ----------------------------------------------------------------------------------------
 
 

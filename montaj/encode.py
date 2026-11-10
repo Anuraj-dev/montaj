@@ -1,4 +1,4 @@
-"""ffmpeg/ffprobe seam: raw RGB frames in, finished MP4s out.
+"""ffmpeg/ffprobe seam: RGB frames in (converted to NV12 here), finished MP4s out.
 
 Every function that shells out to ffmpeg tees stderr into a log file
 (`<log argument>` or `build/<name>.log`) and returns parsed data, never prints.
@@ -15,6 +15,8 @@ from functools import cache
 from pathlib import Path
 
 import numpy as np
+import torch
+import torch.nn.functional as F
 
 FFMPEG = os.environ.get("MONTAJ_FFMPEG", "ffmpeg")
 FFPROBE = os.environ.get("MONTAJ_FFPROBE", "ffprobe")
@@ -232,8 +234,41 @@ def frame_count(path: Path | str, *, log: Path | str | None = None) -> int:
     raise EncodeError(f"frame_count: no frame count for {path}", out)
 
 
+def rgb_to_nv12(frame: torch.Tensor | np.ndarray) -> torch.Tensor:
+    """R'G'B' frame -> NV12 bytes (bt709 matrix, limited range), on the frame's own device.
+
+    Takes the renderer's (3, H, W) float in 0..1 or an (H, W, 3) uint8 image. Returns a flat uint8
+    tensor: the H×W luma plane, then ceil(H/2)×ceil(W/2) interleaved CbCr pairs. Chroma is the 2×2
+    box mean (centre-sited); an odd edge is replicated so the buffer is the size ffmpeg expects and
+    odd sizes fail (or not) in the encoder exactly as they did with rgb24.
+    """
+    t = torch.as_tensor(frame)
+    if t.dtype == torch.uint8:
+        t = t.permute(2, 0, 1).float() / 255.0
+    rgb = t.float().clamp(0.0, 1.0)
+    _, H, W = rgb.shape
+    luma = 16.0 + 219.0 * (0.2126 * rgb[0] + 0.7152 * rgb[1] + 0.0722 * rgb[2])
+    # Cb/Cr are linear in R'G'B', so subsampling RGB first equals subsampling Cb/Cr, at a quarter
+    # of the arithmetic.
+    sub = rgb.unsqueeze(0)
+    if H % 2 or W % 2:
+        sub = F.pad(sub, (0, W % 2, 0, H % 2), mode="replicate")
+    sub = F.avg_pool2d(sub, 2).squeeze(0)
+    ys = 0.2126 * sub[0] + 0.7152 * sub[1] + 0.0722 * sub[2]
+    cb = 128.0 + 224.0 / 1.8556 * (sub[2] - ys)
+    cr = 128.0 + 224.0 / 1.5748 * (sub[0] - ys)
+    chroma = torch.stack((cb, cr), dim=-1)
+    # Every value is inside 16..240 by construction; +0.5 then truncation rounds to nearest.
+    return torch.cat((luma.reshape(-1), chroma.reshape(-1))).add_(0.5).to(torch.uint8)
+
+
 class Encoder:
-    """Context manager streaming uint8 HWC frames into ffmpeg stdin as rawvideo rgb24."""
+    """Context manager streaming frames into ffmpeg stdin as rawvideo NV12.
+
+    `write` takes the renderer's (3, H, W) float tensor, converted where it lives (on the GPU only
+    the 1.5 bytes/px NV12 buffer crosses to the host), or an (H, W, 3) uint8 image. ffmpeg hands
+    NV12 straight to the encoder; swscale converts nothing.
+    """
 
     def __init__(
         self,
@@ -255,10 +290,13 @@ class Encoder:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         cmd = [
             FFMPEG, "-y", "-hide_banner", "-loglevel", "error",
-            "-f", "rawvideo", "-pix_fmt", "rgb24", "-s", f"{self.W}x{self.H}",
+            # Tag the input as what rgb_to_nv12 produced. Untagged, ffmpeg's colorspace negotiation
+            # treats it as unspecified and swscale re-converts it to the bt709 output.
+            "-f", "rawvideo", "-pix_fmt", "nv12", "-s", f"{self.W}x{self.H}",
+            "-color_range", "tv", *BT709_ARGS,
             "-r", f"{self.fps:g}", "-i", "-",
             *vcodec_args(self.codec, cq=cq, crf=crf, preset=preset),
-            "-pix_fmt", "yuv420p", *BT709_ARGS, *BT709_BSF,
+            "-pix_fmt", "nv12", *BT709_ARGS, *BT709_BSF,
         ]
         if self.path.suffix.lower() in _MOV_EXTS:
             cmd += ["-movflags", "+faststart"]
@@ -273,16 +311,21 @@ class Encoder:
         if self._proc.poll() is not None:
             self._finish()
 
-    def write(self, frame: np.ndarray) -> None:
-        """Append one frame; shape must be (H, W, 3) uint8."""
+    def write(self, frame: torch.Tensor | np.ndarray) -> None:
+        """Append one frame: float (3, H, W) in 0..1 on any device, or uint8 (H, W, 3)."""
         if self._closed:
             raise EncodeError("Encoder.write after close")
-        arr = np.asarray(frame)
-        if arr.dtype != np.uint8 or arr.shape != (self.H, self.W, 3):
-            raise EncodeError(f"frame must be uint8 ({self.H}, {self.W}, 3), got {arr.dtype} {arr.shape}")
+        t = torch.as_tensor(frame)
+        want = (self.H, self.W, 3) if t.dtype == torch.uint8 else (3, self.H, self.W)
+        if tuple(t.shape) != want or not (t.dtype == torch.uint8 or t.is_floating_point()):
+            raise EncodeError(
+                f"frame must be uint8 ({self.H}, {self.W}, 3) or float (3, {self.H}, {self.W}), "
+                f"got {t.dtype} {tuple(t.shape)}"
+            )
+        data = rgb_to_nv12(t).cpu().numpy()
         assert self._proc.stdin is not None
         try:
-            self._proc.stdin.write(np.ascontiguousarray(arr).tobytes())
+            self._proc.stdin.write(memoryview(data))
         except BrokenPipeError:
             self._finish()
             raise EncodeError("encode: ffmpeg closed stdin early", self._tail()) from None

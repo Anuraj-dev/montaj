@@ -52,6 +52,7 @@ from montaj.render.text import (
     raster_lines,
     raster_subs,
 )
+from montaj.render.describe import TextLayout
 from montaj.render.overlay import draw_overlays
 from montaj.render.type import GlyphAtlas, GlyphLine, css_style
 from montaj.render.transitions import burn_white, dip, fade, glitch, push, swirl, wall_pullback, whip, zoom
@@ -240,6 +241,7 @@ class Renderer:
         self._subs: tuple = ()
         self._rasters: RasterSet | None = None
         self._card_rasters: dict[int, tuple[RasterLine, ...]] = {}
+        self._card_lines: dict[int, tuple[TextLine, ...]] = {}
         self._captions: _LRU = _LRU(caps["captions"])
         self._shot: int | None = None
         self._lut = None
@@ -710,6 +712,7 @@ class Renderer:
                 continue
             built = self._card_render_lines(card, float(shot.start), float(shot.end))
             card_index[shot.index] = (len(card_lines), len(card_lines) + len(built))
+            self._card_lines[shot.index] = built
             card_lines.extend(built)
         if not self.tl.texts and not self.tl.subs and not captions and not card_lines:
             self._rasters_ready = True
@@ -754,6 +757,14 @@ class Renderer:
         for caption in captions:
             self._sprite(caption)
         self._rasters_ready = True
+
+    def text_layout(self) -> TextLayout:
+        """The text this film shows, laid out (Chromium rasters, no frame rendered). Feeds `describe`."""
+        self._ensure_rasters()
+        return TextLayout(
+            self._blocks, self._subs, self._rasters or RasterSet(), self._card_lines, self._card_rasters,
+            float(self.cv.k), self.cv.H,
+        )
 
     def _overlay(self, f: int, above: list):
         """Hook run inside `finish`: `above_finish` shapes, then text, so text always sits on top."""

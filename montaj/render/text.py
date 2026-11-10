@@ -1218,15 +1218,66 @@ def _paint_glyphs(dst: torch.Tensor, cv, block: TextBlock, line: TextLine, raste
     _stamp(dst, crop.to(dtype=dst.dtype), x0, y0)
 
 
+def _pop(line: TextLine, block: TextBlock, t: float) -> float:
+    # film.html:289-291, per line. Spec span is the block window, not one counter step.
+    span = block.end - block.start
+    return 1.0 if span <= 0 else outc((t - line.at) * 5.0 / span)
+
+
+def _ink(unit: Unit, k: float, memo: dict) -> tuple[float, float, float, float] | None:
+    """Design-px rect of the unit's inked pixels (alpha > 4%), from its own raster. `memo` caches per unit."""
+    key = id(unit)
+    if key not in memo:
+        rect = None
+        if unit.fill.numel():
+            mask = unit.fill[3] > 0.04
+            rows, cols = torch.nonzero(mask.any(dim=1)).flatten(), torch.nonzero(mask.any(dim=0)).flatten()
+            if rows.numel() and cols.numel():
+                x, y = unit.box[0], unit.box[1]
+                rect = (x + int(cols[0]) / k, y + int(rows[0]) / k, x + (int(cols[-1]) + 1) / k, y + (int(rows[-1]) + 1) / k)
+        memo[key] = rect
+    return memo[key]
+
+
+def line_extent(block: TextBlock, line: TextLine, raster: RasterLine | GlyphLine, t: float, fps: float, k: float,
+                memo: dict) -> tuple[float, tuple[float, float, float, float]] | None:
+    """`(alpha, (x0, y0, x1, y1))` in design px for what `draw_text` shows of this line at `t`.
+
+    The box is the union of the revealed units' inked pixels (plus the chip), at their settled
+    position: the rise offset of a half-revealed word is a transient and is left out. Shadows are
+    excluded. None when the block or every unit is invisible. Uses the painter's own
+    `_vis`/`_unit_ks`/`_pop`; `k` is device px per design px and `memo` a per-layout cache.
+    """
+    alpha = _vis(t, block, fps)
+    if alpha <= 0.0:
+        return None
+    glyph = isinstance(raster, GlyphLine)
+    n = raster.run.units if glyph else len(raster.units)
+    if line.reveal == "pop":
+        ks = [1.0 if _pop(line, block, t) > 1e-4 else 0.0] * n
+    else:
+        ks = _unit_ks(line, n, t, fps)
+    if glyph:  # gpu engine: the shaped outlines' boxes, already design px
+        rects = [g.ink for g in raster.run.glyphs
+                 if g.ink[2] > g.ink[0] and (ks[g.unit] if g.unit < n else 1.0) > 1e-4]
+    else:
+        rects = [r for u, uk in zip(raster.units, ks) if uk > 1e-4 and (r := _ink(u, k, memo)) is not None]
+    if not glyph and raster.chip is not None and ks and ks[0] > 1e-4 and raster.chip_box is not None:
+        c = raster.chip_box
+        rects.append((c[0], c[1], c[0] + c[2], c[1] + c[3]))
+    if not rects:
+        return None
+    return alpha, (min(r[0] for r in rects), min(r[1] for r in rects),
+                   max(r[2] for r in rects), max(r[3] for r in rects))
+
+
 def _paint_line(dst: torch.Tensor, cv, block: TextBlock, line: TextLine, raster: RasterLine | GlyphLine,
                 t: float, fps: float) -> None:
     glyph = isinstance(raster, GlyphLine)
     paint = _paint_glyphs if glyph else _paint
     n = raster.run.units if glyph else len(raster.units)
     if line.reveal == "pop":
-        # film.html:289-291, per line. Spec span is the block window, not one counter step.
-        span = block.end - block.start
-        pop = 1.0 if span <= 0 else outc((t - line.at) * 5.0 / span)
+        pop = _pop(line, block, t)
         if pop <= 1e-4:
             return
         if abs(pop - 1.0) < 1e-4:

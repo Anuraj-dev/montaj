@@ -94,10 +94,6 @@ def _log(path: Path, message: str) -> None:
         fh.write(message.rstrip() + "\n")
 
 
-def _u8(frame: torch.Tensor):
-    return (frame * 255.0 + 0.5).byte().permute(1, 2, 0).contiguous().cpu().numpy()
-
-
 def _shots_in(scene) -> set[int]:
     if isinstance(scene, (Still, Wall, Clip, Sequence, Card)):
         return {scene.shot}
@@ -125,7 +121,7 @@ def _encode_segment(renderer: Renderer, seg: Segment, dest: Path, fps: float, lo
     try:
         with Encoder(tmp, renderer.cv.W, renderer.cv.H, fps, log=log) as enc:
             for f in range(seg.start, seg.end):
-                enc.write(_u8(renderer.frame(f)))
+                enc.write(renderer.frame(f))
         os.replace(tmp, dest)
     except Exception:
         tmp.unlink(missing_ok=True)
