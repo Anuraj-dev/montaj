@@ -147,7 +147,44 @@ def _run(root, at, shot, rng, every, fast, problems) -> dict:
     return {"frames": [ins.at(f) for f in ins.frames(at=at, shot=shot, rng=rng, every=every)]}
 
 
+TRACK_SAMPLES = 12
+
+
+def track(root: Path, ref: str) -> dict:
+    """The sampled curve of one keyed layer property. `ref` is `SHOT.LAYER.PROP` (shot and layer as in
+    `--shot`: zero-based; LAYER may be a layer `id`). Frames are shot-local; no render, no GPU."""
+    from montaj.render.layers import sample
+    from montaj.spec import LAYER_KEYED
+
+    try:
+        shot_s, layer_s, prop = ref.split(".")
+        n = int(shot_s)
+    except ValueError:
+        raise ValueError("--track wants SHOT.LAYER.PROP, e.g. 1.0.scale") from None
+    tl = resolve(load_spec(root / "montaj.yaml"), root)
+    if not 0 <= n < len(tl.shots):
+        raise ValueError(f"no shot {n} (0..{len(tl.shots) - 1})")
+    layers = tl.shots[n].spec.layers or []
+    idx = next((i for i, l in enumerate(layers) if l.id == layer_s), int(layer_s) if layer_s.isdigit() else -1)
+    if not 0 <= idx < len(layers):
+        raise ValueError(f"shot {n} has no layer {layer_s}")
+    if prop not in LAYER_KEYED:
+        raise ValueError(f"{prop} is not keyable (one of {', '.join(LAYER_KEYED)})")
+    keys = getattr(layers[idx], prop)
+    if not isinstance(keys, list):
+        raise ValueError(f"{ref} is not keyed")
+    first, last = keys[0].t, keys[-1].t
+    count = min(TRACK_SAMPLES, max(2, last - first + 1))
+    frames = sorted({round(first + (last - first) * i / (count - 1)) for i in range(count)})
+    values = [sample(keys, f, None) for f in frames]
+    return {"track": ref, "keys": [k.t for k in keys], "frames": frames,
+            "values": [[round(x, 4) for x in v] if isinstance(v, tuple) else round(v, 4) for v in values]}
+
+
 def lines(payload: dict) -> list[str]:
+    if "track" in payload:
+        pts = " ".join(f"{f}f={v}" for f, v in zip(payload["frames"], payload["values"]))
+        return [f"OK track {payload['track']} keys={payload['keys']} {pts}"]
     """Compact text: one line per frame header and per text element, then the result line."""
     out: list[str] = []
     if "problems" in payload:

@@ -94,6 +94,25 @@ def base_pos(layer) -> tuple[float, float] | None:
     return float(p[0]), float(p[1])
 
 
+def base_box(layer) -> tuple[float, float, float, float] | None:
+    """A box layer's rect (design px): its value, or its first key's. `src` and `fit` resolve against it."""
+    box = layer.box
+    if box is None:
+        return None
+    b = box[0].v if isinstance(box, list) else box
+    return float(b[0]), float(b[1]), float(b[2]), float(b[3])
+
+
+def box_growth(layer) -> float:
+    """How much larger than its first-key box a keyed `box` ever gets (>= 1), for decode sizing."""
+    if not isinstance(layer.box, list):
+        return 1.0
+    b = base_box(layer)
+    w, h = max(1e-6, b[2] - b[0]), max(1e-6, b[3] - b[1])
+    return max(1.0, *((float(k.v[2]) - float(k.v[0])) / w for k in layer.box),
+               *((float(k.v[3]) - float(k.v[1])) / h for k in layer.box))
+
+
 def peak_scale(layer) -> float:
     """The largest scale the layer reaches from its keys (a plain scale is itself), for decode sizing."""
     sc = layer.scale
@@ -102,18 +121,12 @@ def peak_scale(layer) -> float:
     return max(float(k.v) for k in sc) if isinstance(sc, list) else float(sc)
 
 
-def layer_state(layer, t_local: float, hold: int) -> LayerState | None:
-    """Values at `t_local` frames after the shot start, or None while the layer is off.
+def _state(layer, t_local: float, hold: int, start: int | None) -> LayerState:
+    """The layer's own transform at `t_local`, ignoring its `from`/`to` window and whether it is visible.
 
-    `from`/`to` and the anim durations are whole frames (materialised by `resolve`). An unset `from`
-    shows the layer from before the shot (transition and motion-blur samples); an unset `to` keeps it
-    through the outgoing transition. `out` ends at `to`, or at the end of the hold.
+    `anchor` is the pivot's offset from the layer centre (design px): scaling and turning about it equals
+    turning about the centre, then shifting the centre by `a − s·R·a`.
     """
-    start = layer.from_
-    if start is not None and t_local < start:
-        return None
-    if layer.to is not None and t_local >= layer.to:
-        return None
     state = LayerState(
         float(sample(layer.scale, t_local, 1.0)),
         float(sample(layer.rotate, t_local, 0.0)),
@@ -128,7 +141,73 @@ def layer_state(layer, t_local: float, hold: int) -> LayerState | None:
     if layer.out is not None:
         end = layer.to if layer.to is not None else hold
         state = _anim(state, layer.out.type, (end - t_local) / float(layer.out.dur))
+    if layer.anchor is not None:
+        ax, ay = layer.anchor
+        th = math.radians(state.rotate)
+        c, sn = math.cos(th), math.sin(th)
+        state = replace(state, dx=state.dx + ax - state.scale * (c * ax - sn * ay),
+                        dy=state.dy + ay - state.scale * (sn * ax + c * ay))
+    return state
+
+
+def _in_window(layer, t_local: float) -> bool:
+    if layer.from_ is not None and t_local < layer.from_:
+        return False
+    return layer.to is None or t_local < layer.to
+
+
+def layer_state(layer, t_local: float, hold: int) -> LayerState | None:
+    """Values at `t_local` frames after the shot start, or None while the layer is off.
+
+    `from`/`to` and the anim durations are whole frames (materialised by `resolve`). An unset `from`
+    shows the layer from before the shot (transition and motion-blur samples); an unset `to` keeps it
+    through the outgoing transition. `out` ends at `to`, or at the end of the hold.
+    """
+    if not _in_window(layer, t_local):
+        return None
+    state = _state(layer, t_local, hold, layer.from_)
     return state if state.opacity > 0 else None
+
+
+def _world(layers, i: int, t_local: float, hold: int, centre, depth: int = 0) -> LayerState:
+    layer = layers[i]
+    state = _state(layer, t_local, hold, layer.from_)
+    parent = None if layer.parent is None else next(
+        (j for j, other in enumerate(layers) if other.id == layer.parent), None)
+    if parent is None or depth > len(layers):  # validate rejects cycles; the depth bound is only a backstop
+        return state
+    ps = _world(layers, parent, t_local, hold, centre, depth + 1)
+    (cx, cy), (px, py) = centre(i), centre(parent)
+    th = math.radians(ps.rotate)
+    rx, ry = cx + state.dx - px, cy + state.dy - py
+    wx = px + ps.dx + ps.scale * (math.cos(th) * rx - math.sin(th) * ry)
+    wy = py + ps.dy + ps.scale * (math.sin(th) * rx + math.cos(th) * ry)
+    return LayerState(state.scale * ps.scale, state.rotate + ps.rotate, state.opacity * ps.opacity, wx - cx, wy - cy)
+
+
+def world_state(layers, i: int, t_local: float, hold: int, centre) -> LayerState | None:
+    """`layer_state` with the parent's transform inherited (#35). `centre(j)` is layer j's rest centre in
+    design px at this instant. A parent that is off still moves its children; its opacity still multiplies in."""
+    layer = layers[i]
+    if layer.parent is None:
+        return layer_state(layer, t_local, hold)
+    if not _in_window(layer, t_local):
+        return None
+    state = _world(layers, i, t_local, hold, centre)
+    return state if state.opacity > 0 else None
+
+
+def peak_scale_world(layers, i: int) -> float:
+    """`peak_scale` times the parents' (for decode sizing)."""
+    out, layer = 1.0, layers[i]
+    for _ in range(len(layers)):
+        out *= peak_scale(layer)
+        if layer.parent is None:
+            break
+        layer = next((o for o in layers if o.id == layer.parent), None)
+        if layer is None:
+            break
+    return out
 
 
 def _sat(cs: torch.Tensor) -> torch.Tensor:

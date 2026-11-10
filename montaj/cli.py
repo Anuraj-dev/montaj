@@ -183,6 +183,7 @@ def _parser() -> argparse.ArgumentParser:
     ins.add_argument("--every", default=None)
     ins.add_argument("--fast", action="store_true")
     ins.add_argument("--problems", action="store_true")
+    ins.add_argument("--track", default=None, metavar="SHOT.LAYER.PROP")
     return p
 
 
@@ -418,9 +419,15 @@ def _cmd_matte(stems: list[str], root: Path, assets: Path) -> list[str]:
 
 
 def _cmd_inspect(ns: argparse.Namespace, root: Path, as_json: bool) -> list[str]:
+    if ns.track is not None:
+        try:
+            payload = inspector.track(root, ns.track)
+        except ValueError as exc:
+            return [f"ERR inspect: {exc}"]
+        return [json.dumps(payload, ensure_ascii=False)] if as_json else inspector.lines(payload)
     modes = [ns.at is not None, ns.shot is not None, ns.range is not None, ns.problems]
     if sum(modes) != 1:
-        return ["ERR inspect: give exactly one of --at T, --shot N, --range A B, --problems"]
+        return ["ERR inspect: give exactly one of --at T, --shot N, --range A B, --problems, --track S.L.PROP"]
     if ns.every is not None and ns.range is None:
         return ["ERR inspect: --every goes with --range"]
     payload = inspector.inspect(
