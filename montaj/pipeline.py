@@ -119,7 +119,7 @@ def _encode_segment(renderer: Renderer, seg: Segment, dest: Path, fps: float, lo
     """
     tmp = dest.with_name(f".{dest.stem}.{os.getpid()}-{secrets.token_hex(4)}.partial.mp4")
     try:
-        with Encoder(tmp, renderer.cv.W, renderer.cv.H, fps, log=log) as enc:
+        with Encoder(tmp, renderer.cv.W, renderer.cv.H, fps, log=log, device=renderer.cv.device) as enc:
             for f in range(seg.start, seg.end):
                 enc.write(renderer.frame(f))
         os.replace(tmp, dest)

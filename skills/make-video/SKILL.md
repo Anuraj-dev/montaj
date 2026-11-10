@@ -57,8 +57,8 @@ check and review round after that is a `montaj` command that costs no tokens. Ru
      no `video.bpm`, beats follow the analysed song (its tempo and first beat). A word time is a marker:
      `markers: {chorus: "word:12"}`, then `until: chorus`.
    - Order shots as an arc: calm open, build, peak, quiet end.
-   - Text is short and centred; one idea per card. Width budget on a 1080-wide frame: about 24 characters of
-     `script` at `size: 100`; scale `size` down in proportion for longer lines.
+   - Text is short and centred; one idea per card. Set `fit: true` on a long line (or `wrap: balance` for two
+     even lines); `montaj validate` reports any line that still runs off the frame, with the size that fits.
    - Text reads best on a calm backdrop: a dark or plain moment, a dimmed photo or its own card, not a face. On a
      bright frame, `backdrop: true` on the text block paints a dark gradient behind the lines (`place`: `band`,
      `bottom` or `top`). A closing title usually holds to the last frame.

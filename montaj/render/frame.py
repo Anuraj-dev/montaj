@@ -54,7 +54,7 @@ from montaj.render.text import (
 )
 from montaj.render.describe import TextLayout
 from montaj.render.overlay import draw_overlays
-from montaj.render.type import GlyphAtlas, GlyphLine, css_style
+from montaj.render.type import GlyphAtlas, GlyphLine, line_style
 from montaj.render.transitions import burn_white, dip, fade, glitch, push, swirl, wall_pullback, whip, zoom
 from montaj.render.wall import build_wall, wall_camera, wall_frame
 from montaj.spec import _dur_frames
@@ -689,7 +689,7 @@ class Renderer:
             text=ln.text, style=ln.style, y=ln.y, at=ln.at, italic=ln.italic, gold=ln.gold,
             color=ln.color, size=ln.size, weight=weight, tracking=ln.tracking,
             line_height=ln.line_height, by=ln.by, stagger=ln.stagger, dur=ln.dur, rise=ln.rise,
-            reveal=ln.reveal, sweep=ln.sweep, shadow=ln.shadow, indent=ln.indent,
+            reveal=ln.reveal, sweep=ln.sweep, shadow=bool(ln.shadow), indent=ln.indent,
             align=ln.align, box=ln.box, box_color=ln.box_color, dot=ln.dot, cursor=ln.cursor,
         )
 
@@ -730,8 +730,7 @@ class Renderer:
             for j, ln in enumerate(block.lines):
                 if ln.glyphs is not None:
                     atlas = atlas or GlyphAtlas(self._dir / "build" / "glyphs", self.cv.device)
-                    glyph_lines[len(flat) + j] = GlyphLine(
-                        ln.glyphs, css_style(ln.style, ln.color, ln.shadow), atlas)
+                    glyph_lines[len(flat) + j] = GlyphLine(ln.glyphs, line_style(ln), atlas)
             flat.extend(lines)
             blocks.append(
                 TextBlock(
