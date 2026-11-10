@@ -26,8 +26,9 @@ from montaj.capture import run as run_capture
 from montaj.doctor import doctor
 from montaj.encode import MediaInfo, export, probe
 from montaj.analysis import analyze_assets, describe_all
+from montaj.gpu_policy import GpuStrictError, load_policy
 from montaj.ingest import IngestError, ingest, ingest_rec
-from montaj import inspector, taste
+from montaj import inspector, pacing, taste
 from montaj.guards import content_guards
 from montaj.qa import BLACK_PIX_TH, FREEZE_MIN_S, Expect, check, clip_overruns, subtract, union
 from montaj.review.server import serve as serve_review
@@ -36,6 +37,7 @@ from montaj.sheet import (
     BASE_DIR, MAX_TILES, every_times, motion_sheet, pick_times, sheet, sheets, step_frames, strip_row,
     transition_rows,
 )
+from montaj.project import resolve_clip
 from montaj.spec import INCOMING_TRANS, SpecError, _dur_frames, load_spec, text_warnings
 from montaj.timeline import Blank, Card, Sequence, Still, Wall, resolve, sequence_index, wall_static_spans
 from montaj.watch import watch
@@ -51,7 +53,7 @@ class _Usage(Exception):
 
 _COMMANDS = (
     "doctor", "new", "ingest", "ingest-rec", "validate", "render", "sheet", "check", "export", "music",
-    "review", "watch", "taste", "capture", "inspect",
+    "review", "watch", "taste", "capture", "inspect", "captions", "transcribe",
 )
 
 
@@ -127,6 +129,14 @@ def _parser() -> argparse.ArgumentParser:
     comp.add_argument("script")
     comp.add_argument("--out", default="music/song.wav")
     comp.add_argument("--timeout", type=float, default=600.0)
+
+    cp = sub.add_parser("captions")
+    cp.add_argument("--print", dest="print_", action="store_true", required=True)
+    tr = sub.add_parser("transcribe")
+    tr.add_argument("clip")
+    tr.add_argument("--lang", default=analyze_audio.DEFAULT_LANG)
+    tr.add_argument("--prompt", default=None)
+    tr.add_argument("--out", default=None)
 
     rv = sub.add_parser("review")
     rv.add_argument("--port", type=int, default=8765)
@@ -385,7 +395,7 @@ def _cmd_render(ns: argparse.Namespace, root: Path) -> list[str]:
     audio = " audio" if result.audio else ""
     return [
         f"OK {rel} {result.seconds:.2f}s {w}x{h} {mb:.1f}MB "
-        f"rendered {result.rendered}/{n} cached {result.cached}/{n} in {dt:.1f}s{audio}"
+        f"rendered {result.rendered}/{n} cached {result.cached}/{n} in {dt:.1f}s gpu={result.gpu}{audio}"
     ]
 
 
@@ -733,7 +743,7 @@ def _clip_overruns(root: Path) -> list[str]:
     return clip_overruns(tl, _assets_dir(root, tl.spec.assets), spec_dir=root, log=root / "build" / "qa.log")
 
 
-def _cmd_check(ns: argparse.Namespace, root: Path) -> list[str]:
+def _cmd_check(ns: argparse.Namespace, root: Path, numbers: dict | None = None) -> list[str]:
     expects, loud_i, loud_tol = _check_overrides(root)
     black = union([*_intended_black(root), *(item.span for item in expects if item.kind == "black")])
     freeze = union([*_intended_freeze(root), *(item.span for item in expects if item.kind == "frozen")])
@@ -751,6 +761,13 @@ def _cmd_check(ns: argparse.Namespace, root: Path) -> list[str]:
                                 log=root / "build" / "qa.log")
     lines += _audio_mix_lines(root)
     lines.extend(_clip_overruns(root))
+    if spec is not None:
+        tl = resolve(spec, root)
+        nums = pacing.metrics(tl, root, _video(root, ns.video), log=root / "build" / "qa.log")
+        if numbers is not None:
+            numbers.update(nums)
+        lines += pacing.lines(nums, spec.check.pacing if spec.check else None,
+                              fps=tl.fps, bpm=tl.spec.video.bpm)
     errs = sum(line.startswith("ERR") for line in lines)
     warns = sum(line.startswith("WARN") for line in lines)
     if errs:
@@ -840,6 +857,25 @@ def _cmd_music_analyze(ns: argparse.Namespace, root: Path) -> list[str]:
     return [*analysis.lines, result]
 
 
+def _cmd_captions(root: Path) -> list[str]:
+    from montaj.captions import format_chunks, plan
+
+    chunks, fps = plan(root / "montaj.yaml")
+    return [*format_chunks(chunks, fps).splitlines(), f"OK {len(chunks)} chunks"]
+
+
+def _cmd_transcribe(ns: argparse.Namespace, root: Path) -> list[str]:
+    from montaj.captions import transcribe
+
+    clip = _at(root, ns.clip)
+    if not clip.is_file():  # an assets id
+        clip = resolve_clip(root, _assets_dir(root, _assets_rel(root / "montaj.yaml")), ns.clip)
+    out = _at(root, ns.out) if ns.out else _assets_dir(root, _assets_rel(root / "montaj.yaml")) / f"{clip.stem}.words.json"
+    path = transcribe(clip, out, lang=ns.lang, prompt=ns.prompt, log=root / "build" / "transcribe.log")
+    n = len(json.loads(path.read_text(encoding="utf-8"))["words"])
+    return [f"OK {_rel(root, path)} {n} words"]
+
+
 def _cmd_music_compose(ns: argparse.Namespace, root: Path) -> list[str]:
     try:
         result = compose_audio.compose(
@@ -862,7 +898,7 @@ def _cmd_music_compose(ns: argparse.Namespace, root: Path) -> list[str]:
 
 
 def _cmd_capture(ns: argparse.Namespace, root: Path) -> list[str]:
-    result = run_capture(_at(root, ns.script), root, log=root / "build" / "capture.log")
+    result = run_capture(_at(root, ns.script), root, log=root / "build" / "capture.log", policy=load_policy())
     mb = result.path.stat().st_size / (1024 * 1024)
     w, h = result.size
     return [f"OK {_rel(root, result.path)} {result.seconds:.2f}s {w}x{h} {mb:.1f}MB"]
@@ -916,6 +952,10 @@ def _dispatch(ns: argparse.Namespace, root: Path) -> list[str]:
         if ns.music_cmd == "analyze":
             return _cmd_music_analyze(ns, root)
         return _cmd_music_compose(ns, root)
+    if ns.cmd == "captions":
+        return _cmd_captions(root)
+    if ns.cmd == "transcribe":
+        return _cmd_transcribe(ns, root)
     if ns.cmd == "review":
         return review_summary(root)[0]
     if ns.cmd == "taste":
@@ -949,6 +989,11 @@ def main(argv: list[str] | None = None) -> int:
             lines, digest = review_summary(root)
             print(json.dumps({"status": _status(lines), "lines": lines, "review": digest}, ensure_ascii=False))
             return 0 if _status(lines) != "ERR" else 1
+        if as_json and ns.cmd == "check":
+            numbers: dict = {}
+            lines = _cmd_check(ns, root, numbers)
+            print(json.dumps({"status": _status(lines), "lines": lines, "pacing": numbers}, ensure_ascii=False))
+            return 0 if _status(lines) != "ERR" else 1
         if ns.cmd == "inspect":
             lines = _cmd_inspect(ns, root, as_json)
             if as_json and not lines[0].startswith("ERR"):
@@ -958,6 +1003,9 @@ def main(argv: list[str] | None = None) -> int:
             lines = _dispatch(ns, root)
     except SpecError as exc:
         lines = [f"ERR {err}" for err in exc.errors]
+    except GpuStrictError as exc:
+        _note_failure(root, ns.cmd, exc)
+        lines = [f"ERR {_one_line(str(exc))}"]  # `ERR gpu-strict: <what> would run on the CPU: <hint>`
     except (yaml.YAMLError, RuntimeError, OSError, ValueError) as exc:
         _note_failure(root, ns.cmd, exc)
         lines = [f"ERR {ns.cmd}: {_one_line(str(exc))}"]

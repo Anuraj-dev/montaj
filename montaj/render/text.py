@@ -35,7 +35,7 @@ from PIL import Image
 from montaj.doctor import chromium as find_chromium
 from montaj.render.core import outc, sine
 from montaj.render.motion import Motion, Pose, unit_poses
-from montaj.render.type import GlyphLine, GlyphXform, draw_run_crop
+from montaj.render.type import GlyphLine, GlyphXform, draw_bar, draw_run_crop
 
 # Stage sits at (OX, OY) so shadow padding stays inside the viewport and the
 # fidelity crop of that rect has the same subpixel phase as the rasters.
@@ -129,6 +129,7 @@ class TextLine:
     dot: str | None = None
     cursor: bool = False
     motion: Motion | None = None  # gpu lines only: per-unit motion (render/motion.py)
+    bar: object | None = None  # gpu lines only: a spec TextBar hugging one word (#23)
 
     def __post_init__(self) -> None:
         if self.by not in ("word", "char"):
@@ -1338,9 +1339,38 @@ def line_extent(block: TextBlock, line: TextLine, raster: RasterLine | GlyphLine
                    max(r[2] for r in rects), max(r[3] for r in rects))
 
 
+BAR_SLIDE = 3.0  # frames a `bar` takes to move from its `from` word to its `word`
+
+
+def _word_box(run, unit: int) -> tuple[float, float] | None:
+    """Design-px (left, right) of the inked glyphs of reveal unit `unit`."""
+    xs = [(g.ink[0], g.ink[2]) for g in run.glyphs if g.unit == unit and g.ink[2] > g.ink[0]]
+    return (min(a for a, _ in xs), max(b for _, b in xs)) if xs else None
+
+
+def _paint_bar(dst: torch.Tensor, cv, line: TextLine, run, t: float) -> None:
+    """The line's `bar`: a rounded rect hugging its word, sliding in from the `from` word's place."""
+    bar = line.bar
+    span = _word_box(run, bar.word)
+    if span is None:
+        return
+    if bar.from_ is not None:
+        prev = _word_box(run, bar.from_)
+        if prev is not None:
+            p = outc((t - line.at) / BAR_SLIDE)
+            span = (prev[0] + (span[0] - prev[0]) * p, prev[1] + (span[1] - prev[1]) * p)
+    _x, y, _w, h = run.box
+    top, bottom = y + 0.06 * h, y + 0.94 * h
+    crop, x0, y0 = draw_bar(cv, (span[0] - bar.pad, top, span[1] + bar.pad, bottom), bar.color,
+                            radius=0.3 * (bottom - top))
+    _stamp(dst, crop.to(dtype=dst.dtype), x0, y0)
+
+
 def _paint_line(dst: torch.Tensor, cv, block: TextBlock, line: TextLine, raster: RasterLine | GlyphLine,
                 t: float, fps: float) -> None:
     glyph = isinstance(raster, GlyphLine)
+    if glyph and line.bar is not None:
+        _paint_bar(dst, cv, line, raster.run, t)
     if glyph and line.motion is not None:
         _paint_motion(dst, cv, line, raster, t, fps)
         return

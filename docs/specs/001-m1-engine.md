@@ -172,7 +172,7 @@ render(spec_path: Path, mode: "preview" | "final") -> RenderResult(path, n_frame
 | `new DIR --recipe NAME --photos FOLDER` | copies `recipes/NAME.yaml` to `DIR/montaj.yaml`, ingests -> `OK DIR/montaj.yaml sheet=DIR/build/ingest-sheet.jpg` |
 | `ingest --photos FOLDER` | `OK <n> photos sheet=build/ingest-sheet.jpg` |
 | `validate` | `OK montaj.yaml 840f 28.00s 13 shots 13 segments` or one `ERR` line per spec error |
-| `render [--preview\|--final]` (default preview) | `OK out/preview.mp4 28.00s 540x960 4.1MB rendered 2/13 cached 11/13 in 31.2s` |
+| `render [--preview\|--final]` (default preview) | `OK out/preview.mp4 28.00s 540x960 4.1MB rendered 2/13 cached 11/13 in 31.2s gpu=all` |
 | `sheet [--at 1.5,3,9] [--every 0.5s] [--video PATH]` | default `OK build/sheet.jpg 12 frames`. `--every` samples that interval from 0 and pages at 12 frames: `OK build/sheet.jpg build/sheet-2.jpg … N frames`. `--at` still caps at 12. `--at` and `--every` together are an error. Default video: newest of out/final.mp4, out/preview.mp4 |
 | `check [--video PATH]` | the QA lines, then `OK check` / `WARN check: <n> warnings` |
 | `export --target master\|whatsapp` | `OK out/<target>.mp4 <size>MB` |

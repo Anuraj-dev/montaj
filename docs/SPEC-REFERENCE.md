@@ -197,8 +197,18 @@ Photo fields (`crop`, `focus`, swirl `center`, wall `at`) are source-image pixel
 - `text[].lines[].out.to` — `left`, `right`, `top` or `bottom`, default `right` — side a `slide` exit leaves toward.
 - `text[].lines[].out.distance` — design px 0–2000, default `160` — travel of a `slide` exit.
 - `text[].lines[].idle` — `float` or `pulse` (or `{type, amount}`), default none — loop every `1.5s` once a unit lands: `float` bobs `amount` design px (default `4`), `pulse` scales by `amount` percent (default `4`); 0–100.
+- `text[].lines[].bar` — `{word, from?, color?, pad?}`, default none — a rounded bar behind the 0-based word `word` of the line (gpu engine), hugging its ink; `from` (another word) makes it slide from there over 3 frames; `color` default `#ffe600`; `pad` design px, default `14`. Written by `captions` for `preset: highlight`.
 - `validate` — shapes every text line (card lines too) and reports `ERR text[1].lines[0]: 132px wider than the frame at size 100 (fits at size 88; or set fit: true)` when the line box leaves the 1080-wide frame. Lines with a character the bundled fonts lack are not measured.
 - `text[].lower_third` — `{title, subtitle?, at?, side?, y?}`, replaces `lines` — sugar for a bold sans title chip with a gold dot and a sans subtitle 110 design px below. `at` default the block `from`, `side` `left` or `right` default `left`, `y` default `1500` (design px, title top). `fade_in`/`fade_out` default `0.4s`. No bar or slide yet.
+- `captions` — mapping, default none — word timings expanded at load into gpu `text` blocks after your own (the renderer and the cache see only those); `montaj captions --print` lists `chunk start end text`. Rules and presets: `docs/CAPTIONS.md`.
+- `captions.source` — string, required — `audio.markers`, a words JSON beside the spec (`{words: [{i, w, s, e}]}`), or a clip id whose `assets/<id>.words.json` `montaj transcribe <id>` wrote.
+- `captions.preset` — `punch`, `karaoke`, `highlight`, `clean`, `comic` or `minimal`, default `punch` — the look; each sets font, stroke, shadow, entry and the accent treatment.
+- `captions.words_per_chunk` — `[min, max]` within 1 to 6, default `[1, 3]` — a chunk breaks at `max` words, at a pause of 0.3 s, at `. ! ? …`, at a comma once it holds `min`, or when its width passes the frame budget.
+- `captions.accent` — `#rrggbb`, default `#ffe600` — colour of the accented word (the `highlight` bar, the `minimal` serif word).
+- `captions.emphasis` — `auto`, `none` or a list of word indexes, default `auto` — which word per chunk takes the accent; `auto` picks a number, a negation, or a long content word, never in two chunks running.
+- `captions.y` — number, default 64.6 % of the frame height on portrait, 80 % otherwise — design-px centre of the caption.
+- `captions.offset` — duration, default none — shifts every word time (a trimmed clip).
+- `captions.overrides` — list, default none — per-word fixes: `{word, text?, emphasis?}` rewrites a word or forces/clears its accent; `{chunk_break_before}` starts a chunk at that word. An index not in the source is an error. Trailing `.` and `,` are dropped from every word; `?` `!` stay.
 - `subs` — list, default none — lyric subtitles, one fixed style.
 - `subs[].from` — time expression, required — subtitle window start.
 - `subs[].to` — time expression, required — subtitle window end.
@@ -239,6 +249,10 @@ Photo fields (`crop`, `focus`, swirl `center`, wall `at`) are source-image pixel
 - `check.loudness` — mapping, default none — replaces the `-14` LUFS target used by `check`.
 - `check.loudness.i` — number, required with loudness — integrated-loudness target, in LUFS.
 - `check.loudness.tol` — number, default `1` — how far the measurement may sit from `i`, in LU.
+- `check.pacing` — mapping, default none — pacing targets. `check` always prints `INFO pacing|hook|beats|captions|audio|variety` numbers (also under `--json` as `pacing`); a `WARN` appears only for a target set here and missed. Like all of `check`, it stays out of the segment hash.
+- `check.pacing.max_shot` — duration, default none — longest allowed shot. Misses print `WARN pacing longest=<t>@shot<i>`.
+- `check.pacing.min_per10s` — number ≥ 0, default none — fewest shot changes per 10 s (`cuts` is shots − 1). Misses print `WARN pacing per10s=<n>`.
+- `check.pacing.hook_text_by` — duration, default none — latest time the first on-screen text (text lines or subs) may appear. A film with no text also warns.
 
 Transitions (`shots[].in`):
 
@@ -305,3 +319,11 @@ Content guards (under `check`, read by `montaj check` only; they never change th
 
 ## Event logs (screen recordings)
 `montaj ingest-rec raw/take.mp4 --events raw/take.events.json` copies the recording to `assets/` and writes `assets/<stem>.events.json`. Input and output are a JSON list `[{"t": 3.42, "kind": "state", ...fields}]`; `t` is finite seconds. Input `t` is seconds from record start; ingest subtracts the container `start_time` (earliest stream), so in `assets/` `t` is seconds on the clock `clip_in` seeks. Re-ingesting different video bytes under the same stem without `--events` deletes the old `<stem>.events.json`. Rows stay in log order. Field values are exact-matched (numbers numerically; a missing field never equals `null`); in `event:` markers `true`/`false`/`null` are JSON literals and `"true"` quoted is the string; `contains:` / `~=` match substrings of string fields.
+
+## Strict dGPU mode (machine config, not the spec)
+`~/.config/montaj/config.toml`:
+- `[gpu] strict = true` — any CPU pixel path stops the command with `ERR gpu-strict: <what> would run on the CPU: <hint>` instead of falling back. Default false. `MONTAJ_GPU_STRICT=1|0` overrides it for one run.
+- `[gpu] device = "cuda:0"` — the CUDA device every stage uses; also a GPU UUID or name substring (`"RTX 5050"`), so an integrated GPU is never picked. Default: the current CUDA device.
+- Policed pixel stages: **decode** (clip not openable by NVDEC -> ffmpeg), **photo** (nvJPEG for JPEG under strict, PIL otherwise so non-strict stays film2-exact; PNG/WebP and prints' PIL shadow blur are CPU), **text** (lines on the Chromium engine, card lines, subs, frame captions are CPU; `engine: gpu` is not), **encode** (`libx264` when NVENC is unusable; NVENC through the ffmpeg pipe still counts as GPU). A cached segment runs nothing, so strict does not recheck it.
+- `render` / `watch` `OK` lines end `gpu=all`, or `gpu=partial(text,decode)` naming stages that fell back (non-strict). `montaj doctor` prints one line per stage (`composite`, `decode`, `photo`, `text`, `encode`, `capture`); under strict a stage that would fall back is `FAIL`.
+- Not pixel work, not policed: text shaping, demux/mux, audio mix, Python orchestration. Named exceptions: `capture` rasterises the page in headless Chromium (CPU); its encode uses NVENC (libx264 only when NVENC is unusable, an error under strict). `ingest` and `sheet` use PIL on the CPU.

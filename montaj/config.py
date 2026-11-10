@@ -80,7 +80,7 @@ def load(*, required: Iterable[str] = KEYS) -> Config:
         data = tomllib.loads(path.read_text(encoding="utf-8"))
     except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
         raise ConfigError(f"config: {path} is not readable TOML: {' '.join(str(exc).split())}") from None
-    unknown = sorted(set(data) - set(KEYS))
+    unknown = sorted(set(data) - set(KEYS) - {"gpu"})  # [gpu] is read by gpu_policy
     if unknown:
         raise ConfigError(f"config: unknown key(s) {', '.join(unknown)} in {path} (have: {', '.join(KEYS)})")
     needed = tuple(required)
