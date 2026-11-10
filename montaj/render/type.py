@@ -73,6 +73,7 @@ class GlyphXform:
     opacity: float = 1.0
     blur: float = 0.0
     fill: tuple[float, float, float] | None = None
+    sy: float = 1.0  # extra vertical scale about the ink centre (a flip), after `scale`
 
 
 IDENTITY = GlyphXform()
@@ -190,12 +191,12 @@ def _over(top: torch.Tensor, below: torch.Tensor) -> torch.Tensor:
     return top + below * (1 - top[3:4])
 
 
-def _corners(box, cx, cy, s, rot, tx, ty, line=None):
+def _corners(box, cx, cy, s, rot, tx, ty, line=None, sy=1.0):
     """Device-px corners of `box` after the glyph pose, then the line rotation `line` = (px, py, rad)."""
     x0, y0, x1, y1 = box
     c, sn = math.cos(rot), math.sin(rot)
     for x, y in ((x0, y0), (x1, y0), (x0, y1), (x1, y1)):
-        u, v = (x - cx) * s, (y - cy) * s
+        u, v = (x - cx) * s, (y - cy) * s * sy
         qx, qy = cx + tx + u * c - v * sn, cy + ty + u * sn + v * c
         if line is not None:
             px, py, lr = line
@@ -230,7 +231,7 @@ def draw_run_crop(cv, run: G.GlyphRun, style: TextStyle, per_glyph_xform=None, *
         x = x or IDENTITY
         if g.emph and style.emphasis_fill is not None and x.fill is None:
             x = replace(x, fill=style.emphasis_fill)
-        if x.opacity <= 1e-4 or x.scale <= 1e-6:
+        if x.opacity <= 1e-4 or x.scale <= 1e-6 or x.sy <= 1e-3:
             continue
         ref = run.fonts[g.font]
         cell = atlas.cell(ref, g.gid)
@@ -253,7 +254,7 @@ def draw_run_crop(cv, run: G.GlyphRun, style: TextStyle, per_glyph_xform=None, *
     gboxes = {}
     for x, items in groups.items():
         rot = math.radians(x.rotate)
-        pts = [p for it in items for p in _corners(it[6], it[7], it[8], x.scale, rot, x.dx * k, x.dy * k, line_rot)]
+        pts = [p for it in items for p in _corners(it[6], it[7], it[8], x.scale, rot, x.dx * k, x.dy * k, line_rot, x.sy)]
         m = sw * x.scale + 3 * (x.blur / 2) * k + 2
         gboxes[x] = grow((min(p[0] for p in pts), min(p[1] for p in pts),
                           max(p[0] for p in pts), max(p[1] for p in pts)), m)
@@ -295,13 +296,13 @@ def draw_run_crop(cv, run: G.GlyphRun, style: TextStyle, per_glyph_xform=None, *
             # Inverse pose: screen px -> untransformed device px -> cell px.
             u, v = xx - cx - x.dx * k, yy - cy - x.dy * k
             ux = (u * c + v * sn) / x.scale + cx
-            uy = (-u * sn + v * c) / x.scale + cy
+            uy = (-u * sn + v * c) / (x.scale * x.sy) + cy
             qx = (ux - gx) / s - ox
             qy = (uy - gy) / s - oy
             h, w = sdf.shape[-2:]
             grid = torch.stack((qx / w * 2 - 1, qy / h * 2 - 1), -1)[None]
             d = F.grid_sample(sdf, grid, mode="bilinear", padding_mode="border", align_corners=False)[0]
-            d = d * (s * x.scale)  # device px
+            d = d * (s * x.scale * min(1.0, x.sy))  # device px; a squash sharpens along its short axis
             fa = (0.5 - d).clamp(0, 1)
             fill_a = fa + fill_a * (1 - fa)
             if sw > 0:

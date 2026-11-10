@@ -320,6 +320,43 @@ class TextEmphasis(Frozen):
 
     color: str = "#ffe600"
     scale: RealNum = 1.0
+    # Motion (#22): the marked words' entry type and impact shake. Unset they stay out of the dump.
+    in_: str | None = Field(default=None, alias="in", exclude_if=lambda v: v is None)
+    shake: RealNum | None = Field(default=None, exclude_if=lambda v: v is None)
+
+
+def _as_typed(v: object) -> object:
+    """`in: pop` is `in: {type: pop}`."""
+    return {"type": v} if isinstance(v, str) else v
+
+
+class TextIn(Frozen):
+    """How each unit of a gpu line enters. Durations and `by` override the line's own."""
+
+    type: str
+    by: str | None = None
+    dur: DurationStr | None = None
+    stagger: DurationStr | None = None
+    overshoot: RealNum | None = None
+    from_: str | None = Field(default=None, alias="from")
+    distance: RealNum | None = None
+
+
+class TextOut(Frozen):
+    """How each unit leaves; the last unit's exit ends at the block's `to`."""
+
+    type: str
+    dur: DurationStr | None = None
+    stagger: DurationStr | None = None
+    to: str | None = None
+    distance: RealNum | None = None
+
+
+class TextIdle(Frozen):
+    """A loop while the unit is at rest."""
+
+    type: str
+    amount: RealNum | None = None
 
 
 def _none(v: object) -> bool:
@@ -369,11 +406,17 @@ class TextLine(Frozen):
     glow: RealNum | None = Field(default=None, exclude_if=_none)
     pos: tuple[RealNum, RealNum] | None = Field(default=None, exclude_if=_none)
     rotate: RealNum | None = Field(default=None, exclude_if=_none)
+    # Text motion (#22), gpu engine. Resolved into `timeline.ResolvedLine.motion`.
+    in_: Annotated[TextIn | None, BeforeValidator(_as_typed)] = Field(default=None, alias="in", exclude_if=_none)
+    out: Annotated[TextOut | None, BeforeValidator(_as_typed)] = Field(default=None, exclude_if=_none)
+    idle: Annotated[TextIdle | None, BeforeValidator(_as_typed)] = Field(default=None, exclude_if=_none)
 
 
 def gpu_fields(line: TextLine) -> list[str]:
     """The fields of `line` only the gpu engine draws. Any of them makes the line a gpu line."""
-    out = [n for n in ("font", "case", "emphasis", "stroke", "glow", "pos", "rotate") if getattr(line, n) is not None]
+    out = [n for n in ("font", "case", "emphasis", "stroke", "glow", "pos", "rotate", "in_", "out", "idle")
+           if getattr(line, n) is not None]
+    out = ["in" if n == "in_" else n for n in out]
     if isinstance(line.shadow, TextShadow):
         out.append("shadow")
     if "*" in line.text:  # `*emphasis*` markup (or an escaped `\*`)
@@ -491,6 +534,8 @@ class TextBlock(Frozen):
     fade_in: DurationStr | None = None
     fade_out: DurationStr | None = None
     blur: float = 10.0
+    # Draw the block inside the sub-frame average (#22). False stays out of the dump.
+    motion_blur: bool = Field(default=False, exclude_if=lambda v: v is False)
     # Absent stays out of model_dump so a film with no scrim keeps its segment hash.
     backdrop: Annotated[TextBackdrop | None, BeforeValidator(_coerce_backdrop)] = Field(
         default=None, exclude_if=lambda v: v is None
@@ -894,6 +939,20 @@ def _unrounded_durs(spec: Spec) -> list[tuple[str, str]]:
                 out.append((f"text[{i}].lines[{j}].stagger", line.stagger))
             if line.dur:
                 out.append((f"text[{i}].lines[{j}].dur", line.dur))
+            out.extend(_motion_durs(f"text[{i}].lines[{j}]", line))
+    return out
+
+
+def _motion_durs(path: str, line: TextLine) -> list[tuple[str, str]]:
+    """`in`/`out` durations of a text line, keyed like the line's own `stagger`/`dur`."""
+    out = []
+    for name, m in (("in", line.in_), ("out", line.out)):
+        if m is None:
+            continue
+        for field in ("dur", "stagger"):
+            raw = getattr(m, field)
+            if raw:
+                out.append((f"{path}.{name}.{field}", raw))
     return out
 
 
@@ -941,6 +1000,7 @@ def _time_strings(spec: Spec) -> list[str]:
                 out.append(line.dur)
             if line.sweep:
                 out.extend(line.sweep)
+            out.extend(raw for _, raw in _motion_durs("", line))
     for sh in spec.shots:
         if sh.card is None:
             continue
@@ -2404,6 +2464,7 @@ def _check_text_engine(path: str, line: TextLine, errors: list[str]) -> None:
         if getattr(line, name) != unset:
             errors.append(_line(f"{path}.{name}", f"{name} is not drawn by the gpu engine yet", hint))
     _check_text_styling(path, line, errors)
+    _check_text_motion(path, line, errors)
     if line.font is not None and line.font not in glyphs.FONTS:
         errors.append(_line(f"{path}.font", f"unknown {line.font!r}", f"use {', '.join(glyphs.FONTS)}"))
         return
@@ -2420,6 +2481,60 @@ def _check_text_engine(path: str, line: TextLine, errors: list[str]) -> None:
         if missing:
             errors.append(_line(f"{path}.text", f"{line.font or line.style} fonts have no glyph for {''.join(missing)!r}",
                                 "use another font or style" if styled else "use another style, or drop engine: gpu"))
+
+
+def _check_text_motion(path: str, line: TextLine, errors: list[str]) -> None:
+    """Field-level checks for the gpu-engine motion fields (#22)."""
+    from montaj.render import motion as M
+
+    def finite(p: str, v, lo: float, hi: float, hint: str) -> None:
+        if v is not None and (not math.isfinite(v) or not lo <= v <= hi):
+            errors.append(_line(p, f"must be from {_fmt_num(lo)} to {_fmt_num(hi)}, got {_fmt_num(v)}", hint))
+
+    moving = line.in_ is not None or line.out is not None or line.idle is not None or (
+        line.emphasis is not None and (line.emphasis.in_ is not None or line.emphasis.shake is not None))
+    if moving and line.reveal == "pop":
+        errors.append(_line(f"{path}.reveal", "reveal: pop is the whole-line pop; in, out, idle and emphasis motion are per unit",
+                            "remove reveal and use in: pop"))
+    elif line.in_ is not None and line.reveal != "rise":
+        errors.append(_line(f"{path}.reveal", "in replaces reveal", f"remove reveal and use in: {line.reveal}"))
+    if line.in_ is not None:
+        m, p = line.in_, f"{path}.in"
+        if m.type not in M.IN_TYPES:
+            errors.append(_line(f"{p}.type", f"unknown {m.type!r}", f"use {', '.join(M.IN_TYPES)}"))
+        if m.by is not None and m.by not in TEXT_BY:
+            errors.append(_line(f"{p}.by", f"unknown {m.by!r}", "use word or char"))
+        if m.type == "type" and (m.dur is not None or line.dur is not None):
+            errors.append(_line(f"{p}.dur", "typewriter characters appear instantly", "remove dur"))
+        if m.from_ is not None and (m.type != "slide" or m.from_ not in M.SIDES):
+            errors.append(_line(f"{p}.from", f"from {m.from_!r} needs in: slide and a side", "use left, right, top or bottom with type: slide"))
+        if m.overshoot is not None and m.type not in M.IN_OVERSHOOT:
+            errors.append(_line(f"{p}.overshoot", f"{m.type} has no overshoot", "remove overshoot"))
+        finite(f"{p}.overshoot", m.overshoot, 1.0, 2.0, "use 1.0-1.2")
+        if m.distance is not None and m.type not in ("slide", "drop", "rise"):
+            errors.append(_line(f"{p}.distance", f"{m.type} does not travel", "remove distance"))
+        finite(f"{p}.distance", m.distance, 0.0, 2000.0, "use design px, e.g. 160")
+    if line.out is not None:
+        m, p = line.out, f"{path}.out"
+        if m.type not in M.OUT_TYPES:
+            errors.append(_line(f"{p}.type", f"unknown {m.type!r}", f"use {', '.join(M.OUT_TYPES)}"))
+        if m.type == "cut" and m.dur is not None:
+            errors.append(_line(f"{p}.dur", "a cut takes no time", "remove dur, or use type: fade"))
+        if m.to is not None and (m.type != "slide" or m.to not in M.SIDES):
+            errors.append(_line(f"{p}.to", f"to {m.to!r} needs out: slide and a side", "use left, right, top or bottom with type: slide"))
+        if m.distance is not None and m.type != "slide":
+            errors.append(_line(f"{p}.distance", f"{m.type} does not travel", "remove distance"))
+        finite(f"{p}.distance", m.distance, 0.0, 2000.0, "use design px, e.g. 160")
+    if line.idle is not None:
+        if line.idle.type not in M.IDLE_TYPES:
+            errors.append(_line(f"{path}.idle.type", f"unknown {line.idle.type!r}", "use float or pulse"))
+        finite(f"{path}.idle.amount", line.idle.amount, 0.0, 100.0, "float: design px; pulse: percent")
+    if line.emphasis is not None:
+        e = line.emphasis
+        if e.in_ is not None and (e.in_ not in M.IN_TYPES or e.in_ == "type"):
+            errors.append(_line(f"{path}.emphasis.in", f"unknown {e.in_!r}",
+                                f"use {', '.join(t for t in M.IN_TYPES if t != 'type')}"))
+        finite(f"{path}.emphasis.shake", e.shake, 0.0, 60.0, "use design px, e.g. 6")
 
 
 def _check_text_styling(path: str, line: TextLine, errors: list[str]) -> None:
