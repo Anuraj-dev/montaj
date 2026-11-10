@@ -297,9 +297,20 @@ def time_strings(spec) -> list[str]:
     return out
 
 
+def audio_layers(sh) -> list:
+    """The layers of a shot that carry their clip's own sound (`layers[].audio: true`)."""
+    return [layer for layer in sh.layers or () if layer.audio and layer.clip is not None]
+
+
+def has_links(spec) -> bool:
+    """Any shot or layer mixes its clip's own sound."""
+    return any(sh.audio or audio_layers(sh) for sh in spec.shots)
+
+
 def linked_ids(spec) -> set[str]:
-    """Ids of clip shots whose own sound is in the mix: duck and waveform sources, like clip ids."""
-    return {sh.id for sh in spec.shots if sh.audio and sh.id}
+    """Ids of clip shots (and audio layers) whose own sound is in the mix: duck and waveform sources, like clip ids."""
+    return {sh.id for sh in spec.shots if sh.audio and sh.id} | {
+        layer.id for sh in spec.shots for layer in audio_layers(sh) if layer.id}
 
 
 _LINK_FIELDS = ("gain", "audio_lead", "audio_tail", "id")
@@ -313,6 +324,20 @@ def check_links(spec, spec_dir: Path | None, holds: list[int | None], fps: int, 
     tail: list[float] = [0.0] * n
     for i, sh in enumerate(spec.shots):
         at = f"shots[{i}]"
+        for k, layer in enumerate(sh.layers or ()):
+            if not layer.audio:
+                continue
+            p = f"{at}.layers[{k}].audio"
+            if layer.clip is None:
+                errors.append(_line(p, "audio needs clip", "set it on a clip layer"))
+                continue
+            if spec.audio is None:
+                errors.append(_line(p, "linked clip audio needs an audio block", "add audio: {track: ...}"))
+            if spec_dir is not None:
+                path = _link_src(spec, spec_dir, layer.clip)
+                if path is not None and _audio_start(path) is None:
+                    errors.append(_line(p, f"clip {layer.clip!r} has no audio stream",
+                                        "remove audio: true, or use a clip with sound"))
         if not sh.audio:
             for name in _LINK_FIELDS:
                 if getattr(sh, name) is not None:
@@ -397,11 +422,25 @@ def _links(spec, spec_dir: Path | None, shots, fps: int, bpm: float | None) -> l
 
     The audio cut before shot `i` sits at its picture cut, moved back by its own `audio_lead` or on
     by the previous linked shot's `audio_tail`. `check_links` has already rejected bad values.
+    An audio layer (#53) plays its clip from the layer's `from` (else that audio cut) to its `to`
+    (else the next audio cut), at speed 1 from its `clip_in`, as the renderer reads the layer.
     """
     if spec_dir is None or fps <= 0:
         return []
     n = len(shots)
     linked = [bool(r.spec.audio and r.spec.clip) for r in shots]
+    layered = [[] if linked[i] else audio_layers(r.spec) for i, r in enumerate(shots)]
+    # A shot whose sound runs from its start / to its end joins its linked neighbour with a crossfade.
+    heard_in = [linked[i] or any(not ly.from_ for ly in layered[i]) for i in range(n)]
+    heard_out = [linked[i] or any(ly.to is None or shots[i].start + ly.to >= shots[i].end for ly in layered[i])
+                 for i in range(n)]
+    probed: dict[str, tuple[Path | None, float | None]] = {}
+
+    def source(clip: str) -> tuple[Path | None, float | None]:
+        if clip not in probed:
+            path = _link_src(spec, spec_dir, clip)
+            probed[clip] = (path, _audio_start(path) if path is not None else None)
+        return probed[clip]
 
     def span(raw: str | None) -> int:
         v = _span_s(raw, fps, bpm, "", []) if raw is not None else None
@@ -419,15 +458,26 @@ def _links(spec, spec_dir: Path | None, shots, fps: int, bpm: float | None) -> l
     half = round(LINK_XFADE_S * SR / 2)
     out: list[Linked] = []
     for i, r in enumerate(shots):
+        sh = r.spec
+        last = cut(i + 1) if i + 1 < n else frame_sample(r.end, fps) + span(sh.audio_tail if linked[i] else None)
+        for layer in layered[i]:
+            path, lag = source(layer.clip)
+            if lag is None:
+                continue
+            start = r.start + (layer.from_ or 0)
+            a = frame_sample(start, fps) if layer.from_ else cut(i)
+            b = frame_sample(r.start + layer.to, fps) if layer.to is not None and r.start + layer.to < r.end else last
+            clip_in = _dur_frames(layer.clip_in, fps, bpm, "", []) if layer.clip_in is not None else 0.0
+            xin = half if not layer.from_ and i > 0 and heard_out[i - 1] and a > 0 else 0
+            xout = half if b == last and i + 1 < n and heard_in[i + 1] else 0
+            out.append(Linked(layer.id, str(path), fps, start, a, b, float(clip_in or 0.0), None, None, 0.0,
+                              lag, xin, xout))
         if not linked[i]:
             continue
-        sh = r.spec
-        path = _link_src(spec, spec_dir, sh.clip)
-        lag = _audio_start(path) if path is not None else None
+        path, lag = source(sh.clip)
         if lag is None:
             continue
         a = cut(i)
-        b = cut(i + 1) if i + 1 < n else frame_sample(r.end, fps) + span(sh.audio_tail)
         raw_in = sh.range[0] if sh.range is not None else sh.clip_in
         clip_in = _dur_frames(raw_in, fps, bpm, "", []) if raw_in is not None else 0.0
         speed = sh.speed
@@ -437,9 +487,9 @@ def _links(spec, spec_dir: Path | None, shots, fps: int, bpm: float | None) -> l
             speed = float(speed)
         gain = _db(sh.gain, "", []) if sh.gain is not None else 0.0
         # Back-to-back linked shots join with a crossfade, so a cut never clicks or dips.
-        xin = half if i > 0 and linked[i - 1] and a > 0 else 0
-        xout = half if i + 1 < n and linked[i + 1] else 0
-        out.append(Linked(sh.id, str(path), fps, r.start, a, b, float(clip_in or 0.0), speed,
+        xin = half if i > 0 and heard_out[i - 1] and a > 0 else 0
+        xout = half if i + 1 < n and heard_in[i + 1] else 0
+        out.append(Linked(sh.id, str(path), fps, r.start, a, last, float(clip_in or 0.0), speed,
                           None if sh.freeze is None else float(sh.freeze), gain or 0.0, lag, xin, xout))
     return out
 
@@ -1042,6 +1092,6 @@ def check_lines(stats: dict) -> list[str]:
 
 
 __all__ = ["DuckPlan", "EditOp", "Linked", "MixPlan", "MixStats", "Placed", "apply_edits", "band_levels",
-           "check_lines", "check_links", "decode", "duck_gain", "edit_ops", "edit_range_error", "frame_sample",
-           "linked_ids",
+           "audio_layers", "check_lines", "check_links", "decode", "duck_gain", "edit_ops", "edit_range_error",
+           "frame_sample", "has_links", "linked_ids",
            "plan_audio", "plan_hash", "render_mix", "shift_words", "source_window", "synth"]

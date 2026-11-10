@@ -260,3 +260,56 @@ def test_plan_without_links_keeps_its_hash() -> None:
     """Pinned from main before links existed: films without linked shots reuse their cached mix wav."""
     plan = mix.MixPlan("synth:x", clips=(mix.Placed(None, "synth:tick", 0, 0.0, None, 1.0, 0.0, 0.0),))
     assert mix.plan_hash(plan) == "43cde5899d8d7a6b"
+
+
+# --- layer audio (#53) -----------------------------------------------------------------------------------
+
+
+def test_a_layer_carries_its_clip_sound_locked_to_its_picture(tmp_path: Path) -> None:
+    _dot(tmp_path)
+    out = mixed(film(tmp_path, [
+        {"clip": "talk", "range": ["1s", "2s"], "audio": True},
+        {"hold": "1s", "layers": [{"clip": "talk", "clip_in": "4s", "audio": True}]},
+        {"hold": "1s", "layers": [{"image": "dot"}, {"clip": "talk", "clip_in": "6s", "from": "10f", "to": "25f",
+                                                     "box": [0, 0, 32, 32], "audio": True}]},
+    ]))
+    assert_plays(out, 0, SR, SR)
+    assert_plays(out, SR, 2 * SR, 4 * SR)  # joins the shot before like two linked shots (crossfade)
+    assert not np.any(out[2 * SR + FADE : 2 * SR + 10 * SPF - FADE])
+    assert_plays(out, 2 * SR + 10 * SPF, 2 * SR + 25 * SPF, 6 * SR)
+    assert not np.any(out[2 * SR + 25 * SPF + FADE : 3 * SR])
+
+
+def _dot(tmp: Path) -> bool:
+    from PIL import Image
+
+    (tmp / "assets").mkdir(parents=True, exist_ok=True)
+    Image.new("RGB", (64, 64), (200, 40, 40)).save(tmp / "assets" / "dot.png")
+    return True
+
+
+def test_layer_audio_crossfades_with_linked_neighbours_and_skips_the_segment_hash(tmp_path: Path) -> None:
+    shots = [
+        {"clip": "talk", "range": ["1s", "2s"], "audio": True},
+        {"hold": "1s", "layers": [{"clip": "talk", "clip_in": "4s", "audio": True}]},
+        {"clip": "talk", "range": ["6s", "7s"], "audio": True},
+    ]
+    p = film(tmp_path, shots)
+    tl = resolve(load_spec(p), tmp_path)
+    plan = mix.plan_audio(tl.spec, tmp_path, tl.markers, FPS, None, 0.0, [], shots=tl.shots)
+    assert [(link.a, link.b, link.clip_in) for link in plan.links] == [(0, SR, 30.0), (SR, 2 * SR, 120.0),
+                                                                       (2 * SR, 3 * SR, 180.0)]
+    assert all(link.xin for link in plan.links[1:]) and all(link.xout for link in plan.links[:2])
+    shots[1]["layers"][0].pop("audio")
+    quiet = resolve(load_spec(film(tmp_path, shots)), tmp_path)
+    shas = {"talk": "x"}
+    assert [segment_hash(tl, s, shas, "v") for s in tl.segments] == [segment_hash(quiet, s, shas, "v") for s in quiet.segments]
+
+
+def test_layer_audio_needs_a_clip_with_sound(tmp_path: Path) -> None:
+    _dot(tmp_path)
+    with pytest.raises(SpecError, match=r"shots\[0\]\.layers\[0\]\.audio: audio needs clip"):
+        load_spec(film(tmp_path, [{"hold": "1s", "layers": [{"image": "dot", "audio": True}]}]))
+    make_clip(tmp_path / "assets" / "mute.mov", audio=False)
+    with pytest.raises(SpecError, match=r"shots\[0\]\.layers\[0\]\.audio: clip 'mute' has no audio stream"):
+        load_spec(film(tmp_path, [{"hold": "1s", "layers": [{"clip": "mute", "audio": True}]}]))

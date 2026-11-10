@@ -248,6 +248,8 @@ def _shot_payload(shot) -> dict:
     # Linked audio (#40) changes the mix, not the pixels: retiming a J/L cut re-renders nothing.
     for name in ("audio", "gain", "audio_lead", "audio_tail"):
         raw.pop(name, None)
+    for layer in raw.get("layers") or ():
+        layer.pop("audio", None)
     return raw
 
 

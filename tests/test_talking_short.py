@@ -8,6 +8,9 @@ import pytest
 import yaml
 
 from montaj.cli import main
+from montaj.cuts import expand_cuts
+from montaj.emphasis import load_words
+from montaj.spec import load_spec
 
 ROOT = Path(__file__).resolve().parents[1]
 RECIPE = ROOT / "recipes" / "talking-short.yaml"
@@ -32,10 +35,15 @@ def demo(tmp_path_factory: pytest.TempPathFactory) -> Path:
 
 def test_demo_cuts_and_film_words(demo: Path, capsys: pytest.CaptureFixture[str]) -> None:
     cuts = json.loads((demo / "assets" / "voice.cuts.json").read_text())
-    words = json.loads((demo / "talk.words.json").read_text())["words"]
-    assert len(cuts["spans"]) == 14
-    assert words[0]["w"].lower().startswith("stop") and words[0]["s"] < 0.2
-    assert all(a["s"] <= b["s"] for a, b in zip(words, words[1:])), "film-time words must be in order"
+    source = json.loads((demo / "assets" / "voice.words.json").read_text())["words"]
+    assert len(cuts["spans"]) == 14 and not (demo / "talk.words.json").exists()
+    spec = load_spec(demo / "montaj.yaml", expand=False)
+    words = load_words(expand_cuts(spec, demo, errors := []), demo, errors)
+    dropped = {w["i"] for w in source} - {w.i for w in words}
+    assert errors == [] and [w["w"] for w in source if w["i"] in dropped] == ["um"], "only the cut filler drops"
+    assert words[0].w.lower().startswith("stop") and words[0].s < 0.2
+    assert all(a.s <= b.s for a, b in zip(words, words[1:])), "film-time words must be in order"
+    assert words[-1].s < 36.13 < source[-1]["s"], "the cuts pull the last word in from source time"
     assert main(["-C", str(demo), "validate"]) == 0
     assert "OK montaj.yaml 1084f 36.13s" in capsys.readouterr().out
 
