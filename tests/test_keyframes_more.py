@@ -183,3 +183,15 @@ def test_parent_errors(tmp_path: Path) -> None:
 def test_unset_parent_fields_leave_hashes_alone() -> None:
     dumped = Layer(image="a").model_dump_json()
     assert not any(f in dumped for f in ('"parent"', '"anchor"', '"id"'))
+
+
+def test_inspect_track_prints_the_curve(tmp_path: Path) -> None:
+    from montaj import inspector
+
+    _project(tmp_path, "  - {hold: 1s, layers: [{clip: rec}, {image: tag, id: s, scale: [{t: 0f, v: 1}, {t: 10f, v: 2}]}]}\n")
+    for layer in ("1", "s"):
+        out = inspector.track(tmp_path, f"0.{layer}.scale")
+        assert out["keys"] == [0, 10] and out["values"][0] == 1.0 and out["values"][-1] == 2.0
+    assert inspector.lines(out)[0].startswith("OK track 0.s.scale keys=[0, 10] 0f=1.0")
+    with pytest.raises(ValueError, match="not keyed"):
+        inspector.track(tmp_path, "0.0.opacity")
