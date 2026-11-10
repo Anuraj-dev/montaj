@@ -1,7 +1,7 @@
 """Layer compositing (#34): one source drawn over the layers before it.
 
 A layer is a texture (premultiplied RGBA or opaque RGB, on the device), a destination rect in device
-px, a per-frame `LayerState` (scale, rotate, opacity) and a blend mode. `layer_state` is the only
+px, a per-frame `LayerState` (scale, rotate, opacity, shift) and a blend mode. `layer_state` is the only
 place a layer's time-varying values are computed, so keyframes (#35) replace its body, not its callers.
 
 Geometry follows `shots.card_frame`: a screen pixel centre maps into the layer's local frame about the
@@ -22,7 +22,7 @@ from __future__ import annotations
 import math
 import struct
 import zlib
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 import numpy as np
@@ -30,6 +30,8 @@ import torch
 import torch.nn.functional as F
 from PIL import Image
 
+from montaj.easing import parse_ease
+from montaj.render.core import key as eval_key
 from montaj.render.shots import _erf_rect
 
 # Drop shadow in design px (scaled by Canvas.k and the layer's scale): offset down, gaussian sigma.
@@ -47,6 +49,8 @@ class LayerState:
     scale: float
     rotate: float  # degrees, clockwise
     opacity: float
+    dx: float = 0.0  # design px shift of the layer's rect from where `pos` first placed it (a keyed `pos`)
+    dy: float = 0.0
 
 
 def _smooth(x: float) -> float:
@@ -62,11 +66,40 @@ def _anim(state: LayerState, kind: str, x: float) -> LayerState:
     """Apply an entrance at progress x (0 hidden, 1 settled); an exit passes 1 − progress."""
     x = min(1.0, max(0.0, x))
     if kind == "fade":
-        return LayerState(state.scale, state.rotate, state.opacity * _smooth(x))
+        return replace(state, opacity=state.opacity * _smooth(x))
     if kind == "pop":
-        return LayerState(state.scale * (0.5 + 0.5 * _out_back(x)), state.rotate,
-                          state.opacity * min(1.0, x / _POP_FADE))
+        return replace(state, scale=state.scale * (0.5 + 0.5 * _out_back(x)),
+                       opacity=state.opacity * min(1.0, x / _POP_FADE))
     raise ValueError(f"layer anim: unknown {kind!r}")
+
+
+def sample(prop, t: float, default):
+    """A layer property at shot-clock `t`: a plain value, or the key list held before the first key and
+    after the last (`render.core.key`, with `easing.parse_ease` shaping each move)."""
+    if prop is None:
+        return default
+    if not isinstance(prop, list):
+        return prop
+    keys = [(float(k.t), tuple(map(float, k.v)) if isinstance(k.v, (tuple, list)) else float(k.v),
+             parse_ease(k.ease)) for k in prop]
+    return eval_key(t, keys)
+
+
+def base_pos(layer) -> tuple[float, float] | None:
+    """Where a `pos` layer is placed (design px): its value, or its first key's. Animation moves it from here."""
+    pos = layer.pos
+    if pos is None:
+        return None
+    p = pos[0].v if isinstance(pos, list) else pos
+    return float(p[0]), float(p[1])
+
+
+def peak_scale(layer) -> float:
+    """The largest scale the layer reaches from its keys (a plain scale is itself), for decode sizing."""
+    sc = layer.scale
+    if sc is None:
+        return 1.0
+    return max(float(k.v) for k in sc) if isinstance(sc, list) else float(sc)
 
 
 def layer_state(layer, t_local: float, hold: int) -> LayerState | None:
@@ -82,10 +115,14 @@ def layer_state(layer, t_local: float, hold: int) -> LayerState | None:
     if layer.to is not None and t_local >= layer.to:
         return None
     state = LayerState(
-        1.0 if layer.scale is None else float(layer.scale),
-        0.0 if layer.rotate is None else float(layer.rotate),
-        1.0 if layer.opacity is None else float(layer.opacity),
+        float(sample(layer.scale, t_local, 1.0)),
+        float(sample(layer.rotate, t_local, 0.0)),
+        min(1.0, max(0.0, float(sample(layer.opacity, t_local, 1.0)))),  # a spring may overshoot past 1
     )
+    if isinstance(layer.pos, list):
+        x, y = sample(layer.pos, t_local, None)
+        bx, by = base_pos(layer)
+        state = replace(state, dx=x - bx, dy=y - by)
     if layer.in_ is not None:
         state = _anim(state, layer.in_.type, (t_local - (start or 0)) / float(layer.in_.dur))
     if layer.out is not None:
@@ -168,7 +205,7 @@ def composite(cv, dst: torch.Tensor, source: LayerTexture, src_rect: tuple[float
     if hw <= 0 or hh <= 0 or state.scale <= 0 or state.opacity <= 0:
         return
     s = state.scale
-    cx, cy = (x0 + x1) / 2.0, (y0 + y1) / 2.0
+    cx, cy = (x0 + x1) / 2.0 + state.dx * cv.k, (y0 + y1) / 2.0 + state.dy * cv.k
     th = math.radians(state.rotate)
     cos, sin = math.cos(th), math.sin(th)
     ex = (abs(cos) * hw + abs(sin) * hh) * s

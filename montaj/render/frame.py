@@ -29,7 +29,7 @@ from montaj.render.clip import ClipSource, window_key
 from montaj.render.core import Photo, fit_s, sine, still
 from montaj.render.custom import CustomRunner
 from montaj.render.finish import LOOKS, finish, lut_texture
-from montaj.render.layers import LayerState, LayerTexture, composite, layer_state, load_rgba
+from montaj.render.layers import LayerState, base_pos, peak_scale, LayerTexture, composite, layer_state, load_rgba
 from montaj.render.shots import (
     card_frame,
     css_blur,
@@ -152,7 +152,8 @@ def _place(layer, sw: int, sh: int, W: int, H: int, k: float):
     if layer.box is not None:
         x0, y0, x1, y1 = (float(v) * k for v in layer.box)
     elif layer.pos is not None:
-        cx, cy = float(layer.pos[0]) * k, float(layer.pos[1]) * k
+        bx, by = base_pos(layer)
+        cx, cy = bx * k, by * k
         x0, y0, x1, y1 = cx - sw * k / 2, cy - sh * k / 2, cx + sw * k / 2, cy + sh * k / 2
         return (x0, y0, x1, y1), (0.0, 0.0, float(sw), float(sh))
     else:
@@ -654,7 +655,7 @@ class Renderer:
                 dest, crop = _place(layer, sw, sh, W, H, k)
                 crop = tuple(int(round(v)) for v in crop)
                 cw, ch = max(1, crop[2] - crop[0]), max(1, crop[3] - crop[1])
-                grow = max(1.0, float(layer.scale or 1.0)) * (1.1 if "pop" in (
+                grow = max(1.0, peak_scale(layer)) * (1.1 if "pop" in (
                     getattr(layer.in_, "type", None), getattr(layer.out, "type", None)) else 1.0)
                 # Decode no finer than the layer is drawn (pop overshoot included); never upscale.
                 d = min(1.0, max((dest[2] - dest[0]) / cw, (dest[3] - dest[1]) / ch) * grow)

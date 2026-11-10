@@ -21,6 +21,7 @@ from montaj.spec import (
     INCOMING_TRANS,
     WALL_PULLBACK_ZOOM,
     WAVEFORM_BARS,
+    LAYER_KEYED,
     Layer,
     Shot,
     Spec,
@@ -538,6 +539,10 @@ def _layer_with_frames(layer: Layer, at: str, parsed: dict[str, int]) -> Layer:
         anim = getattr(layer, attr)
         if anim is not None:
             update[attr] = anim.model_copy(update={"dur": parsed[f"{at}.{name}.dur"]})
+    for prop in LAYER_KEYED:
+        keys = getattr(layer, prop)
+        if isinstance(keys, list):
+            update[prop] = [key.model_copy(update={"t": parsed[f"{at}.{prop}[{j}].t"]}) for j, key in enumerate(keys)]
     return layer.model_copy(update=update) if update else layer
 
 

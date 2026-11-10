@@ -26,6 +26,7 @@ from pydantic import (
     model_validator,
 )
 
+from montaj.easing import NEW_EASES, parse_ease
 from montaj.events import (
     Hit,
     Miss,
@@ -533,12 +534,25 @@ class LayerAnim(Frozen):
     dur: DurationStr | int
 
 
+class LayerKey(Frozen):
+    """A keyframe on a layer property (#35). `t` is the shot clock (whole frames after `resolve`); `v` is a
+    number, or `[x, y]` for `pos`. `ease` shapes the move that arrives at this key; the first key's is unused."""
+
+    t: DurationStr | int
+    v: RealNum | tuple[RealNum, RealNum]
+    ease: str = "smooth"
+
+
+LAYER_KEYED = ("pos", "scale", "rotate", "opacity")
+
+
 class Layer(Frozen):
     """One source composited over the layers before it (#34): source + placement + transform + opacity + blend.
 
     Unset fields stay out of the dump, so only what a film sets reaches its segment hash. Placement is a
     `box` (design px) or a `pos` (centre, natural size: one source px per design px); neither is the full frame.
-    `scale`, `rotate` and `opacity` are per-frame values the renderer evaluates (`render.layers.layer_state`).
+    `pos`, `scale`, `rotate` and `opacity` are a value or a list of `LayerKey`s; the renderer evaluates them
+    per frame (`render.layers.layer_state`).
     """
 
     clip: PhotoId | None = Field(default=None, exclude_if=_none)
@@ -550,10 +564,10 @@ class Layer(Frozen):
     to: DurationStr | int | None = Field(default=None, exclude_if=_none)
     box: tuple[RealNum, RealNum, RealNum, RealNum] | None = Field(default=None, exclude_if=_none)
     fit: str | None = Field(default=None, exclude_if=_none)
-    pos: tuple[RealNum, RealNum] | None = Field(default=None, exclude_if=_none)
-    scale: RealNum | None = Field(default=None, exclude_if=_none)
-    rotate: RealNum | None = Field(default=None, exclude_if=_none)
-    opacity: RealNum | None = Field(default=None, exclude_if=_none)
+    pos: tuple[RealNum, RealNum] | list[LayerKey] | None = Field(default=None, exclude_if=_none)
+    scale: RealNum | list[LayerKey] | None = Field(default=None, exclude_if=_none)
+    rotate: RealNum | list[LayerKey] | None = Field(default=None, exclude_if=_none)
+    opacity: RealNum | list[LayerKey] | None = Field(default=None, exclude_if=_none)
     blend: str | None = Field(default=None, exclude_if=_none)
     radius: RealNum | None = Field(default=None, exclude_if=_none)
     shadow: RealNum | None = Field(default=None, exclude_if=_none)
@@ -1086,6 +1100,11 @@ def _duration_fields(spec: Spec) -> list[tuple[str, str]]:
                               ("in.dur", layer.in_ and layer.in_.dur), ("out.dur", layer.out and layer.out.dur)):
                 if raw is not None:
                     out.append((f"shots[{i}].layers[{k}].{name}", raw))
+            for prop in LAYER_KEYED:
+                keys = getattr(layer, prop)
+                if isinstance(keys, list):
+                    for j, lkey in enumerate(keys):
+                        out.append((f"shots[{i}].layers[{k}].{prop}[{j}].t", lkey.t))
         if sh.wall is not None:
             for k, key in enumerate(sh.wall.camera.pos):
                 out.append((f"shots[{i}].wall.camera.pos[{k}].t", key.t))
@@ -3121,6 +3140,19 @@ def _layer_source_size(spec: Spec, spec_dir: Path | None, layer: Layer) -> tuple
         return None
 
 
+def layer_rest(v, default: float) -> float:
+    """A scalar layer property's resting value: itself, or the last key's (where the animation ends)."""
+    if v is None:
+        return default
+    return float(v[-1].v) if isinstance(v, list) else float(v)
+
+
+def layer_rest_pos(layer: Layer) -> tuple[float, float]:
+    pos = layer.pos
+    p = pos[-1].v if isinstance(pos, list) else pos
+    return float(p[0]), float(p[1])
+
+
 def _layer_extent(spec: Spec, spec_dir: Path | None, layer: Layer) -> tuple[float, float, float, float] | None:
     """Screen bounding box (design px) of a layer at its set scale and rotation, or None when unknown."""
     frame = _design_frame(spec)
@@ -3132,17 +3164,49 @@ def _layer_extent(spec: Spec, spec_dir: Path | None, layer: Layer) -> tuple[floa
         size = _layer_source_size(spec, spec_dir, layer)
         if size is None:
             return None
-        cx, cy = float(layer.pos[0]), float(layer.pos[1])
+        cx, cy = layer_rest_pos(layer)
         x0, y0, x1, y1 = cx - size[0] / 2, cy - size[1] / 2, cx + size[0] / 2, cy + size[1] / 2
     else:
         x0, y0, x1, y1 = 0.0, 0.0, frame[0], frame[1]
-    s = float(layer.scale) if layer.scale is not None else 1.0
-    th = math.radians(float(layer.rotate or 0.0))
+    s = layer_rest(layer.scale, 1.0)
+    th = math.radians(layer_rest(layer.rotate, 0.0))
     hw, hh = (x1 - x0) / 2 * s, (y1 - y0) / 2 * s
     ex = abs(math.cos(th)) * hw + abs(math.sin(th)) * hh
     ey = abs(math.sin(th)) * hw + abs(math.cos(th)) * hh
     cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
     return cx - ex, cy - ey, cx + ex, cy + ey
+
+
+def _layer_values(path: str, raw, parsed: dict[str, int], errors: list[str], hold: int | None):
+    """Yield (path, value) for a layer property that is a value or a key list, checking the keys' shape,
+    order, easing and shot-clock range. Scalars (`scale`) yield floats, `pos` yields pairs."""
+    pair = path.endswith(".pos")
+    if raw is None:
+        return
+    if not isinstance(raw, list):
+        yield path, raw
+        return
+    if not raw:
+        errors.append(_line(path, "empty key list", "give at least one {t, v}"))
+        return
+    prev = None
+    for j, key in enumerate(raw):
+        q = f"{path}[{j}]"
+        if isinstance(key.v, tuple) != pair:
+            errors.append(_line(f"{q}.v", "needs [x, y]" if pair else "needs a number",
+                                "pos keys are [x, y]; other properties are numbers"))
+        else:
+            yield f"{q}.v", key.v
+        if parse_ease(key.ease) is None:
+            errors.append(_line(f"{q}.ease", f"unknown {key.ease!r}", f"{EASE_HINT}; or {', '.join(NEW_EASES)}"))
+        t = parsed.get(f"{q}.t")
+        if t is None:
+            continue
+        if prev is not None and t <= prev:
+            errors.append(_line(f"{q}.t", f"{t}f is not after the previous key at {prev}f", "keys need strictly increasing times"))
+        if hold is not None and t > hold:
+            errors.append(_line(f"{q}.t", f"{t}f is after the end of the {hold}f hold", "use a time inside the hold"))
+        prev = t
 
 
 def _validate_layers(
@@ -3172,14 +3236,16 @@ def _validate_layers(
             errors.append(_line(f"{p}.fit", "fit is for a box or the full frame", "remove fit or use box"))
         if layer.blend is not None and layer.blend not in LAYER_BLENDS:
             errors.append(_line(f"{p}.blend", f"unknown {layer.blend!r}", f"use {_choices(LAYER_BLENDS)}"))
-        for name, lo, hi in (("opacity", 0.0, 1.0), ("shadow", 0.0, 1.0)):
-            v = getattr(layer, name)
-            if v is not None and (not math.isfinite(v) or not lo <= v <= hi):
-                errors.append(_line(f"{p}.{name}", f"must be 0 to 1, got {_fmt_num(v)}", "use a value like 0.8"))
-        if layer.scale is not None and (not math.isfinite(layer.scale) or layer.scale <= 0):
-            errors.append(_line(f"{p}.scale", f"must be finite and > 0, got {_fmt_num(layer.scale)}", "use 0.5 for half size"))
-        if layer.rotate is not None and not math.isfinite(layer.rotate):
-            errors.append(_line(f"{p}.rotate", "must be finite", "use degrees, clockwise"))
+        v = layer.shadow
+        if v is not None and (not math.isfinite(v) or not 0.0 <= v <= 1.0):
+            errors.append(_line(f"{p}.shadow", f"must be 0 to 1, got {_fmt_num(v)}", "use a value like 0.8"))
+        for name, lo, hi, hint in (("opacity", 0.0, 1.0, "use a value like 0.8"), ("scale", 1e-9, None, "use 0.5 for half size"),
+                                   ("rotate", None, None, "use degrees, clockwise")):
+            raw = getattr(layer, name)
+            for q, val in _layer_values(f"{p}.{name}", raw, parsed, errors, hold):
+                if not math.isfinite(val) or (lo is not None and val < lo) or (hi is not None and val > hi):
+                    want = {"opacity": "0 to 1", "scale": "finite and > 0", "rotate": "finite"}[name]
+                    errors.append(_line(q, f"must be {want}, got {_fmt_num(val)}", hint))
         if layer.radius is not None and (not math.isfinite(layer.radius) or layer.radius < 0):
             errors.append(_line(f"{p}.radius", f"must be finite and >= 0, got {_fmt_num(layer.radius)}", "use design px"))
         if layer.box is not None:
@@ -3187,8 +3253,9 @@ def _validate_layers(
             if not _finite_all(layer.box) or x1 <= x0 or y1 <= y0:
                 errors.append(_line(f"{p}.box", f"{[_fmt_num(v) for v in layer.box]} is not a box",
                                     "use [x0, y0, x1, y1] in design px with x0 < x1, y0 < y1"))
-        if layer.pos is not None and not _finite_all(layer.pos):
-            errors.append(_line(f"{p}.pos", "must be finite", "use [x, y] in design px"))
+        for q, pt in _layer_values(f"{p}.pos", layer.pos, parsed, errors, hold):
+            if not _finite_all(pt):
+                errors.append(_line(q, "must be finite", "use [x, y] in design px"))
         if layer.focus is not None and not _finite_point(layer.focus):
             errors.append(_line(f"{p}.focus", "must be finite", "use [x, y] in source px"))
         for name, anim in (("in", layer.in_), ("out", layer.out)):
