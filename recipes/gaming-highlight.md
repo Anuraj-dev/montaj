@@ -13,9 +13,9 @@ with its event log through `montaj ingest-rec --events`, the caption words (`wor
 | Part | Beats | Time | What |
 |---|---|---|---|
 | Hook | 0-2 | 0-1 s | the key moment first, 0.5x with a chroma split; "WATCH THIS" |
-| Run | 2-26 | 1-13 s | round start, then five kills, 4b each; each kill lands 2b in (`pre: 2b`) on markers `hit1`..`hit5` with a shake + chroma hit and `synth:hit` |
-| Moment | 26-48 | 13-24 s | build-up cut on the kill (`pre` = `hold`); at `drop` a white dip, `freeze` 6f in, camera push to 1.85x, shake/chroma/bloom, boom + bass drop; 0.4x replay with trails at `replay`; a second look at `look2` |
-| Out | 48-60 | 24-30 s | round won (`win`), then GG over a blurred later frame (`gg`), 1 s fade to black |
+| Run | 2-26 | 1-13 s | round start, then five kills, 4b each; each kill lands 2b in (`pre: 2b`) on markers `hit1`..`hit5` (`shown:match/kind=kill#N`) with a shake + chroma hit and `synth:hit` |
+| Moment | 26-48 | 13-24 s | build-up cut on the kill (`pre` = `hold`); at `drop` a white dip, `freeze` 6f in, camera push to 1.85x, shake/chroma/bloom, boom + bass drop; 0.4x replay with trails at `replay`; a second look at `replay+6b` (its kill at `replay+6b+0.5s`) |
+| Out | 48-60 | 24-30 s | round won (`win`), then GG over a blurred frame 2 s after the win (`pre: -2s`, `gg`), 1 s fade to black |
 
 `audio.sfx: auto` adds whooshes on the whip/zoom transitions and a riser peaking at `drop`.
 
@@ -34,14 +34,16 @@ with its event log through `montaj ingest-rec --events`, the caption words (`wor
   `assets/<clip>.events.json`; a miss lists the values present) and `pre` (how much lead-in before the event).
   The demo log has `kind: round` (`phase: start|end`, `result`) and `kind: kill` (`streak`, `weapon`, `label: ace`
   on the key one). Real logs differ: match on whatever fields they carry.
-- `hitN` markers sit at shot start + `pre`. Keep `pre: 2b` and 4b holds and the markers stay right; change a `pre`
-  or a hold and move that shot's marker with it (the effects and `synth:hit` follow the marker).
+- `hitN` markers are `shown:match/kind=kill#N`: the kill on the film clock, through the shot whose `at_event` picked
+  it. Change a `pre`, a hold or a `speed` and the marker (with its effects and `synth:hit`) moves with the shot;
+  pick different kills by changing the shot's `at_event` and the marker's selector together.
 - Freeze shot: `freeze` is when the picture stops (just after the kill flash), `camera` `focus` is what to punch
   in on, in source px (demo: `[800, 320]` holds the target and the ACE banner 6f after the kill). Find it with
   `montaj sheet`; the camera push keeps moving over the frozen frame, so `check` does not see a stall.
 - Replay: `speed` x hold must stay inside the clip (`ERR shots[i]: clip ends at …` says by how much); the kill lands
   at `pre / speed` into the shot, so `replay+2s` follows `pre: 0.8s` at `0.4`.
-- Last shot uses a plain `clip_in` (any calm frame after the win) under the blurred GG title.
+- Last shot: the win event with a negative `pre` (`-2s`: start 2 s after it), any calm frame under the blurred GG
+  title; it must still start inside the clip.
 - Effect strength: shake px and chroma split ramp up toward the key moment; keep that order when retuning.
 
 ## Pacing targets (`check.pacing`)

@@ -216,3 +216,63 @@ def test_reingest_other_video_drops_stale_events(tmp_path: Path) -> None:
     assert sidecar.is_file()
     assert main(["-C", str(tmp_path), "ingest-rec", "two/take.mp4"]) == 0  # different bytes
     assert not sidecar.exists()
+
+
+def test_negative_pre_starts_after_the_event(tmp_path: Path) -> None:
+    tl = _tl(tmp_path, "  - {clip: take, hold: 30f, at_event: {kind: key}, pre: -1s}\n")
+    assert tl.shots[0].spec.clip_in == "8s"
+
+
+# `shown:` -- an event on the film clock, through the shot whose at_event picked it.
+_SHOWN = (
+    "  - {photo: a, hold: 30f}\n"
+    "  - {clip: take, hold: 120f, at_event: {state: speaking}, pre: 0.5s, speed: 0.5,"
+    " effects: [{type: shake, amount: 10, at: hit, dur: 4f}]}\n"
+    "  - {clip: take, hold: 60f, at_event: {state: speaking}}\n"
+)
+
+
+def test_shown_marker_maps_event_through_its_shot(tmp_path: Path) -> None:
+    extra = 'markers:\n  hit: "shown:take/state=speaking"\n  after: hit+2f+1s\n'
+    tl = _tl(tmp_path, _SHOWN, extra=extra)
+    # shot 1 starts at 30f; the event is 0.5s into the source, played at 0.5x -> 60f into the shot.
+    assert tl.markers["hit"] == pytest.approx(90.0)
+    assert tl.markers["after"] == pytest.approx(152.0)
+    assert tl.shots[1].spec.effects[0].at == 60  # materialised on the shot clock
+
+
+def test_shown_marker_follows_the_shot_and_reaches_the_hash(tmp_path: Path) -> None:
+    extra = 'markers:\n  hit: "shown:take/state=speaking"\n'
+    (tmp_path / "one").mkdir()
+    (tmp_path / "two").mkdir()
+    tl1 = _tl(tmp_path / "one", _SHOWN, extra=extra)
+    tl2 = _tl(tmp_path / "two", _SHOWN.replace("hold: 30f}", "hold: 40f}"), extra=extra)
+    assert tl2.markers["hit"] == pytest.approx(100.0)
+    shas = {"take": "s", "a": "s2"}
+    assert segment_hash(tl1, tl1.segments[1], shas, "e") != segment_hash(tl2, tl2.segments[1], shas, "e")
+
+
+def test_shown_marker_errors(tmp_path: Path) -> None:
+    (tmp_path / "a").mkdir()
+    msg = _errs(tmp_path / "a", _SHOWN, extra='markers:\n  hit: "shown:take/kind=key"\n')
+    assert "markers.hit: event kind=key in take is not shown by any shot" in msg
+    (tmp_path / "b").mkdir()  # picked, but the shot starts after it
+    msg = _errs(tmp_path / "b", "  - {clip: take, hold: 30f, at_event: {kind: key}, pre: -1s}\n",
+                extra='markers:\n  hit: "shown:take/kind=key"\n')
+    assert "markers.hit: event kind=key in take is not shown by any shot" in msg
+    (tmp_path / "c").mkdir()
+    msg = _errs(tmp_path / "c", _SHOWN, extra='markers:\n  hit: "shown:take/state=done"\n')
+    assert "markers.hit: no event state=done in take" in msg
+    (tmp_path / "d").mkdir()
+    msg = _errs(tmp_path / "d", _SHOWN + "  - {photo: a, until: hit}\n", extra='markers:\n  hit: "shown:take/state=speaking"\n')
+    assert "shots[3].until: 'hit' is on a shot's clock" in msg and "unknown marker" not in msg
+
+
+def test_negative_pre_past_the_clip_end_is_an_error(tmp_path: Path) -> None:
+    if not shutil.which("ffmpeg"):
+        pytest.skip("ffmpeg missing")
+    p = _proj(tmp_path, "  - {clip: take, hold: 10f, at_event: {kind: key}, pre: -1s}\n")
+    subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", "color=c=black:size=64x64:rate=60:duration=7.5",
+                    "-c:v", "libx264", str(p.parent / "assets" / "take.mp4")], check=True)
+    with pytest.raises(SpecError, match=r"shots\[0\].pre: -1s starts after the clip ends"):
+        resolve(load_spec(p), p.parent)

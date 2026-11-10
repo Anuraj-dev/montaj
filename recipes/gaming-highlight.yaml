@@ -9,8 +9,18 @@
 # Demo assets (no real footage): montaj new <project> --recipe gaming-highlight. Slots: gaming-highlight.md.
 video: {size: 1920x1080, fps: 60, bpm: 120, look: cool-tech, background: "#05060d", outro: {type: fade, dur: 1s}}
 assets: assets
-# hitN: film time of the N-th kill (shot start + its `pre`); drop: the key moment (sfx: auto peaks a riser here).
-markers: {hit1: 8b, hit2: 12b, hit3: 16b, hit4: 20b, hit5: 24b, drop: 30b, replay: 38b, look2: 44b, win: 48b, gg: 54b}
+# hitN: the N-th kill on the film clock, through the shot whose at_event picked it (moves with that shot's
+# start, pre and speed). drop: the key moment (sfx: auto peaks a riser here).
+markers:
+  hit1: shown:match/kind=kill#1
+  hit2: shown:match/kind=kill#2
+  hit3: shown:match/kind=kill#3
+  hit4: shown:match/kind=kill#4
+  hit5: shown:match/kind=kill#5
+  drop: 30b
+  replay: 38b
+  win: 48b
+  gg: 54b
 shots:
   # ---- Hook (0b-2b): the key moment first, half speed, tinted by a chroma split ----
   - clip: match
@@ -85,11 +95,12 @@ shots:
     hold: 4b
     camera: [{t: 0f, zoom: 1.4, focus: [640, 360]}, {t: 4b, zoom: 1.1, ease: outc}]
     in: {type: whip, dur: 8f}
-    effects: [{type: chroma, amount: 1.4, at: look2+0.5s, dur: 8f}]
+    effects: [{type: chroma, amount: 1.4, at: replay+6b+0.5s, dur: 8f}]  # the kill, pre 0.5s into the second look
   # ---- Out (48b-60b) ----
   - {clip: match, at_event: {kind: round, phase: end, result: win}, pre: 1s, hold: 6b, in: {type: zoom, dur: 8f}}
   - clip: match
-    clip_in: 52s
+    at_event: {kind: round, phase: end, result: win}
+    pre: -2s  # a calm frame 2 s after the win
     hold: 6b
     in: {type: fade, dur: 12f}
     effects: [{type: blur, amount: [{t: 0f, v: 2}, {t: 1s, v: 16}]}]
@@ -110,7 +121,7 @@ audio:
     - {src: "synth:boom", at: drop, gain: -10dB}
     - {src: "synth:bass-drop", at: drop, gain: -14dB}
     - {src: "synth:shutter", at: drop+0.15s, gain: -12dB}
-    - {src: "synth:hit", at: [replay+2s, look2+0.5s], gain: -12dB}
+    - {src: "synth:hit", at: [replay+2s, replay+6b+0.5s], gain: -12dB}
     - {src: "synth:ding", at: win, gain: -12dB}
 check:
   expect:
