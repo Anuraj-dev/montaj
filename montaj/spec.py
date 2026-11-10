@@ -525,6 +525,7 @@ def _expand_lower_third(data: object) -> object:
 LAYER_BLENDS = ("normal", "screen", "add", "multiply", "overlay", "soft-light", "difference")
 LAYER_FITS = ("cover", "contain")
 LAYER_ANIMS = ("fade", "pop")
+MATTES = ("subject",)  # #36: the person matte `montaj ingest --matte` computes
 
 
 EFFECT_TYPES = ("shake", "blur", "bloom", "chroma", "trails")
@@ -611,6 +612,8 @@ class Layer(Frozen):
     out: LayerAnim | None = Field(default=None, exclude_if=_none)
     # Built-in effects on this layer (#38): shake moves it, trails echo it, the rest filter its pixels.
     effects: list[Effect] | None = Field(default=None, exclude_if=_none)
+    # `subject`: cut the layer to its source's matte (#36); it also becomes the plane `behind` text sits under.
+    mask: str | None = Field(default=None, exclude_if=_none)
 
 
 class CardSpec(Frozen):
@@ -654,6 +657,8 @@ class Shot(Frozen):
     effects: list[Effect] | None = Field(default=None, exclude_if=lambda v: v is None)
     # Back to front; replaces the single source (#34). Absent stays out of model_dump.
     layers: list[Layer] | None = Field(default=None, exclude_if=lambda v: v is None)
+    # `subject` on a clip shot: its ingested matte is the plane `behind` text sits under (#36). Absent stays out.
+    matte: str | None = Field(default=None, exclude_if=lambda v: v is None)
     in_: Transition | None = Field(default=None, alias="in")
     flash: float | None = None
     # Linked clip audio (#40): the clip's own sound follows this shot. Audio-only, so
@@ -704,6 +709,8 @@ class TextBlock(Frozen):
     backdrop: Annotated[TextBackdrop | None, BeforeValidator(_coerce_backdrop)] = Field(
         default=None, exclude_if=lambda v: v is None
     )
+    # `subject`: drawn between the picture and the on-screen subject's matte (#36). Absent stays out.
+    behind: str | None = Field(default=None, exclude_if=lambda v: v is None)
     lines: list[TextLine]
 
     @model_validator(mode="before")
@@ -2584,6 +2591,7 @@ def validate_spec(
         parsed[f"shots[{i}].end"] = end
         holds.append(h)
 
+    _validate_mattes(spec, spec_dir, errors)
     clip_ins: dict[int, str] = {}
     for i, sh in enumerate(spec.shots):
         h = holds[i]
@@ -3329,6 +3337,53 @@ def _layer_values(path: str, raw, parsed: dict[str, int], errors: list[str], hol
         if hold is not None and t > hold:
             errors.append(_line(f"{q}.t", f"{t}f is after the end of the {hold}f hold", "use a time inside the hold"))
         prev = t
+
+
+def _validate_mattes(spec: Spec, spec_dir: Path | None, errors: list[str]) -> None:
+    """#36: `matte:` on clip shots, `mask:` on layers, `behind:` on text, and the matte files they read."""
+    from montaj.project import shot_mattes
+
+    for i, sh in enumerate(spec.shots):
+        at = f"shots[{i}]"
+        if sh.matte is not None:
+            if sh.matte not in MATTES:
+                errors.append(_line(f"{at}.matte", f"unknown {sh.matte!r}", f"use {_choices(MATTES)}"))
+            elif sh.clip is None:
+                errors.append(_line(f"{at}.matte", "matte needs a clip shot", "use mask: subject on a layer"))
+        for k, layer in enumerate(sh.layers or ()):
+            if layer.mask is None:
+                continue
+            p = f"{at}.layers[{k}].mask"
+            if layer.mask not in MATTES:
+                errors.append(_line(p, f"unknown {layer.mask!r}", f"use {_choices(MATTES)}"))
+            if layer.shadow:
+                errors.append(_line(f"{at}.layers[{k}].shadow", "a cut-out layer has no box to shadow", "remove shadow"))
+    used = [(i, kind, stem) for i, sh in enumerate(spec.shots) for kind, stem in shot_mattes(sh)]
+    for i, block in enumerate(spec.text):
+        if block.behind is None:
+            continue
+        if block.behind not in MATTES:
+            errors.append(_line(f"text[{i}].behind", f"unknown {block.behind!r}", f"use {_choices(MATTES)}"))
+        elif not used:
+            errors.append(_line(f"text[{i}].behind", "no shot has a subject matte",
+                                "add matte: subject to the clip shot, or mask: subject to a layer"))
+    if spec_dir is None or not used:
+        return
+    from montaj.matte import MatteMissing, find_matte
+    from montaj.project import matte_source
+
+    assets = Path(spec_dir) / spec.assets
+    seen: set[tuple[str, str]] = set()
+    for i, kind, stem in used:
+        if (kind, stem) in seen or not isinstance(stem, str):
+            continue
+        seen.add((kind, stem))
+        try:
+            find_matte(assets, matte_source(Path(spec_dir), assets, kind, stem), stem)
+        except MatteMissing as e:
+            errors.append(_line(f"shots[{i}]", str(e), e.hint))
+        except FileNotFoundError:
+            pass  # the missing asset itself is reported by the asset check
 
 
 def _validate_layers(

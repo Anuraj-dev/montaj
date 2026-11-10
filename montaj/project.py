@@ -139,6 +139,22 @@ def shot_clips(shot) -> list[str]:
     return ids
 
 
+def shot_mattes(shot) -> list[tuple[str, str]]:
+    """(kind, stem) of every subject matte a shot reads (#36): a `matte:` clip shot, then `mask:` layers."""
+    out: list[tuple[str, str]] = []
+    if getattr(shot, "matte", None) is not None and shot.clip is not None:
+        out.append(("clip", shot.clip))
+    for layer in shot.layers or ():
+        if getattr(layer, "mask", None) is not None:
+            out.append(("clip", layer.clip) if layer.clip is not None else ("photo", layer.image))
+    return out
+
+
+def matte_source(spec_dir: Path, assets_dir: Path, kind: str, stem: str) -> Path:
+    """The asset file a matte is computed from."""
+    return resolve_clip(spec_dir, assets_dir, stem) if kind == "clip" else find_photo(assets_dir, stem)
+
+
 def _lookup_sha(asset_sha: dict[str, str], stem: str, kind: str) -> str:
     """`photo:` and `clip:` keys stay distinct when a still and a clip share a stem.
 
@@ -291,12 +307,15 @@ def segment_hash(
     shots = {str(i): _shot_payload(tl.shots[i].spec) for i in sorted(referenced)}
     photos: dict[str, str] = {}
     clips: dict[str, str] = {}
+    mattes: dict[str, str] = {}
     for i in sorted(referenced):
         shot = tl.shots[i].spec
         for pid in _shot_photos(shot):
             photos[pid] = _lookup_sha(asset_sha, pid, "photo")
         for cid in shot_clips(shot):
             clips[cid] = _lookup_sha(asset_sha, cid, "clip")
+        for kind, stem in shot_mattes(shot):
+            mattes[f"{kind}:{stem}"] = asset_sha[f"matte:{kind}:{stem}"]
     payload = {
         "engine_version": engine_version,
         "video": tl.spec.video.model_dump(mode="json"),
@@ -304,6 +323,8 @@ def segment_hash(
         "shots": shots,
         "photos": photos,
     }
+    if mattes:  # the matte file's bytes decide the cutout; absent for every film without one
+        payload["mattes"] = mattes
     look = tl.spec.video.look
     if not isinstance(look, str):  # the .cube bytes, not just its path, decide the pixels
         payload["lut"] = asset_sha[f"lut:{look.lut}"]

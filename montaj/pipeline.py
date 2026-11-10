@@ -13,7 +13,8 @@ from montaj.audio.mix import plan_audio, render_mix
 from montaj.encode import Encoder, Target, VideoSettings, concat, mux
 from montaj.gpu_policy import GpuPolicy, load_policy, resolve_device
 from montaj.gpulock import hold as gpu_hold
-from montaj.project import file_sha, find_photo, resolve_clip, segment_hash, shot_clips
+from montaj.matte import find_matte
+from montaj.project import file_sha, find_photo, matte_source, resolve_clip, segment_hash, shot_clips, shot_mattes
 from montaj.render.canvas import Canvas
 from montaj.render.frame import Renderer
 from montaj.spec import Spec, _dur_frames, _parse_beat0, load_spec
@@ -98,6 +99,12 @@ def _asset_shas(spec: Spec, spec_dir: Path) -> dict[str, str]:
         key = f"clip:{cid}"
         if key not in out:
             out[key] = file_sha(resolve_clip(spec_dir, assets, cid))
+    for shot in spec.shots:
+        for kind, stem in shot_mattes(shot):
+            key = f"matte:{kind}:{stem}"
+            if key not in out:
+                src = matte_source(spec_dir, assets, kind, stem)
+                out[key] = file_sha(find_matte(assets, src, stem))
     look = spec.video.look
     if not isinstance(look, str):
         out[f"lut:{look.lut}"] = file_sha(spec_dir / look.lut)
