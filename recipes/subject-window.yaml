@@ -1,0 +1,26 @@
+# Colour secondaries on people (#44): a power window that follows the subject, a darker graded background
+# through the inverted matte, and a film look with skin protected. Needs subject mattes and, ideally, faces:
+#   montaj ingest --matte hero --matte point      (no face boxes -> the face window follows the matte centroid)
+# 120 BPM, 9:16, no text, no audio.
+video: {size: 1080x1920, fps: 30, bpm: 120, look: clean, outro: {type: fade, dur: 20f}}
+assets: assets
+grades:
+  people:
+    temp: 300
+    contrast: 1.1
+    secondaries:
+      # Background: down a stop, cooler and less saturated.
+      - {matte: subject, invert: true, adjust: {exposure: -0.9, temp: -900, saturation: 0.7}}
+      # A soft lift on the face that tracks the person through the shot.
+      - window: {ellipse: {center: face, radius: [260, 320], feather: 220, offset: [0, -120]}}
+        adjust: {exposure: 0.35, vibrance: 0.15}
+      # A sky/top-of-frame grad: pull the top third down.
+      - window: {gradient: {from: [540, 0], to: [540, 760]}}
+        adjust: {exposure: -0.4}
+    protect: skin
+    look:
+      film: {stock: warm-negative, halation: 0.35, bloom: 0.15, grain: {amount: 0.25, size: 1.3}, gate_weave: 0.2}
+      split_tone: {shadows: "#16384a", highlights: "#ffd7a8", amount: 0.25}
+shots:
+  - {clip: hero, hold: 6b, matte: subject, grade: people}
+  - {clip: point, hold: 6b, matte: subject, grade: people, in: {type: whip, dur: 8f}}

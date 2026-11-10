@@ -27,7 +27,8 @@ from montaj.matte import find_matte
 from montaj.project import find_photo, matte_source, resolve_clip, shot_clips, shot_mattes
 from montaj.render.canvas import Canvas
 from montaj.render.clip import ClipSource, window_key
-from montaj.render.color import grade, to_display, to_linear
+from montaj.grade import extras as grade_extras
+from montaj.render.color import GradeContext, apply as apply_grade, grade, to_display, to_linear
 from montaj.render.core import Photo, fit_s, sine, still
 from montaj.render.custom import CustomRunner
 from montaj.render import effects as fxlib
@@ -36,6 +37,7 @@ from montaj.render.layers import (
     LayerState, LayerTexture, base_box, base_pos, box_growth, composite, load_rgba, peak_scale_world, sample, world_state,
 )
 from montaj.render.shots import (
+    _fit,
     card_frame,
     css_blur,
     drift,
@@ -1215,14 +1217,33 @@ class Renderer:
                                 fx.frames or fxlib.TRAIL_FRAMES, decay)
         return fxlib.frame_effect(self.cv, self._effect_chain(scene, shot, t, n - 1), fx, local, self.tl.fps)
 
-    def _color(self, scene: Scene, img: torch.Tensor) -> torch.Tensor:
-        """Input transform and primary grade on one shot's picture, before its effects (#43)."""
+    def _color(self, scene: Scene, img: torch.Tensor, t: float) -> torch.Tensor:
+        """Input transform and grade on one shot's picture, before its effects (#43, #44)."""
         g = None if isinstance(scene, Blank) else self.tl.shots[scene.shot].spec.grade
         if g is None and not self._linear:
             return img  # display mode, no grade: untouched, so existing films stay bit-identical
         self._seam_grade("primary grade" if g is not None else "linear transform")
-        lin = to_linear(img) if g is None else grade(to_linear(img), g)
+        if g is None:
+            lin = to_linear(img)
+        elif grade_extras(g):
+            ctx = GradeContext(self.cv.k, t, float(self.tl.fps), lambda: self._subject(scene, t),
+                               lambda pt: self._screen_point(scene, pt, t))
+            lin = apply_grade(to_linear(img), g, ctx)
+        else:
+            lin = grade(to_linear(img), g)
         return lin if self._linear else to_display(lin)
+
+    def _screen_point(self, scene: Scene, pt: tuple[float, float], t: float) -> tuple[float, float] | None:
+        """A clip shot's source-px point in device px at `t`, through the same cover fit and camera (#44)."""
+        if not isinstance(scene, Clip):
+            return None
+        plan = self._clip_plan(scene.shot)
+        box = plan.box if plan.box is not None else (0, 0, *self._clip_size(plan.stem))
+        z, fx, fy = 1.0, 0.5, 0.5
+        if plan.box is not None:
+            z, fx, fy = camera_at(self._camera_keys(self.tl.shots[scene.shot].spec), plan.box, t - scene.t0)
+        s, _w, _h, tx, ty = _fit(self.cv, box[2] - box[0], box[3] - box[1], fx, fy, z, 0.0, 0.0)
+        return tx + (pt[0] - box[0]) * s, ty + (pt[1] - box[1]) * s
 
     def _seam_grade(self, what: str) -> None:
         if self._policy is None:
@@ -1235,7 +1256,7 @@ class Renderer:
     def _eval(self, scene: Scene, t: float, effects: bool = True, color: bool = True) -> torch.Tensor:
         if color and not isinstance(scene, Trans) and (
                 isinstance(scene, Blank) or not (effects and self.tl.shots[scene.shot].spec.effects)):
-            return self._color(scene, self._eval(scene, t, effects, color=False))
+            return self._color(scene, self._eval(scene, t, effects, color=False), t)
         if isinstance(scene, Blank):
             return self._background()
         if effects and not isinstance(scene, Trans) and self.tl.shots[scene.shot].spec.effects:
