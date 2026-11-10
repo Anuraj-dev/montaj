@@ -31,7 +31,10 @@ from montaj.guards import content_guards
 from montaj.qa import BLACK_PIX_TH, FREEZE_MIN_S, Expect, check, clip_overruns, subtract, union
 from montaj.review.server import serve as serve_review
 from montaj.review.summary import summary as review_summary
-from montaj.sheet import MAX_TILES, every_times, pick_times, sheet, sheets
+from montaj.sheet import (
+    BASE_DIR, MAX_TILES, every_times, motion_sheet, pick_times, sheet, sheets, step_frames, strip_row,
+    transition_rows,
+)
 from montaj.spec import INCOMING_TRANS, SpecError, _dur_frames, load_spec
 from montaj.timeline import Blank, Card, Sequence, Still, Wall, resolve, sequence_index, wall_static_spans
 from montaj.watch import watch
@@ -87,6 +90,11 @@ def _parser() -> argparse.ArgumentParser:
     when = sh.add_mutually_exclusive_group()
     when.add_argument("--at", default=None)
     when.add_argument("--every", default=None)
+    when.add_argument("--strip", default=None)
+    when.add_argument("--transitions", action="store_true")
+    sh.add_argument("--diff", action="store_true")
+    sh.add_argument("--frames", type=int, default=8)
+    sh.add_argument("--step", default="1f")
     sh.add_argument("--video", default=None)
 
     ck = sub.add_parser("check")
@@ -352,10 +360,41 @@ def _shown_frames(times: list[float], info: MediaInfo) -> int:
     return len({min(max(0, int(round(t * info.fps))), n_frames - 1) for t in times})
 
 
+def _cmd_motion_sheet(ns: argparse.Namespace, root: Path, video: Path, info: MediaInfo, log: Path) -> list[str]:
+    """`sheet --strip / --transitions / --diff`: one image of consecutive frames or transition rows."""
+    if ns.at or ns.every:
+        raise ValueError("sheet --diff: combine it with --strip or --transitions, not --at/--every")
+    spec_file = root / "montaj.yaml"
+    tl = resolve(load_spec(spec_file), root) if spec_file.is_file() else None
+    n_frames = int(round(info.duration * info.fps)) or 1
+    note = ""
+    if ns.strip is not None:
+        center = int(round(_seconds(str(ns.strip), flag="--strip") * info.fps))
+        rows = strip_row(tl, min(max(0, center), n_frames - 1), ns.frames, step_frames(ns.step, info.fps), n_frames, info.fps)
+        name = "sheet-strip.jpg"
+    else:
+        if tl is None:
+            raise FileNotFoundError("sheet --transitions: no montaj.yaml in the project")
+        rows, total = transition_rows(tl, info.fps)
+        if not rows:
+            raise ValueError("sheet --transitions: the spec has no transitions")
+        note = f" of {total}" if total > len(rows) else ""
+        name = "sheet-transitions.jpg"
+    if ns.diff:
+        name = "sheet-diff.jpg"
+    out = root / "build" / name
+    motion_sheet(video, out, rows, base_dir=root / "build" / BASE_DIR, diff=ns.diff, log=log)
+    shown = sum(len(r.tiles) for r in rows)
+    n_rows = sum(1 for r in rows if r.label)
+    return [f"OK build/{name} {n_rows} rows{note} {shown} frames"]
+
+
 def _cmd_sheet(ns: argparse.Namespace, root: Path) -> list[str]:
     video = _video(root, ns.video)
     log = root / "build" / "sheet.log"
     info = probe(video, log=log)
+    if ns.strip is not None or ns.transitions or ns.diff:
+        return _cmd_motion_sheet(ns, root, video, info, log)
     out = root / "build" / "sheet.jpg"
     if ns.every is not None:
         interval = _seconds(str(ns.every), flag="--every")
