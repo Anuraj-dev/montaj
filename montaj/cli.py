@@ -358,6 +358,9 @@ def _cmd_new(ns: argparse.Namespace, root: Path) -> list[str]:
         return [f"ERR new: recipe {src.stem!r} ships no demo assets: pass --photos <folder>"]
     dest.mkdir(parents=True, exist_ok=True)
     shutil.copyfile(src, dest / "montaj.yaml")
+    local = src.with_suffix("")  # recipes/<name>/: the recipe's own draw files, beside the spec
+    if local.is_dir():
+        shutil.copytree(local, dest / local.name, dirs_exist_ok=True, ignore=shutil.ignore_patterns("__pycache__"))
     if ns.photos is None:
         return _recipe_demo(demo, dest)
     assets = _assets_dir(dest, _assets_rel(src))

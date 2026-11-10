@@ -873,3 +873,20 @@ def test_new_list_reads_each_recipe(
 
     code, out, _ = _run(["new"], capsys)
     assert code == 1 and out.startswith("ERR new:")
+
+
+def test_new_copies_the_recipe_local_directory(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    recipes = tmp_path / "recipes"
+    (recipes / "r").mkdir(parents=True)
+    (recipes / "r.yaml").write_text("assets: assets\n")
+    (recipes / "r" / "draw.py").write_text("x = 1\n")
+    monkeypatch.setattr("montaj.cli.RECIPES", recipes)
+    monkeypatch.chdir(tmp_path)
+    photos = tmp_path / "photos"
+    _jpeg(photos, "a", (1, 2, 3))
+
+    code, out, _ = _run(["new", "p", "--recipe", "r", "--photos", "photos"], capsys)
+    assert code == 0, out
+    assert (tmp_path / "p" / "r" / "draw.py").read_text() == "x = 1\n"

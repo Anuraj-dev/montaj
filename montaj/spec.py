@@ -507,7 +507,7 @@ class LowerThird(Frozen):
     subtitle: str | None = None
     at: TimeExpr | None = None
     side: str = "left"
-    y: float = 1500.0
+    y: float = 1500.0  # 9:16 value; `Spec` rescales an unset y to the frame height
 
 
 def _expand_lower_third(data: object) -> object:
@@ -981,6 +981,24 @@ class Spec(Frozen):
     grades: dict[str, Grade] | None = Field(default=None, exclude_if=_none_value)
     # Authoring-only (#41): `expand_emphasis` turns it into effects, camera keys, fx, clips and caption overrides.
     emphasis: list[Emphasis] | None = Field(default=None, exclude_if=_none)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _lower_third_y(cls, data: object) -> object:
+        """An unset `lower_third.y` is 1500 on a 1920-tall frame, the same fraction of other heights, and always
+        leaves 210 design px below it for the chip and the subtitle line."""
+        if not isinstance(data, dict) or not isinstance(data.get("text"), list):
+            return data
+        video = data.get("video")
+        m = _WH.match(str(video.get("size", "")).strip()) if isinstance(video, dict) else None
+        if not m or int(m[1]) <= 0:
+            return data
+        w, h = int(m[1]), int(m[2])
+        design_h = 1080 * h / w
+        y = 1500.0 if h * 1080 == 1920 * w else min(1500.0 * design_h / 1920.0, design_h - 210.0)
+        blocks = [dict(b, lower_third={"y": y, **b["lower_third"]})
+                  if isinstance(b, dict) and isinstance(b.get("lower_third"), dict) else b for b in data["text"]]
+        return {**data, "text": blocks}
 
 
 def _yaml_path(loc: tuple) -> str:

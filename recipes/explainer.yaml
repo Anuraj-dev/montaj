@@ -63,7 +63,7 @@ text:
       - {text: "Demand creeps toward *capacity*", style: sans, weight: 700, size: 46, y: 36, at: load+0.3s, in: {type: slide, from: left}, emphasis: {color: "#ffb84d"}}
   - from: load+0.8s
     to: load+5.5s
-    lower_third: {title: "Part 1 · Load", subtitle: "arrivals per hour, five busy hours", y: 410}
+    lower_third: {title: "Part 1 · Load", subtitle: "arrivals per hour, five busy hours"}
   # ---- Part 2 ----
   - from: wait+0.4s
     to: zone
@@ -72,7 +72,7 @@ text:
       - {text: "Wait time = ρ / (1 − ρ)", style: mono, weight: 700, size: 40, y: 36, at: wait+0.4s, reveal: type, cursor: true}
   - from: wait+0.9s
     to: wait+5.5s
-    lower_third: {title: "Part 2 · Waiting", subtitle: "x: utilisation  ·  y: average wait", y: 410}
+    lower_third: {title: "Part 2 · Waiting", subtitle: "x: utilisation  ·  y: average wait"}
   - from: zone+0.2s
     to: fix
     fade_out: 0.3s
@@ -86,7 +86,7 @@ text:
       - {text: "One server: the queue backs up", style: sans, weight: 700, size: 46, y: 36, at: fix+0.4s, in: {type: slide, from: left}}
   - from: fix+0.9s
     to: fix+5.5s
-    lower_third: {title: "Part 3 · The fix", subtitle: "add slack, not speed", y: 410}
+    lower_third: {title: "Part 3 · The fix", subtitle: "add slack, not speed"}
   - from: two+0.2s
     to: takeaway
     fade_out: 0.3s
