@@ -3663,11 +3663,13 @@ def _validate_layers(
 
 
 def layer_warnings(spec: Spec, spec_dir: Path | None = None) -> list[str]:
-    """`WARN` lines for layers that validate but sit partly off-frame."""
+    """`WARN` lines for layers that validate but sit partly off-frame, and grade fallbacks (#44)."""
+    from montaj.grade import grade_warnings
+
     frame = _design_frame(spec)
     if frame is None:
-        return []
-    out: list[str] = []
+        return grade_warnings(spec, spec_dir)
+    out: list[str] = grade_warnings(spec, spec_dir)
     for i, sh in enumerate(spec.shots):
         for k, layer in enumerate(sh.layers or ()):
             ext = _layer_extent(spec, spec_dir, layer)

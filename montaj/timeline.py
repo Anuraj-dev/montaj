@@ -8,7 +8,7 @@ import zlib
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
-from montaj.grade import resolve_grades
+from montaj.grade import resolve_faces, resolve_grades
 from montaj.render.core import EASE as EASE_FN, key as eval_key
 from montaj.render import motion as M
 from montaj.render.glyphs import FontBook, GlyphRun, layout_line, parse_emphasis, plan_text
@@ -1089,6 +1089,7 @@ def resolve(spec: Spec, spec_dir: Path) -> Timeline:
         raise SpecError(errors)
     assert size is not None
     spec = resolve_grades(spec)  # named grades -> values, so each shot's hash sees its own grade
+    spec = resolve_faces(spec, spec_dir)  # center: face -> ingest's face point, hashed with the grade
     spec = spec.model_copy(
         update={
             "video": spec.video.model_copy(

@@ -67,6 +67,21 @@ Photo fields (`crop`, `focus`, swirl `center`, wall `at`) are source-image pixel
 - `shots[].grade.saturation` — number 0..4, default `1` — about Rec.709 luminance; `0` is monochrome.
 - `shots[].grade.vibrance` — number −1..1, default `0` — saturation that favours muted pixels.
 - `shots[].grade.curves.luma` — `[[x, y], …]`, default none — monotone cubic on display-encoded luminance, ≥ 2 points in 0..1 with x increasing; hue is kept. Beyond the end points it continues at slope 1.
+- `shots[].grade.secondaries` — list, default none — after the primary, each entry blends `grade(picture, adjust)` in by its mask: key × window × matte (the ones given), then `invert`.
+- `shots[].grade.secondaries[].key` — mapping, default none — HSL qualifier on display values: `hue: [lo, hi]` degrees 0..360 (`[340, 20]` wraps), `sat`/`luma: [lo, hi]` 0..1; at least one.
+- `shots[].grade.secondaries[].key.soft` — number 0..1, default `0.05` — soft edge as a fraction of each scale (hue: ·360).
+- `shots[].grade.secondaries[].window.ellipse` — mapping, default none — `center: [x, y]` design px, `subject` (matte centroid, per frame) or `face` (largest ingest face box at the shot start, mapped through the camera; no boxes → subject centroid with a `validate` warning); `radius: r | [rx, ry]` design px; `feather` design px (default `0`), centred on the radius; `offset: [dx, dy]` design px.
+- `shots[].grade.secondaries[].window.gradient` — mapping, default none — `from: [x, y]`, `to: [x, y]` design px; 1 at `from`, 0 at `to`. A window has exactly one of ellipse or gradient.
+- `shots[].grade.secondaries[].matte` — `subject`, default none — the shot's subject matte; needs `matte: subject` on the shot (or a masked layer). `center: subject|face` needs it too.
+- `shots[].grade.secondaries[].invert` — bool, default `false` — selects everything the mask does not.
+- `shots[].grade.secondaries[].adjust` — mapping, required — any primary grade fields (exposure … curves).
+- `shots[].grade.protect` — `skin`, default none — keeps skin-tone chroma through the stock and split tone (luminance still changes). Does not undo secondaries.
+- `shots[].grade.look.film.stock` — `warm-negative` | `cool-negative` | `print` | `bleach-bypass`, default none — a fixed primary (toe/shoulder curve, crossover) applied after the secondaries.
+- `shots[].grade.look.film.halation` — number 0..1, default `0` — red-weighted glow around highlights above display 0.5.
+- `shots[].grade.look.film.bloom` — number 0..1, default `0` — wide neutral glow from highlights.
+- `shots[].grade.look.film.grain` — `{amount 0..1, size 0.5..4 design px (default 1)}`, default none — monochrome grain in linear light, strongest in midtones, none in black; seeded per output frame.
+- `shots[].grade.look.film.gate_weave` — number 0..1, default `0` — smooth sub-pixel frame wander (up to 3 design px).
+- `shots[].grade.look.split_tone` — `{shadows, highlights: "#rrggbb", balance −1..1 (default 0), amount 0..1 (default 0.3)}`, default none — tints shadows and highlights while keeping each pixel's luminance.
 - `grades` — mapping of name → grade, default none — reusable grades; `shots[].grade: warm-day` uses one. Names are lowercase letters, digits, `-` and `_`.
 - `shots[].frame` — mapping, default none — polaroid card on a blurred copy of the photo. Needs `photo`.
 - `shots[].frame.caption` — string, default none — Great Vibes caption on the card.
