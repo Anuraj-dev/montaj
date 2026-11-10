@@ -2,13 +2,13 @@
 > Agent-native video harness: YAML spec in, finished video out, zero-token re-render/review · Last checkpoint: 2026-11-10
 
 ## Issue status (source of truth; 2026-11-10)
-- **Closed** (merged to `main`, closed on GitHub with merge sha): #1–19, #20, #21, #22, #25, #27, #28, #29, #30, #31, #33.
+- **Closed** (merged to `main`, closed on GitHub with merge sha): #1–19, #20, #21, #22, #23, #25, #27, #28, #29, #30, #31, #33.
   Do not reopen or re-implement these. Changes go in a new issue or a follow-up commit.
-- **In progress** (label `in-progress` on GitHub; a worker owns each worktree): #23 `i23`, #32 `i32`, #42 `i42`.
+- **In progress** (label `in-progress` on GitHub; a worker owns each worktree): #32 `i32`, #42 `i42`.
   Do not touch another worker's worktree. Driver merges.
 - **Open, not started:** #24, #26, #34–#41, #43–#48. Next per ROADMAP order: #24, #26, then M8 (#34 first).
 - Tracker #49 checkboxes match this list.
-- M5 4/7 · M6 3/3 done · M7 3/4 (#32 in progress) · M8–M11 0/15.
+- M5 5/7 · M6 3/3 done · M7 3/4 (#32 in progress) · M8–M11 0/15.
 
 ## 🚧 In progress / next
 - Next: `docs/ROADMAP.md` (M5–M11, issues #20–#48, tracker #49). Caption design contract: `docs/CAPTIONS.md`.
