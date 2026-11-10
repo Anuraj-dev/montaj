@@ -38,6 +38,7 @@ TOPICS: dict[str, str] = {
     "ingest": "montaj ingest, mattes, event logs of screen recordings",
     "gpu": "strict dGPU mode (machine config)",
     "export": "delivery codecs and export targets",
+    "messages": "what each check/validate WARN means and how to fix or accept it",
     "other": "",
 }
 
@@ -56,6 +57,7 @@ _SECTIONS: dict[str, str] = {
     "event logs": "ingest",
     "strict dgpu": "gpu",
     "delivery codecs": "export",
+    "check and validate messages": "messages",
 }
 
 # First match wins. Matched against the first backticked token of a main-list bullet.

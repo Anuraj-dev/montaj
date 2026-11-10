@@ -1,10 +1,13 @@
-"""Caption lints for `montaj check` (#24): reading rate, platform safe zones, contrast, faces.
+"""Caption lints for `montaj check` (#24, #57): reading rate, platform safe zones, contrast, faces.
 
-A caption chunk is the run of consecutive caption blocks (made by `captions`, or authored ones that look
-like captions, see `spec.is_caption_block`) that show the same words. Chunk numbers match
-`montaj captions --print`. Rate and safe zones come from the resolved layout; contrast and faces are
-measured on one frame decoded from the rendered video per chunk. `check.expect: [{caption: [a, b]}]`
-silences a designed exception inside a span, as black and frozen spans do.
+A caption chunk is the run of consecutive caption blocks (made by `captions`, or authored ones the caption
+rule picks, see `spec.is_caption_block`) that show the same words. Every finding names where to fix it: the
+chunk's `text[i]` (its index in the spec's `text:` list) or, for a chunk `captions` made, `captions[N]` (chunk
+N of `montaj captions --print`), then its time, its text, the measured value and the fix:
+`WARN caption-rate text[4] 3.5-4.0s 'SWITCH WORKSPACES' 32cps (max 20: hold longer or cut words; ...)`.
+Rate and safe zones come from the resolved layout; contrast and faces are measured on one frame decoded from
+the rendered video per chunk. `check.expect: [{caption: [a, b]}]` silences a designed exception inside a span,
+as black and frozen spans do; `role: title` on a block or style takes designed text out of the lints entirely.
 """
 from __future__ import annotations
 
@@ -14,7 +17,7 @@ from pathlib import Path
 
 from montaj.captions import RATE_MAX_CPS, safe_zones, window_cps
 from montaj.render.glyphs import DESIGN_W
-from montaj.spec import is_caption_block
+from montaj.spec import is_caption_block, text_role
 from montaj.timeline import ResolvedLine, Timeline
 
 CONTRAST_MIN = 4.5
@@ -22,16 +25,49 @@ STROKE_GUARANTEES = 0.04  # a stroke at least this fraction of the size separate
 RING = 0.18  # width of the sampled band around the ink, as a fraction of the size
 MAX_SAMPLES = 30  # frames decoded per run; chunks beyond are an even subsample
 _NAMED = {"cream": "#fbf1dc", "gold": "#f0c77e", "ink": "#4a2c1a"}
+_MOVE = {"top": "move it down", "bottom": "move it up", "left": "move it right", "right": "move it left"}
 
 
 @dataclass(frozen=True)
 class Chunk:
-    index: int
+    index: int  # order among the film's caption chunks
     start: int  # frames
     end: int
     text: str
     line: ResolvedLine  # the chunk's first line: layout, colour and stroke
     ink: tuple[float, float, float, float] | None  # design px
+    path: str = ""  # `text[i]` of the chunk's first block, or `captions[N]` for a chunk `captions` made
+    guessed: bool = False  # authored, and a caption only by the look rule (no `role`)
+
+
+@dataclass(frozen=True)
+class Finding:
+    """One caption WARN. `value` / `limit` are what was measured and the bound it broke (None when not a number)."""
+
+    kind: str
+    chunk: Chunk
+    fps: int
+    detail: str  # the measurement as printed: `32cps`, `bottom`, `ratio 1.2`, `over a face`
+    fix: str
+    value: float | str | None = None
+    limit: float | None = None
+
+    @property
+    def line(self) -> str:
+        c = self.chunk
+        return f"WARN {self.kind} {c.path} {_secs(c.start, self.fps)}-{_secs(c.end, self.fps)}s '{c.text}' {self.detail} ({self.fix})"
+
+    def as_dict(self) -> dict:
+        c = self.chunk
+        return {"kind": self.kind, "level": "WARN", "path": c.path, "start": round(c.start / self.fps, 3),
+                "end": round(c.end / self.fps, 3), "text": c.text, "value": self.value, "limit": self.limit,
+                "message": self.line}
+
+
+def _secs(frames: int, fps: int) -> str:
+    """`3.5`, `4.0`, `19.93`: two decimals at most, one at least."""
+    t = f"{frames / fps:.2f}".rstrip("0")
+    return t + "0" if t.endswith(".") else t
 
 
 def _plain(text: str) -> str:
@@ -42,8 +78,10 @@ def chunks(tl: Timeline) -> list[Chunk]:
     """Caption chunks of the resolved timeline, in order."""
     w, h = tl.size
     design_h = DESIGN_W * h / w
+    made = tl.spec.caption_from
     out: list[Chunk] = []
     last: tuple[str, int] | None = None
+    generated = 0
     for i, (res, blk) in enumerate(zip(tl.texts, tl.spec.text)):
         if not res.lines or not is_caption_block(tl.spec, i, blk, design_h):
             last = None
@@ -51,12 +89,17 @@ def chunks(tl: Timeline) -> list[Chunk]:
         text = " ".join(_plain(ln.text) for ln in res.lines)
         if last is not None and last[0] == text and last[1] == len(out) - 1:
             prev = out[-1]
-            out[-1] = Chunk(prev.index, prev.start, round(res.to), prev.text, prev.line, prev.ink)
+            out[-1] = Chunk(prev.index, prev.start, round(res.to), prev.text, prev.line, prev.ink, prev.path, prev.guessed)
             continue
         boxes = [g.ink for ln in res.lines if ln.glyphs is not None for g in ln.glyphs.glyphs if g.ink[2] > g.ink[0]]
         ink = (min(b[0] for b in boxes), min(b[1] for b in boxes), max(b[2] for b in boxes),
                max(b[3] for b in boxes)) if boxes else None
-        out.append(Chunk(len(out), round(res.from_), round(res.to), text, res.lines[0], ink))
+        if made is not None and i >= made:
+            path, guessed = f"captions[{generated}]", False
+            generated += 1
+        else:
+            path, guessed = f"text[{i}]", text_role(blk) is None
+        out.append(Chunk(len(out), round(res.from_), round(res.to), text, res.lines[0], ink, path, guessed))
         last = (text, len(out) - 1)
     return out
 
@@ -65,20 +108,41 @@ def _zones(tl: Timeline) -> dict[str, float]:
     return safe_zones(tl.spec)
 
 
-def rate_lines(cs: list[Chunk], fps: int) -> list[tuple[Chunk, str]]:
-    """Reading rate over a window of consecutive chunks (`captions.window_cps`), one WARN per fast window,
-    named by its first chunk; a window inside one already reported is not repeated."""
+def _breaks(cs: list[Chunk]) -> list[int]:
+    """Chunks shown after a gap: the screen cleared before them, so no reading window reaches across."""
+    return [k for k in range(1, len(cs)) if cs[k].start > cs[k - 1].end]
+
+
+def _cps(c: Chunk, fps: int) -> float:
+    return len(c.text.replace(" ", "")) * fps / max(c.end - c.start, 1)
+
+
+def rate_lines(cs: list[Chunk], fps: int) -> list[Finding]:
+    """Reading rate over a window of contiguous chunks (`captions.window_cps`), one WARN per fast window, named
+    by its densest chunk with that chunk's own rate; a window inside one already reported is not repeated."""
     spans = [(len(c.text.replace(" ", "")), c.end - c.start) for c in cs]
-    out, reported = [], -1
+    breaks = _breaks(cs)
+    out, reported, named = [], -1, set()
     for i in range(len(cs)):
-        a, b, cps = window_cps(spans, i, fps)
+        a, b, cps = window_cps(spans, i, fps, breaks)
         if cps > RATE_MAX_CPS + 1e-9 and a > reported:
-            out.append((cs[a], f"WARN caption-rate chunk={cs[a].index} {cps:.0f}cps"))
             reported = b
+            worst = max(cs[a:b + 1], key=lambda c: _cps(c, fps))
+            if worst.index in named:
+                continue
+            named.add(worst.index)
+            if worst.path.startswith("captions"):
+                fix = f"max {RATE_MAX_CPS:.0f}: fast speech here; cut words in the edit, or accept it with check.expect caption"
+            else:
+                fix = f"max {RATE_MAX_CPS:.0f}: hold longer or cut words"
+                if worst.guessed:
+                    fix += "; designed text, not a caption: role: title"
+            own = _cps(worst, fps)
+            out.append(Finding("caption-rate", worst, fps, f"{own:.0f}cps", fix, round(own, 1), RATE_MAX_CPS))
     return out
 
 
-def safe_lines(cs: list[Chunk], tl: Timeline) -> list[tuple[Chunk, str]]:
+def safe_lines(cs: list[Chunk], tl: Timeline) -> list[Finding]:
     w, h = tl.size
     W, H = DESIGN_W, DESIGN_W * h / w
     z = _zones(tl)
@@ -90,7 +154,12 @@ def safe_lines(cs: list[Chunk], tl: Timeline) -> list[tuple[Chunk, str]]:
         sides = [name for name, hit in (("top", y0 < z["top"] * H), ("bottom", y1 > H - z["bottom"] * H),
                                         ("left", x0 < z["left"] * W), ("right", x1 > W - z["right"] * W)) if hit]
         if sides:
-            out.append((c, f"WARN caption-safe chunk={c.index} {','.join(sides)}"))
+            zone = ", ".join(f"{s} {z[s]:.0%}" for s in sides)
+            move = _MOVE[sides[0]] if len(sides) == 1 else "make it smaller or wrap it"
+            fix = f"in the platform UI zone, {zone}: {move}, or set check.safe"
+            if c.guessed:
+                fix += "; designed text: role: title"
+            out.append(Finding("caption-safe", c, tl.fps, ",".join(sides), fix, ",".join(sides), z[sides[0]]))
     return out
 
 
@@ -177,7 +246,7 @@ def _sample(cs: list[Chunk]) -> list[Chunk]:
 
 
 def frame_lines(cs: list[Chunk], tl: Timeline, video: Path | str, work: Path, *, log: Path | str | None = None,
-                faces=None) -> tuple[list[tuple[Chunk, str]], list[str]]:
+                faces=None) -> tuple[list[Finding], list[str]]:
     """(findings, INFO lines) for contrast and faces on one decoded frame per sampled chunk.
     `faces` replaces the OpenCV detector (tests): image path -> [(x, y, w, h)] in pixels."""
     import numpy as np
@@ -191,7 +260,7 @@ def frame_lines(cs: list[Chunk], tl: Timeline, video: Path | str, work: Path, *,
         notes.append("INFO caption-face skipped: uv sync --extra guards")
     shutil.rmtree(work, ignore_errors=True)
     work.mkdir(parents=True, exist_ok=True)
-    out: list[tuple[Chunk, str]] = []
+    out: list[Finding] = []
     for c in _sample(cs):
         f = c.start + max(0, min(c.end - c.start - 1, 8))  # past the entry motion
         image = work / f"chunk{c.index}-f{f}.png"
@@ -201,12 +270,14 @@ def frame_lines(cs: list[Chunk], tl: Timeline, video: Path | str, work: Path, *,
             frame = np.asarray(im.convert("RGB"))
         r = contrast(c, frame)
         if r is not None and r < CONTRAST_MIN:
-            out.append((c, f"WARN caption-contrast chunk={c.index} ratio={r:.1f}"))
+            out.append(Finding("caption-contrast", c, tl.fps, f"ratio {r:.1f}",
+                               f"min {CONTRAST_MIN:g}: add a stroke or a backdrop, or change the colour", round(r, 2),
+                               CONTRAST_MIN))
         if find is not None and c.ink is not None:
             k = frame.shape[1] / DESIGN_W
             x0, y0, x1, y1 = (v * k for v in c.ink)
             if any(fx < x1 and fx + fw > x0 and fy < y1 and fy + fh > y0 for fx, fy, fw, fh in find(image)):
-                out.append((c, f"WARN caption-face chunk={c.index}"))
+                out.append(Finding("caption-face", c, tl.fps, "over a face", "move it off the face"))
     return out, notes
 
 
@@ -218,26 +289,30 @@ def _label(a: float, b: float) -> str:
 
 
 def lines(tl: Timeline, video: Path | str | None = None, work: Path | None = None, *,
-          log: Path | str | None = None, faces=None) -> list[str]:
+          log: Path | str | None = None, faces=None, found: list[Finding] | None = None) -> list[str]:
     """WARN lines (and INFO for skipped checks and `check.expect` caption spans); [] when there are no captions.
-    Without `video`, only the layout checks (rate, safe zones) run."""
+    Without `video`, only the layout checks (rate, safe zones) run. `found` collects the reported findings
+    (`check --json`)."""
     cs = chunks(tl)
     if not cs:
         return []
-    found = rate_lines(cs, tl.fps) + safe_lines(cs, tl)
+    hits = rate_lines(cs, tl.fps) + safe_lines(cs, tl)
     notes: list[str] = []
     if video is not None and work is not None:
         more, notes = frame_lines(cs, tl, video, work, log=log, faces=faces)
-        found += more
-    found.sort(key=lambda p: p[0].index)
+        hits += more
+    hits.sort(key=lambda f: f.chunk.index)
     expects = [e for e in tl.check_expects if e.kind == "caption"]
     used = [False] * len(expects)
     out: list[str] = []
-    for c, line in found:
+    for f in hits:
+        c = f.chunk
         mid = (c.start + c.end) / 2 / tl.fps
         hit = next((k for k, e in enumerate(expects) if e.start <= mid < e.end), None)
         if hit is None:
-            out.append(line)
+            out.append(f.line)
+            if found is not None:
+                found.append(f)
         else:
             used[hit] = True
     for k, e in enumerate(expects):

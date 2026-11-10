@@ -103,7 +103,7 @@ def test_a_lower_third_chip_is_not_a_caption(tmp_path: Path) -> None:
 def test_safe_zone_names_the_side(tmp_path: Path) -> None:
     low = resolve(load_spec(_short(tmp_path, "{source: talk.words.json, y: 1800}")), tmp_path)
     got = K.lines(low)
-    assert got and all(g.startswith("WARN caption-safe chunk=") and g.endswith(" bottom") for g in got)
+    assert got and all(g.startswith("WARN caption-safe captions[") and " bottom (" in g for g in got)
     assert K.lines(resolve(load_spec(_short(tmp_path, "{source: talk.words.json}")), tmp_path)) == []
 
 
@@ -118,7 +118,9 @@ def test_reading_rate_warns_above_twenty_characters_per_second(tmp_path: Path) -
     _words(tmp_path, [("extraordinarily", 0.0, 0.2), ("unbelievable", 0.22, 0.4), ("tomorrow", 0.9, 1.5)])
     p = _write(tmp_path, "  - {photo: a, hold: 3s}\n", ["a"], extra="captions: {source: talk.words.json}\n")
     got = K.lines(resolve(load_spec(p), tmp_path))
-    assert [g for g in got if "caption-rate" in g] == ["WARN caption-rate chunk=0 30cps"]
+    assert [g for g in got if "caption-rate" in g] == [
+        "WARN caption-rate captions[0] 0.0-0.23s 'extraordinarily' 64cps "
+        "(max 20: fast speech here; cut words in the edit, or accept it with check.expect caption)"]
 
 
 def test_check_expect_caption_silences_a_span(tmp_path: Path) -> None:
@@ -152,8 +154,9 @@ def test_check_measures_contrast_and_faces_on_decoded_frames(tmp_path: Path) -> 
     tl = resolve(load_spec(_short(tmp_path, "{source: talk.words.json, preset: minimal}")), tmp_path)
     video = _video(tmp_path / "white.mp4", "white")
     got = K.lines(tl, video, tmp_path / "work", faces=lambda image: [(0, 1000, 1080, 400)])
-    assert got[0].startswith("WARN caption-contrast chunk=0 ratio=1.")
-    assert "WARN caption-face chunk=0" in got
+    assert got[0].startswith("WARN caption-contrast captions[0] 0.0-")
+    assert " ratio 1." in got[0]
+    assert any(g.startswith("WARN caption-face captions[0] ") for g in got)
     dark = K.lines(tl, _video(tmp_path / "black.mp4", "black"), tmp_path / "work", faces=lambda image: [])
     assert dark == []
 
@@ -269,7 +272,7 @@ def test_a_sustained_fast_stretch_still_warns(tmp_path: Path) -> None:
     p = _write(tmp_path, "  - {photo: a, hold: 4s}\n", ["a"], extra="captions: {source: talk.words.json}\n")
     got = [g for g in K.lines(resolve(load_spec(p), tmp_path)) if "caption-rate" in g]
     assert got and len(got) <= 4, got  # 3 s / (5/6 s) windows
-    assert got[0] == "WARN caption-rate chunk=0 30cps", got
+    assert got[0].startswith("WARN caption-rate captions[0] 0.0-0.2s 'really' 30cps ("), got
 
 
 def _ink_boxes(ln) -> dict[int, list]:

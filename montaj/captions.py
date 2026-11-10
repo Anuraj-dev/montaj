@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import math
 import re
+from collections.abc import Collection
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -296,16 +297,20 @@ def _segments(words: list[Word], raw: dict[int, str], breaks: set[int]) -> list[
     return segs
 
 
-def window_cps(spans: list[tuple[int, int]], i: int, fps: int) -> tuple[int, int, float]:
+def window_cps(spans: list[tuple[int, int]], i: int, fps: int, breaks: Collection[int] = ()) -> tuple[int, int, float]:
     """Reading rate from span `i`: `spans` are consecutive (characters, frames on screen). The window grows
     forward from `i` until it holds RATE_WINDOW_S of on-screen time (backward from the end when the spans run
-    out first). Returns (first, last, cps) of the window."""
+    out first). `breaks` are the indices of spans shown after a gap (the screen clears before them): a window
+    never reaches across one, so two fast chunks seconds apart are each read on their own, not averaged
+    together. Returns (first, last, cps) of the window."""
+    lo = max((k for k in breaks if k <= i), default=0)
+    hi = min((k for k in breaks if k > i), default=len(spans))
     need = math.ceil(RATE_WINDOW_S * fps - 1e-9)
     chars = frames = 0
     a = b = i
-    while b < len(spans) and frames < need:
+    while b < hi and frames < need:
         chars, frames, b = chars + spans[b][0], frames + spans[b][1], b + 1
-    while a > 0 and frames < need:
+    while a > lo and frames < need:
         a -= 1
         chars, frames = chars + spans[a][0], frames + spans[a][1]
     return a, b - 1, chars * fps / frames if frames > 0 else 0.0
@@ -334,10 +339,13 @@ def _chunk_words(words: list[Word], raw: dict[int, str], lo: int, hi: int, break
     # cut; check measures over the final chunks, which differ only in where the window's edge falls).
     spans = [(len(w.w), fr[k + 1] - fr[k]) for seg, fr in zip(segs, seg_frames) for k, w in enumerate(seg)]
     reach = math.ceil(RATE_WINDOW_S * fps) + 1  # spans are >= 1 frame, so a window never needs more
+    # A segment that clears before the next one starts is not read together with it (`window_cps` breaks).
+    cleared = [seg_frames[k][-1] < seg_frames[k + 1][0] for k in range(len(segs) - 1)] + [False]
     out: list[list[Word]] = []
     first = 0  # index in `spans` of the segment's first word
-    for seg, frames in zip(segs, seg_frames):
+    for k_seg, (seg, frames) in enumerate(zip(segs, seg_frames)):
         n = len(seg)
+        gap_before = k_seg > 0 and cleared[k_seg - 1]
         # best[b]: (cost, start of the last chunk) of the best split of seg[:b]
         best: list[tuple[tuple, int] | None] = [None] * (n + 1)
         best[0] = ((0, 0.0, 0, 0.0), 0)
@@ -355,7 +363,10 @@ def _chunk_words(words: list[Word], raw: dict[int, str], lo: int, hi: int, break
                 lo_i, hi_i = first + a, first + b
                 around = (spans[max(0, lo_i - reach):lo_i] + [(sum(len(w.w) for w in group), max(frames[b] - frames[a], 1))]
                           + spans[hi_i:hi_i + reach])
-                cps = window_cps(around, min(lo_i, reach), fps)[2]
+                base, c = max(0, lo_i - reach), min(lo_i, reach)
+                gaps = ([first - base] if gap_before and first > base else []) + (
+                    [c + 1 + first + n - hi_i] if cleared[k_seg] and first + n - hi_i < reach else [])
+                cps = window_cps(around, c, fps, gaps)[2]
                 over = cps > RATE_MAX_CPS + 1e-9
                 c0 = best[a][0]
                 cost = (c0[0] + over, c0[1] + max(0.0, cps - RATE_MAX_CPS), c0[2] + 1, c0[3] + secs * secs)

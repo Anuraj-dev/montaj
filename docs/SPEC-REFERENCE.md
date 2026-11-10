@@ -227,6 +227,7 @@ Photo fields (`crop`, `focus`, swirl `center`, wall `at`) are source-image pixel
 - `text[].motion_blur` — boolean, default false — draws the block as the average of `max(video.motion_blur, 5)` sub-frame times (same shutter as `video.motion_blur`), so moving text smears.
 - `text[].backdrop` — mapping, `true`, `gradient` or `solid`, default none — dark scrim behind the block, painted by the compositor. `true` is the default gradient. Fades with the block.
 - `text[].behind` — `subject`, default none — draws the block between the picture and the on-screen subject (a `matte:` clip shot or `mask:` layers; through a fade both sides). Without a subject on screen it draws on top. Needs a matte somewhere in the film.
+- `text[].role` — `title` or `caption`, default none — what the block is for `check` and `validate`: `title` (designed text, slam words) is never judged as a caption; `caption` always is. Unset, a block is a caption when every line sits below 55% of the frame height, it has at most 8 words and no `dot`. Wins over its lines' `role`.
 - `text[].backdrop.type` — `gradient` or `solid`, default `gradient` — `gradient` fades out; `solid` is flat over the same area.
 - `text[].backdrop.strength` — number, default `0.8` — opacity of the darkest part, from 0 to 1.
 - `text[].backdrop.place` — `bottom`, `top` or `band`, default `band` — `band` covers the lines (full strength on the line box, cosine fade across a pad of 48 design px or 0.45× the line size); `bottom` and `top` keep the outer 28% of the frame fully dark, then fade across the next 22%.
@@ -285,6 +286,7 @@ Photo fields (`crop`, `focus`, swirl `center`, wall `at`) are source-image pixel
 - `text[].lines[].out.distance` — design px 0–2000, default `160` — travel of a `slide` exit.
 - `text[].lines[].idle` — `float` or `pulse` (or `{type, amount}`), default none — loop every `1.5s` once a unit lands: `float` bobs `amount` design px (default `4`), `pulse` scales by `amount` percent (default `4`); 0–100.
 - `text[].lines[].bar` — `{word, from?, color?, pad?}`, default none — a rounded bar behind the 0-based word `word` of the line (gpu engine), hugging its ink; `from` (another word) makes it slide from there over 3 frames; `color` default `#ffe600`; `pad` design px, default `14`. Written by `captions` for `preset: highlight`.
+- `text[].lines[].role` — `title` or `caption`, default none — as `text[].role`, for a style to carry (`styles: {slam: {role: title, ...}}`): a `title` line makes its block a title.
 - `validate` — shapes every text line (card lines too) and reports `ERR text[1].lines[0]: 132px wider than the frame at size 100 (fits at size 88; or set fit: true)` when the line box leaves the 1080-wide frame. Lines with a character the bundled fonts lack are not measured.
 - `text[].lower_third` — `{title, subtitle?, at?, side?, y?}`, replaces `lines` — sugar for a bold sans title chip with a gold dot and a sans subtitle 110 design px below. `at` default the block `from`, `side` `left` or `right` default `left`, `y` default `1500` on a 1920-tall (9:16) frame and the same fraction of the frame height on any other, kept 210 design px above the bottom edge (design px, title top). `fade_in`/`fade_out` default `0.4s`. No bar or slide yet.
 - `captions` — mapping, default none — word timings expanded at load into gpu `text` blocks after your own (the renderer and the cache see only those); `montaj captions --print` lists `chunk start end text`. Rules and presets: `docs/CAPTIONS.md`.
@@ -351,12 +353,12 @@ Photo fields (`crop`, `focus`, swirl `center`, wall `at`) are source-image pixel
 - `use` — list, default none — `{component: name, <param>: value}` instances; their items are appended to the matching top-level lists. Inside `shots`, `text`, … an item `{use: name, <param>: value}` is replaced in place by the component's items.
 - `include` — path or list, default none — files (relative to the spec) holding only `styles`, `defaults` and `components`; the including file wins on a clash.
 - `check` — mapping, default none — designed QA exceptions. The renderer does not read this, so it does not change the segment hash.
-- `check.expect` — list, default none — black or frozen spans `check` treats as designed. A span that matches no detected span prints `INFO expect <kind> <start>–<end>s not found`.
+- `check.expect` — list, default none — black or frozen spans `check` treats as designed. A span that matches no detected span prints `INFO expect <kind> <start>–<end>s not found (<nearest>)`, naming the nearest detected span or one under the detector's minimum (black 0.10 s, frozen 0.5 s).
 - `check.expect[].black` — `[start, end]` time expressions, black or frozen — a designed black window. Set this or `frozen`, not both. `end` must be later than `start`.
 - `check.expect[].frozen` — `[start, end]` time expressions, black or frozen — a designed hold. Set this or `black`, not both. `end` must be later than `start`.
 - `check.expect[].why` — string, default none — one line, added when this span matches a detected one.
 - `check.expect[].caption` — `[start, end]` time expressions — a designed caption exception: `check` silences `caption-*` findings inside it. Set exactly one of `black`, `frozen`, `caption`.
-- `check.safe` — mapping, default 9:16 top 0.12, bottom 0.22, right 0.14 (16:9 bottom 0.08) — platform safe-zone fractions for `WARN caption-safe chunk=N <side>`; keys `top` `bottom` `left` `right`.
+- `check.safe` — mapping, default 9:16 top 0.12, bottom 0.22, right 0.14 (16:9 bottom 0.08) — platform safe-zone fractions for `WARN caption-safe text[i] <a>-<b>s '<text>' <side> (...)`; keys `top` `bottom` `left` `right`.
 - `check.loudness` — mapping, default none — replaces the `-14` LUFS target used by `check`.
 - `check.loudness.i` — number, required with loudness — integrated-loudness target, in LUFS.
 - `check.loudness.tol` — number, default `1` — how far the measurement may sit from `i`, in LU.
@@ -463,3 +465,21 @@ Reuse (`styles`, `defaults`, `components`, `use`, `include`) is expanded before 
 - `montaj render --final --codec h264|hevc10|av1` — default `h264` (8-bit, unchanged; segment hashes unchanged). `hevc10` is HEVC Main10 (`hvc1` tag), `av1` AV1 Main 10-bit; both are float compositor → P010 on the GPU → NVENC, with no CPU fallback: an NVENC that cannot encode them gives `ERR encode: <codec> unavailable: <why>`. Segments are cached per codec. The OK line names the codec only when `--codec` is passed.
 - `montaj export --target youtube|shorts|reels|whatsapp|master` — with a `montaj.yaml`, renders `out/<target>.mp4` from the float compositor using the preset table `TARGETS` in `montaj/encode.py` (codec, cq, bitrate cap, width, LUFS, AAC kbps, tags); the OK line echoes it (`target=youtube hevc10 10-bit cq18 max40M -14LUFS aac256k bt709`). 8-bit targets (`reels`, `whatsapp`) get an ordered dither on the GPU before rounding. Without a spec it copies (`master`) or transcodes the newest `out/` file.
 - Every output is tagged bt709 primaries/transfer/matrix, limited range. `montaj check` prints `OK video <codec> <bits>-bit <pix_fmt> bt709` from the file, `WARN` on missing tags; on `out/<target>.mp4` it also pins the preset's codec, bit depth and LUFS target.
+
+## Check and validate messages
+`montaj check` and `montaj validate` print `WARN <kind> ...`; `montaj spec --search <kind>` finds it here. Caption findings name `text[i]` (the block's index in `text:`; `montaj validate --expand` shows the list after reuse) or `captions[N]` (chunk N of `montaj captions --print`), the time span, the text, the value and the fix. `check --json` adds `findings: [{kind, level, path, start, end, text, value, limit, message}]`; non-caption findings fill only `kind`, `level` and `message`.
+- `caption-rate` — check WARN — a reading window of contiguous caption chunks (at least 5/6 s on screen; a gap where the screen clears ends it) runs over 20 characters per second. Named by the window's densest chunk, with that chunk's own rate. Fix: hold it longer or cut words; designed text: `role: title`; a designed fast stretch: `check.expect: [{caption: [a, b], why}]`.
+- `caption-safe` — check WARN — the chunk's ink reaches a platform UI zone (`check.safe`) on the named side. Fix: move it away from that side, or make it smaller; other platforms: set `check.safe`; designed text: `role: title`.
+- `caption-contrast` — check WARN — fill against what is behind it is under 4.5:1 on the rendered frame. Fix: a stroke of at least 4% of the size, a `backdrop`, or another colour.
+- `caption-face` — check WARN — the chunk covers a detected face. Fix: move it (`y` / `pos`, or `captions.y`). Needs `uv sync --extra guards`.
+- `caption-box` — validate WARN — a caption on a static box (`box: chip` or a solid `backdrop`). Fix: stroke + shadow; designed text: `role: title`.
+- `caption-weight` — validate WARN — a caption lighter than weight 600. Fix: `weight: 700` or a display `font`; designed text: `role: title`.
+- `caption-size` — validate WARN — a caption under 5% of the frame height. Fix: a larger `size`; designed text: `role: title`.
+- `expect` — check INFO — a `check.expect` span matched nothing; the bracket says what was nearest. Fix the span's times, or delete it when the film no longer has that span.
+- `black` — check WARN — near-black frames for at least 0.10 s that no `check.expect` black span, fade or dark blank accounts for. Fix: the shot or transition there; designed: `check.expect: [{black: [a, b], why}]`.
+- `frozen` — check WARN — an unchanging picture for at least 0.5 s that is not a `hold`, a photo or a `check.expect` frozen span. Fix: motion there (camera, `drift`); designed: `check.expect: [{frozen: [a, b], why}]`.
+- `video` — check WARN — the file's codec, bit depth or colour tags differ from what the render asked for. Fix: re-render; report it as an engine bug when it repeats.
+- `click` — check WARN — an audio step at a join, larger than the audio around it. Fix: a crossfade or a cut on a quieter beat there.
+- `loudness` — check WARN — integrated loudness off the target (-14 LUFS ± 1 by default). Fix: `audio` gains; another target: `check.loudness`.
+- `av-offset` — check WARN — audio and video streams start apart by more than the tolerance. Fix: re-render; check `audio.clips[].at` offsets.
+- `pacing` / `hook` — check WARN — a `check.pacing` target missed. Fix: shorter shots, more cuts or earlier text; or relax the target.

@@ -477,6 +477,9 @@ class TextLine(Frozen):
     idle: Annotated[TextIdle | None, BeforeValidator(_as_typed)] = Field(default=None, exclude_if=_none)
     # A bar behind one word (#23); drawn by the gpu engine. Unset it stays out of the dump.
     bar: TextBar | None = Field(default=None, exclude_if=_none)
+    # What the text is for `check` (#57): `title` opts out of the caption lints, `caption` opts in. Not drawn;
+    # unset it stays out of the dump. On a line so a style can carry it; see `text_role`.
+    role: Literal["title", "caption"] | None = Field(default=None, exclude_if=_none)
 
 
 def gpu_fields(line: TextLine) -> list[str]:
@@ -754,6 +757,8 @@ class TextBlock(Frozen):
     )
     # `subject`: drawn between the picture and the on-screen subject's matte (#36). Absent stays out.
     behind: str | None = Field(default=None, exclude_if=lambda v: v is None)
+    # `title` or `caption` for the caption lints (#57); wins over its lines' own. Unset stays out of the dump.
+    role: Literal["title", "caption"] | None = Field(default=None, exclude_if=_none)
     lines: list[TextLine]
 
     @model_validator(mode="before")
@@ -3411,11 +3416,25 @@ def _line_y(line: TextLine) -> float | None:
     return line.pos[1] if line.pos is not None else line.y
 
 
+def text_role(block: TextBlock) -> str | None:
+    """The block's `role`, else `title` when any line (often through its style) is a title, else `caption` when
+    any line is one; None when nothing says."""
+    if block.role is not None:
+        return block.role
+    roles = {ln.role for ln in block.lines if ln.role is not None}
+    return "title" if "title" in roles else ("caption" if roles else None)
+
+
 def is_caption_block(spec: Spec, i: int, block: TextBlock, design_h: float) -> bool:
-    """A block made by `captions`, or an authored one that looks like a caption: a few words, no `dot`
-    (the lower-third marker), every line below 55% of the frame height."""
+    """Whether the caption lints (`validate` and `check`) judge this block: every block made by `captions`;
+    an authored one by its `role` (`text_role`) when set; otherwise when it looks like a caption: a few words,
+    no `dot` (the lower-third marker), every line below 55% of the frame height. A per-unit entry (`in: slam`
+    or `pop`) does not decide it: authored captions pop too, and `role: title` says it outright."""
     if spec.caption_from is not None and i >= spec.caption_from:
         return True
+    role = text_role(block)
+    if role is not None:
+        return role == "caption"
     ys = [_line_y(ln) for ln in block.lines]
     words = sum(len(ln.text.split()) for ln in block.lines)
     return (bool(ys) and all(y is not None and y >= 0.55 * design_h for y in ys)
