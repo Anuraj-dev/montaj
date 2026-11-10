@@ -306,11 +306,28 @@ class _Expander:
     def _fill(self, item: dict, key: str, value: Any, path: str, origin: tuple[int, str]) -> None:
         """Set `key` unless the item already has it; dicts fill field by field."""
         if key not in item:
+            if key == "emphasis" and _LINE_EMPHASIS.fullmatch(path) and _unmarked(item.get("text")):
+                return  # #60: inherited emphasis is inert on a line with no `*marked*` words
             item[key] = copy.deepcopy(value)
             self.smap.entries[path] = origin
         elif isinstance(item[key], dict) and isinstance(value, dict):
             for k, v in value.items():
                 self._fill(item[key], k, v, f"{path}.{k}", (origin[0], f"{origin[1]}.{k}"))
+
+
+_LINE_EMPHASIS = re.compile(r"text\[\d+\]\.lines\[\d+\]\.emphasis")
+
+
+def _unmarked(text: Any) -> bool:
+    """True for a string line text with no `*spans*`. Non-strings and unclosed `*` stay as written."""
+    if not isinstance(text, str):
+        return False
+    from montaj.render import glyphs
+
+    try:
+        return not any(glyphs.parse_emphasis(text)[1])
+    except ValueError:
+        return False
 
 
 def _deep_override(base: dict, over: dict) -> dict:
