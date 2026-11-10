@@ -81,6 +81,7 @@ User projects live outside the repo: `<anywhere>/<name>/{montaj.yaml, assets/, m
 | `montaj validate` | schema + timeline errors with hints | errors only |
 | `montaj render [--preview\|--final]` | cached segment render + mux | 1 line |
 | `montaj sheet [--at …]` | ≤12-frame contact sheet | 1 image |
+| `montaj sheet --strip <t> [--frames 8 --step 1f]` · `--transitions` · `--diff` | consecutive frames; one labelled row per transition; only what changed since the last plain strip/transitions sheet (≤1536px edge) | 1 image |
 | `montaj check` | QA | ≤10 lines |
 | `montaj review` / `watch` | human loop, zero tokens | `review.json` |
 | `montaj export --target master\|whatsapp` | presets from render.sh | 1 line |

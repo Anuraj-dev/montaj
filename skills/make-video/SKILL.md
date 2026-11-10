@@ -69,7 +69,9 @@ check and review round after that is a `montaj` command that costs no tokens. Ru
 
 5. **Preview.** `montaj render` (preview), then `montaj sheet` and look at `build/sheet.jpg`. Fix what the
    sheet shows (framing, order, holds) and re-render; only changed segments re-render. Done when the sheet
-   shows the arc you planned, after at most 2 rounds.
+   shows the arc you planned, after at most 2 rounds. To see motion, `montaj sheet --transitions` (one row per
+   transition) or `--strip <t>` (8 consecutive frames): one strip per new kind of motion, not per shot; after a
+   re-render, `--diff` shows only what changed against the last strip/transitions sheet.
 
 6. **Review — zero tokens.** Hand the user two commands for their own terminal:
    `montaj -C <project> review` (a page: play, approve/reject shots, comment at the playhead) and
