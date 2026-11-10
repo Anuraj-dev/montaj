@@ -85,6 +85,24 @@ bigger treatment, and keep the rest plain.
 `highlight` is the one case where a filled shape sits behind text: it hugs a single word, has rounded ends and
 moves with the voice. A static rectangle behind the whole caption is never a preset.
 
+## Hygiene lines (#24)
+Facts, not bans. `captions` drops a trailing `.` `,` or `।` from every chunk (`?` `!` `…` stay);
+`captions.punctuation: keep` opts out. `subs` drop them only with `punctuation: drop` on the sub (unset keeps the
+text and its segment hash, and `validate` warns instead).
+- `validate` (spec only), for caption blocks (made by `captions`, or authored: every line in the lower 45%,
+  at most 8 words, no `dot`):
+  `WARN text[i].lines[j] ends with a full stop`, `WARN caption-box text[i] ...` (chip or solid backdrop),
+  `WARN caption-weight text[i] ...` (under 600), `WARN caption-size text[i] ...` (under 5% of the frame height).
+- `check` (measured), per caption chunk (numbers match `montaj captions --print`):
+  `WARN caption-contrast chunk=N ratio=X` (under 4.5; a stroke of at least 4% of the size counts as the backdrop),
+  `WARN caption-safe chunk=N <side>` (zones above; set `check.safe: {top, bottom, left, right}` as fractions),
+  `WARN caption-face chunk=N` (needs `uv sync --extra guards`), `WARN caption-rate chunk=N Ncps` (over 20 cps).
+  Authored text blocks without per-glyph layout have no ink box, so only the rate is measured for them.
+- A designed exception goes under `check.expect: [{caption: [a, b], why: ...}]`; findings inside the span become
+  `INFO caption a-bs ignored as intended: why`.
+- The `punch` slam never carries the accented word past the 5% edge margin or into its neighbour; the entry
+  scale is capped per word (`Motion.slam_from`).
+
 ## Slop list
 `validate` and `check` warn on most of these (#24).
 - A rectangle, pill or card behind the caption.
