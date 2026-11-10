@@ -11,7 +11,7 @@ from montaj.cli import main
 from montaj.inspector import Inspector
 
 _CLEAN = '{text: "Hello world", y: 900, at: 0s, shadow: false}'
-_OFF = '{text: "Far away", y: 1500, at: 0s, align: left, indent: 30}'
+_OFF = '{text: "Far away", y: 1900, at: 0s}'
 
 
 def _project(root: Path, lines: str, size: str = "270x480") -> Path:

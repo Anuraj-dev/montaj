@@ -356,6 +356,11 @@ class TextLine(Frozen):
     cursor: bool = Field(default=False, exclude_if=lambda v: v is False)
     # None = the style's engine (render/glyphs.STYLE_ENGINE). "gpu" shapes with HarfBuzz at resolve time.
     engine: str | None = Field(default=None, exclude_if=lambda v: v is None)
+    # Fit and wrap are resolved into size, text and y at resolve time (timeline._resolve_texts); unset they stay out of the dump.
+    fit: bool = Field(default=False, exclude_if=lambda v: v is False)
+    wrap: str | None = Field(default=None, exclude_if=lambda v: v is None)
+    max_width: float | None = Field(default=None, exclude_if=lambda v: v is None)
+    max_lines: int | None = Field(default=None, exclude_if=lambda v: v is None)
     # Text styling (#21). Each one is drawn by the gpu engine and selects it when `engine` is unset.
     font: str | None = Field(default=None, exclude_if=_none)
     case: str | None = Field(default=None, exclude_if=_none)
@@ -2277,6 +2282,15 @@ def _card_duration(
 
 
 def _check_text_line(path: str, line: TextLine, errors: list[str]) -> None:
+    before = len(errors)
+    _check_text_line_fields(path, line, errors)
+    if len(errors) == before:  # measure only a line whose fields are sound
+        over = _overflow_error(path, line)
+        if over:
+            errors.append(over)
+
+
+def _check_text_line_fields(path: str, line: TextLine, errors: list[str]) -> None:
     if line.style not in TEXT_STYLES:
         errors.append(_line(f"{path}.style", f"unknown {line.style!r}", f"use {', '.join(TEXT_STYLES[:-1])} or {TEXT_STYLES[-1]}"))
     if line.italic and line.style != "serif":
@@ -2299,6 +2313,7 @@ def _check_text_line(path: str, line: TextLine, errors: list[str]) -> None:
         errors.append(_line(f"{path}.y", "missing", "set y (top of the line, design px) or pos: [x, y]"))
     if line.engine is not None or gpu_fields(line):
         _check_text_engine(path, line, errors)
+    _check_text_fit_fields(path, line, errors)
     allowed = TEXT_WEIGHTS.get(line.style)
     if allowed and line.weight is not None and line.weight not in allowed:
         errors.append(_line(f"{path}.weight", f"{line.style} has no weight {_fmt_num(line.weight)}",
@@ -2316,6 +2331,56 @@ def _check_text_line(path: str, line: TextLine, errors: list[str]) -> None:
             errors.append(
                 _line(f"{path}.{name}", f"must be {need}, got {_fmt_num(v)}", f"use a design-px {name}")
             )
+
+
+def _check_text_fit_fields(path: str, line: TextLine, errors: list[str]) -> None:
+    if line.wrap is not None and line.wrap != "balance":
+        errors.append(_line(f"{path}.wrap", f"unknown {line.wrap!r}", "use balance"))
+    if line.max_lines is not None and (line.wrap is None or not 1 <= line.max_lines <= 4):
+        errors.append(_line(f"{path}.max_lines", "needs wrap: balance and a count from 1 to 4", "set wrap: balance, max_lines: 2"))
+    if line.max_width is not None and (not math.isfinite(line.max_width) or line.max_width <= 0):
+        errors.append(_line(f"{path}.max_width", f"must be finite and > 0, got {_fmt_num(line.max_width)}", "use a design-px width"))
+
+
+def _overflow_error(path: str, line: TextLine) -> str | None:
+    """`ERR` text when a line, shaped with the bundled fonts, runs outside the frame (or past `max_width`).
+
+    Needs no GPU and no browser. `fit` and `wrap` resolve the overflow at timeline time, so only a line
+    they cannot save is reported. Returns None when the line fits or cannot be measured.
+    """
+    from montaj.render import glyphs
+
+    if line.style not in TEXT_STYLES or not line.text.strip():
+        return None
+    size = float(line.size if line.size is not None else glyphs.STYLE_METRICS[line.style].size)
+    book = glyphs.FontBook()
+    # Measured as drawn: the line's font, case, emphasis scale, stroke and rotation (gpu lines). `pos`
+    # replaces the aligned x; a wrapped, rotated stack is measured piece by piece about each piece's centre.
+    kw = dict(style=line.style, weight=line.weight, italic=line.italic, tracking=line.tracking,
+              line_height=line.line_height, font=line.font, case=line.case,
+              emphasis_scale=line.emphasis.scale if line.emphasis is not None else 1.0,
+              stroke=line.stroke.width if line.stroke is not None else 0.0, rotate=float(line.rotate or 0.0))
+    place = dict(pos=(line.pos[0], 0.0)) if line.pos is not None else dict(align=line.align, indent=line.indent)
+    wants = line.fit or line.wrap is not None
+    text = glyphs.parse_emphasis(line.text)[0] if line_engine(line) == "gpu" else line.text
+    if not wants and book.missing(line.style, line.weight, line.italic, text, font=line.font, case=line.case):
+        return None  # Chromium falls back to a system font here; the bundled fonts cannot say how wide
+    try:
+        plan = glyphs.plan_text(book, line.text, size=size, fit=line.fit, balance=line.wrap == "balance",
+                                max_width=line.max_width, max_lines=line.max_lines or 2, **kw)
+        worst = 0.0
+        for text in plan.lines:
+            x, w, _h = glyphs.measure(book, text, size=plan.size, **place, **kw)
+            worst = max(worst, w - line.max_width if line.max_width is not None else glyphs.frame_overflow(x, w))
+        if worst <= 0.5:
+            return None
+        fit_to = glyphs.plan_text(book, line.text, size=size, fit=True, balance=line.wrap == "balance",
+                                  max_width=line.max_width, max_lines=line.max_lines or 2, **kw)
+    except ValueError as exc:
+        return _line(path, str(exc), "shorten the text, or use a style whose fonts have these characters")
+    edge = f"max_width {_fmt_num(line.max_width)}" if line.max_width is not None else "the frame"
+    return _line(path, f"{round(worst)}px wider than {edge} at size {plan.size:g}",
+                 f"fits at size {fit_to.size:g}; or set fit: true")
 
 
 def _check_text_engine(path: str, line: TextLine, errors: list[str]) -> None:
@@ -2438,6 +2503,8 @@ def _validate_card(
         for name in gpu_fields(line):
             errors.append(_line(f"{p}.{name}", "card lines are drawn by Chromium, without styling",
                                 "use a text block over a blank shot"))
+        if line.fit or line.wrap is not None:
+            errors.append(_line(f"{p}.fit", "fit and wrap are not available on card lines yet", "set size by hand, or use a text block"))
         _card_duration(line.at, fps, bpm, f"{p}.at", errors)
         if line.stagger is not None:
             _card_duration(line.stagger, fps, bpm, f"{p}.stagger", errors)

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import hashlib
+import math
 from pathlib import Path
 
 import pytest
@@ -139,6 +140,43 @@ def test_validate_warns_on_a_wide_stroke(tmp_path: Path, capsys: pytest.CaptureF
     assert cli.main(["-C", str(p.parent), "validate"]) == 0
     out = capsys.readouterr().out.splitlines()
     assert out[0].startswith("WARN text[0].lines[0].stroke.width") and out[-1].startswith("OK montaj.yaml")
+
+
+def test_overflow_is_measured_with_the_styled_line(tmp_path: Path) -> None:
+    """validate's overflow ERR (#25) sees the font, emphasis scale, stroke, rotation and pos of a gpu line."""
+    errs = _errors(tmp_path, EXAMPLE)  # the issue's example is wider than the frame at size 96
+    assert any("wider than the frame at size 96" in e for e in errs), errs
+    (fitted,) = _line(tmp_path, EXAMPLE + ", fit: true")
+    assert fitted.size < 96 and fitted.stroke is not None and fitted.glyphs.rotate == -3
+    book = G.FontBook()
+    x, w, _ = G.measure(book, fitted.text, style="serif", size=fitted.size, font="montserrat-black", case="upper",
+                        emphasis_scale=1.18, stroke=8, rotate=-3, pos=(540, 0))
+    assert 72 - 1e-6 <= x and x + w <= 1008 + 1e-6
+    base = "text: Happy Birthday Ana, size: 128, y: 900, at: 0s, font: anton"
+    _line(tmp_path, base)  # fits
+    for extra in ("pos: [200, 900]", "stroke: {width: 40}"):
+        line = base.replace(", y: 900", "") if extra.startswith("pos") else base
+        assert any("wider than the frame" in e for e in _errors(tmp_path, f"{line}, {extra}")), extra
+    flat = G.measure(book, "Happy Birthday Ana", style="serif", size=120, font="anton")
+    assert G.measure(book, "Happy Birthday Ana", style="serif", size=120)[1] != flat[1]  # the font is measured
+    turned = G.measure(book, "Happy Birthday Ana", style="serif", size=120, font="anton", rotate=-3)
+    assert turned[1] == pytest.approx(flat[1] * math.cos(math.radians(3)) + flat[2] * math.sin(math.radians(3)))
+
+
+def test_wrap_keeps_styling_and_emphasis_on_every_piece(tmp_path: Path) -> None:
+    text = 'text: "I tried this for *thirty whole days* straight", font: anton, size: 120, stroke: {width: 6}'
+    pieces = _line(tmp_path, f"{text}, y: 700, at: 0s, wrap: balance")
+    assert len(pieces) == 2
+    assert all(p.stroke is not None and p.glyphs is not None and p.glyphs.fonts[0].name.startswith("anton")
+               for p in pieces)
+    assert all(p.glyphs.spans == 1 and p.emphasis is not None for p in pieces)  # the span was cut and closed
+    assert "".join(p.glyphs.text for p in pieces).replace(" ", "") == "Itriedthisforthirtywholedaysstraight"
+    # pos: the stack is centred on it; rotate: the stack turns as one block.
+    placed = _line(tmp_path, f"{text}, pos: [540, 1000], rotate: 10, at: 0s, wrap: balance")
+    (ax, ay), (bx, by) = (p.glyphs.pivot for p in placed)
+    assert ((ax + bx) / 2, (ay + by) / 2) == pytest.approx((540, 1000), abs=0.5)
+    assert math.degrees(math.atan2(-(bx - ax), by - ay)) == pytest.approx(10, abs=0.05)
+    assert all(p.glyphs.rotate == 10 for p in placed)
 
 
 # --- GPU --------------------------------------------------------------------------------------------
