@@ -15,7 +15,7 @@ mkdir -p "$proj/assets" "$proj/music"
 # noise plus a soft tone, so the linked-audio and L-cut moments are audible in the demo.
 for spec in \
   c1:0x2b3a67:0xffb37a:0x3d2c2e:0xfff1d0:260:4:pink:220 \
-  c2:0x89c2d9:0xf6f1d1:0x5b7f3a:0xd94f30:520:0:brown:180 \
+  c2:0x6fa8c0:0xd8cfa6:0x5b7f3a:0xd94f30:520:0:brown:180 \
   c3:0x1e6091:0x99d98c:0x34623f:0xffffff:700:-6:pink:260 \
   c4:0xf9c74f:0xf3722c:0x6d4c41:0x277da1:420:8:brown:150 \
   c5:0x4d908e:0xe9ff70:0x2d3047:0xff006e:900:0:white:300 \
