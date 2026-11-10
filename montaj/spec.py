@@ -646,6 +646,9 @@ class Layer(Frozen):
     effects: list[Effect] | None = Field(default=None, exclude_if=_none)
     # `subject`: cut the layer to its source's matte (#36); it also becomes the plane `behind` text sits under.
     mask: str | None = Field(default=None, exclude_if=_none)
+    # Linked clip audio on a layer (#53), as `Shot.audio`: the clip's sound under the layer's picture clock.
+    # Audio-only, so `project._shot_payload` keeps it out of the segment hash.
+    audio: StrictBool | None = Field(default=None, exclude_if=_none)
 
 
 class CardSpec(Frozen):
@@ -965,6 +968,9 @@ class Spec(Frozen):
     check: CheckSpec | None = None
     # Set by `expand_captions`: index of the first `text` block it made. Never dumped, so never hashed.
     caption_from: int | None = Field(default=None, exclude=True)
+    # Set by `expand_cuts`: the clips it cut, whose words files `captions` / `emphasis` read through the
+    # cut layout (#53). Never dumped: what those words become (text blocks, effects) is what is hashed.
+    cut_clips: tuple[str, ...] | None = Field(default=None, exclude=True)
     captions: Captions | None = Field(default=None, exclude_if=_none_value)
     grades: dict[str, Grade] | None = Field(default=None, exclude_if=_none_value)
     # Authoring-only (#41): `expand_emphasis` turns it into effects, camera keys, fx, clips and caption overrides.

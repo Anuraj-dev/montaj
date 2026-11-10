@@ -43,15 +43,17 @@ class _Event:
 def load_words(spec: Spec, spec_dir: Path | None, errors: list[str]):
     """`[Word(i, w, s, e)]` from `audio.markers`, else from `captions.source`; [] with `errors` filled."""
     from montaj.captions import _source_path, read_words
+    from montaj.cuts import film_words
 
     if spec_dir is None:
         errors.append(_line("emphasis", "needs the spec on disk", "load the spec from a file"))
         return []
     if spec.audio is not None and spec.audio.markers:
-        return read_words(spec_dir / spec.audio.markers, errors, "audio.markers")
+        path = spec_dir / spec.audio.markers
+        return film_words(spec, spec_dir, path, read_words(path, errors, "audio.markers"))
     if spec.captions is not None:
         path = _source_path(spec, spec_dir, errors)
-        return read_words(path, errors) if path is not None else []
+        return film_words(spec, spec_dir, path, read_words(path, errors)) if path is not None else []
     errors.append(_line("emphasis", "has no words", "set audio.markers, or captions.source"))
     return []
 
@@ -76,9 +78,13 @@ def find_match(words, text: str, nth: int = 1) -> int | None:
     return None
 
 
-def _word_marker(spec: Spec, w) -> str:
+def _word_marker(spec: Spec, w, spec_dir: Path | None = None) -> str:
     if spec.audio is not None and spec.audio.markers:
-        return f"word:{w.i}"
+        from montaj.cuts import _cut_clip_of
+
+        if spec_dir is None or _cut_clip_of(spec, spec_dir, spec_dir / spec.audio.markers) is None:
+            return f"word:{w.i}"
+        return f"{w.s:.4f}s"  # `word:i` reads source time; a cut clip's word is already in film time
     offset = 0.0
     if spec.captions is not None and spec.captions.offset:
         frames = _dur_frames(spec.captions.offset, spec.video.fps, None, "captions.offset", [])
@@ -86,7 +92,7 @@ def _word_marker(spec: Spec, w) -> str:
     return f"{w.s + offset:.4f}s"
 
 
-def _entries(spec: Spec, words, errors: list[str]) -> tuple[list[_Event], dict[str, str]]:
+def _entries(spec: Spec, words, errors: list[str], spec_dir: Path | None = None) -> tuple[list[_Event], dict[str, str]]:
     """The events each `emphasis` entry anchors to, and the `em<i>` markers they need."""
     by_i = {w.i: w for w in words}
     events: list[_Event] = []
@@ -120,7 +126,7 @@ def _entries(spec: Spec, words, errors: list[str]) -> tuple[list[_Event], dict[s
             errors.append(_line(f"{path}.word", f"word {i} not in the source", f"have {have}"))
             continue
         name = f"em{i}"
-        mark = _word_marker(spec, by_i[i])
+        mark = _word_marker(spec, by_i[i], spec_dir)
         if markers.setdefault(name, mark) != mark or (name in spec.markers and spec.markers[name] != mark):
             errors.append(_line("markers", f"{name!r} is reserved for emphasis", "rename that marker"))
         events.append(_Event(name, n, i, n))
@@ -230,7 +236,7 @@ def expand_emphasis(spec: Spec, spec_dir: Path | None, errors: list[str]) -> Spe
         if not words:
             return spec
     before = len(errors)
-    events, em_markers = _entries(spec, words, errors)
+    events, em_markers = _entries(spec, words, errors, spec_dir)
     if len(errors) > before or spec_dir is None:
         return spec
     gain = (spec.audio.sfx_gain if spec.audio and spec.audio.sfx_gain else DEFAULT_SFX_GAIN)

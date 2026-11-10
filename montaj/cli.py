@@ -20,7 +20,7 @@ import yaml
 from montaj.audio import analyze as analyze_audio
 from montaj.audio import compose as compose_audio
 from montaj.audio import music as music_gen
-from montaj.audio.mix import check_lines
+from montaj.audio.mix import check_lines, has_links
 from montaj.audio.music import parse_duration
 from montaj.capture import run as run_capture
 from montaj.doctor import doctor
@@ -849,7 +849,7 @@ def _audio_mix_lines(root: Path) -> list[str]:
         return []
     spec = load_spec(spec_file)
     audio = spec.audio
-    if audio is None or not (audio.clips or audio.edit or audio.duck or any(sh.audio for sh in spec.shots)):
+    if audio is None or not (audio.clips or audio.edit or audio.duck or has_links(spec)):
         return []
     return check_lines(json.loads(stats_file.read_text()))
 
@@ -860,7 +860,7 @@ def _join_lines(tl, root: Path, video: Path) -> list[str]:
     from montaj.qa import join_lines
     from montaj.spec import _parse_beat0
 
-    if not any(r.spec.audio for r in tl.shots) or tl.spec.audio is None:
+    if not has_links(tl.spec) or tl.spec.audio is None:
         return []
     plan = plan_audio(tl.spec, root, tl.markers, tl.fps, tl.spec.video.bpm,
                       _parse_beat0(tl.spec.video.beat0, tl.fps, []) or 0.0, [], shots=tl.shots)

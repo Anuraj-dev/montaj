@@ -419,9 +419,12 @@ def plan_chunks(spec: Spec, spec_dir: Path, errors: list[str]) -> list[Chunk]:
     path = _source_path(spec, spec_dir, errors)
     if len(errors) > before or path is None:
         return []
+    from montaj.cuts import film_words
+
     words = read_words(path, errors)
     if len(errors) > before:
         return []
+    words = film_words(spec, spec_dir, path, words)  # a cut clip's words move to film time (#53)
     if not words:
         errors.append(_line("captions.source", f"{path.name} has no words", "run montaj transcribe, or music analyze without --no-words"))
         return []

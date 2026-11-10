@@ -41,7 +41,7 @@ Photo fields (`crop`, `focus`, swirl `center`, wall `at`) are source-image pixel
 - `shots[].gain` — dB string, default `0dB` — level of the shot's own sound. Needs `audio: true`.
 - `shots[].audio_lead` — duration (`ms`, `s`, `f`, `b`), default none — J cut: the sound starts this early, over the previous shot, reading the source before `clip_in`. Needs `audio: true`; not on the first shot; at most the previous shot's hold; not with an `audio_tail` on a linked previous shot.
 - `shots[].audio_tail` — duration, default none — L cut: the sound runs this long past the cut, under the next shot (replacing a linked next shot's sound there). Needs `audio: true`; not on the last shot; at most the next shot's hold.
-- `shots[].cuts` — `auto`, default none — talking-head cuts: expands at load into one `range` shot per kept span of `assets/<clip>.cuts.json` (`montaj cut`), linked audio joined by a 20 ms crossfade.
+- `shots[].cuts` — `auto`, default none — talking-head cuts: expands at load into one `range` shot per kept span of `assets/<clip>.cuts.json` (`montaj cut`), linked audio joined by a 20 ms crossfade. Captions and emphasis reading that clip's `assets/<clip>.words.json` follow the cut layout: each word lands where the film plays it, words in removed spans drop.
 - `shots[].cuts_pad` — `[before, after]` durations, default `[60ms, 120ms]` — kept before / after each span, never into the cut gap. Needs `cuts`.
 - `shots[].cuts_punch` — `alternate`, default none — every second span zooms 1 / 1.12 so jump cuts read as intent. Needs `cuts`.
 - `shots[].drop` — span indexes, default none — spans removed after reading `montaj cut --print`. Needs `cuts`.
@@ -116,6 +116,7 @@ Photo fields (`crop`, `focus`, swirl `center`, wall `at`) are source-image pixel
 - `shots[].layers` — list, default none — several sources composited back to front over `video.background`; replaces the shot's single source and its `crop`/`focus`/`zoom`/`camera`/`speed`/`freeze`. A transition carries the whole stack. One full-frame clip layer renders bit-identical to a clip shot.
 - `shots[].layers[].clip` — string, one of clip or image — a video stem. Without `from` it starts with the shot, so it plays through the incoming transition like a clip shot. The source must last the layer's span.
 - `shots[].layers[].image` — string, one of clip or image — a PNG (alpha honoured, decoded on the GPU) or JPEG stem.
+- `shots[].layers[].audio` — boolean, default none — mixes the layer clip's own sound locked to its picture, from `from` (or the shot's audio cut) to `to` (or the next one), as `shots[].audio`; crossfades with linked neighbours. Needs `clip` with an audio stream and an `audio` block.
 - `shots[].layers[].clip_in` — duration, default `0s` — source time shown at the layer's first frame. Needs `clip`.
 - `shots[].layers[].focus` — `[x, y]` source px, default the source centre — the point kept centred when `cover` crops the source to the box.
 - `shots[].layers[].from` — duration, default the shot's start — when the layer appears, from this shot's start. Must fall inside the hold.

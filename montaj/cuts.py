@@ -5,6 +5,9 @@ filler words are cut out, and each edge is nudged to the quietest nearby 10 ms o
 a join lands where a cut cannot click. The plan is `assets/<clip>.cuts.json` (span numbers are 1-based,
 the numbers `drop` takes). `expand_cuts` runs when the spec loads and replaces a `cuts: auto` shot with
 ordinary `range` shots, so layout, the renderer and the segment cache need nothing new.
+
+`film_words` (#53) moves a cut clip's words (`assets/<clip>.words.json`, source seconds) to where the film plays
+them, for `captions` and `emphasis`; their expansion is what reaches the segment hash.
 """
 from __future__ import annotations
 
@@ -214,7 +217,8 @@ def expand_cuts(spec: Spec, spec_dir: Path | None, errors: list[str]) -> Spec:
         shots.extend(got)
         if sh.id:
             renamed[sh.id] = [g.id for g in got if g.id]
-    update: dict = {"shots": shots}
+    cut = tuple(dict.fromkeys(sh.clip for sh in spec.shots if sh.cuts and sh.clip is not None))
+    update: dict = {"shots": shots, "cut_clips": tuple(dict.fromkeys((*(spec.cut_clips or ()), *cut)))}
     if spec.audio is None and any(sh.audio for sh in shots):
         update["audio"] = Audio()  # linked clip audio mixes over silence when there is no music
     duck = spec.audio.duck if spec.audio is not None else None
@@ -311,3 +315,102 @@ def _padded(spans: list[dict], k: int, pad: tuple[float, float], total: float | 
     lo = (spans[k - 1]["e"] + s) / 2 if k else 0.0
     hi = (e + spans[k + 1]["s"]) / 2 if k + 1 < len(spans) else (total if total is not None else e + pad[1])
     return max(lo, s - pad[0]), min(hi, e + pad[1])
+
+
+# --- word times ------------------------------------------------------------------------------------------
+
+
+def film_words(spec: Spec, spec_dir: Path | None, path: Path, words: list) -> list:
+    """`words` read from `path`, in film time when `path` is a cut clip's words file; else unchanged.
+
+    A word lands where the clip's own sound first plays its start (a linked shot or an audio layer,
+    through its clip_in / range / speed / freeze); a word no placement plays (inside a cut span) drops.
+    Its end is clamped to that placement. Order is film order; indexes `i` stay the source's.
+    """
+    clip = _cut_clip_of(spec, spec_dir, path)
+    if clip is None:
+        return words
+    links = _clip_links(spec, spec_dir, clip)
+    if links is None:
+        return words  # the layout does not resolve; validation reports why
+    from montaj.audio.mix import SR
+
+    fps = spec.video.fps
+    out = []
+    for w in words:
+        hits = [(at, link) for link in links if (at := _film_s(link, w.s, fps)) is not None]
+        if not hits:
+            continue
+        at, link = min(hits, key=lambda h: h[0])
+        end = _film_s(link, w.e, fps, clamp=True)
+        out.append(type(w)(i=w.i, w=w.w, s=round(at, 6), e=round(max(at, min(end, link.b / SR)), 6)))
+    return sorted(out, key=lambda w: (w.s, w.i))
+
+
+def _cut_clip_of(spec: Spec, spec_dir: Path | None, path: Path) -> str | None:
+    from montaj.project import clip_is_file, find_clip
+
+    assets = _assets_dir(spec, spec_dir)
+    if not spec.cut_clips or assets is None:
+        return None
+    for clip in spec.cut_clips:
+        if clip_is_file(clip):
+            continue
+        try:
+            file = find_clip(assets, clip)
+        except FileNotFoundError:
+            continue
+        if file.with_name(f"{file.stem}.words.json").resolve() == path.resolve():
+            return clip
+    return None
+
+
+def _clip_links(spec: Spec, spec_dir: Path | None, clip: str):
+    """The `Linked` placements of `clip`'s sound in the laid-out film, or None when layout fails."""
+    from types import SimpleNamespace
+
+    from montaj.audio.mix import _links
+    from montaj.spec import validate_spec
+    from montaj.timeline import _shot_with_frame_keys, _with_picked_clip_in
+
+    dry: list[str] = []
+    parsed, _, markers, bpm, beat0, clip_ins = validate_spec(spec, dry, spec_dir)
+    n = len(spec.shots)
+    if not n or any(f"shots[{i}].{k}" not in parsed for i in range(n) for k in ("start", "end")):
+        return None
+    fps = spec.video.fps
+    try:
+        shots = [SimpleNamespace(start=parsed[f"shots[{i}].start"], end=parsed[f"shots[{i}].end"],
+                                 spec=_shot_with_frame_keys(_with_picked_clip_in(sh, clip_ins.get(i)), i, parsed,
+                                                            (markers, fps, bpm, beat0)))
+                 for i, sh in enumerate(spec.shots)]
+    except (KeyError, ValueError):
+        return None
+    from montaj.audio.mix import _link_src
+
+    want = _link_src(spec, spec_dir, clip)
+    return [link for link in _links(spec, spec_dir, shots, fps, bpm) if want is not None and link.src == str(want)]
+
+
+def _film_s(link, src_s: float, fps: int, clamp: bool = False) -> float | None:
+    """Film seconds where `link` plays source second `src_s`, or None outside `[a, b)` (`clamp`: the nearest edge)."""
+    from montaj.audio.mix import SR, _source_frames
+
+    q = (src_s + link.lag) * fps - link.clip_in  # source frames from clip_in
+    a_u, b_u = link.a * fps / SR - link.start, link.b * fps / SR - link.start  # shot-clock frames
+    if link.speed is None and link.freeze is None:
+        u = q
+    else:
+        grid = np.linspace(a_u, b_u, max(2, int((b_u - a_u) * 16) + 1))
+        pos, live = _source_frames(link.speed, link.freeze, grid)
+        pos, grid = pos[live], grid[live]
+        if len(pos) < 2:
+            return None
+        if not clamp and not pos[0] - 1e-9 <= q < pos[-1]:
+            return None
+        u = float(np.interp(q, pos, grid))
+    if clamp:
+        u = min(max(u, a_u), b_u)
+    elif not a_u - 1e-9 <= u < b_u:
+        return None
+    return (link.start + u) / fps
