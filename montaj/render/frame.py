@@ -704,7 +704,7 @@ class Renderer:
             line_height=ln.line_height, by=ln.by, stagger=ln.stagger, dur=ln.dur, rise=ln.rise,
             reveal=ln.reveal, sweep=ln.sweep, shadow=bool(ln.shadow), indent=ln.indent,
             align=ln.align, box=ln.box, box_color=ln.box_color, dot=ln.dot, cursor=ln.cursor,
-            motion=getattr(ln, "motion", None),
+            motion=getattr(ln, "motion", None), bar=getattr(ln, "bar", None),
         )
 
     def _backdrop(self, src) -> TextBackdrop | None:

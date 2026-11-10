@@ -36,6 +36,7 @@ from montaj.sheet import (
     BASE_DIR, MAX_TILES, every_times, motion_sheet, pick_times, sheet, sheets, step_frames, strip_row,
     transition_rows,
 )
+from montaj.project import resolve_clip
 from montaj.spec import INCOMING_TRANS, SpecError, _dur_frames, load_spec, text_warnings
 from montaj.timeline import Blank, Card, Sequence, Still, Wall, resolve, sequence_index, wall_static_spans
 from montaj.watch import watch
@@ -51,7 +52,7 @@ class _Usage(Exception):
 
 _COMMANDS = (
     "doctor", "new", "ingest", "ingest-rec", "validate", "render", "sheet", "check", "export", "music",
-    "review", "watch", "taste", "capture", "inspect",
+    "review", "watch", "taste", "capture", "inspect", "captions", "transcribe",
 )
 
 
@@ -125,6 +126,14 @@ def _parser() -> argparse.ArgumentParser:
     comp.add_argument("script")
     comp.add_argument("--out", default="music/song.wav")
     comp.add_argument("--timeout", type=float, default=600.0)
+
+    cp = sub.add_parser("captions")
+    cp.add_argument("--print", dest="print_", action="store_true", required=True)
+    tr = sub.add_parser("transcribe")
+    tr.add_argument("clip")
+    tr.add_argument("--lang", default=analyze_audio.DEFAULT_LANG)
+    tr.add_argument("--prompt", default=None)
+    tr.add_argument("--out", default=None)
 
     rv = sub.add_parser("review")
     rv.add_argument("--port", type=int, default=8765)
@@ -826,6 +835,25 @@ def _cmd_music_analyze(ns: argparse.Namespace, root: Path) -> list[str]:
     return [*analysis.lines, result]
 
 
+def _cmd_captions(root: Path) -> list[str]:
+    from montaj.captions import format_chunks, plan
+
+    chunks, fps = plan(root / "montaj.yaml")
+    return [*format_chunks(chunks, fps).splitlines(), f"OK {len(chunks)} chunks"]
+
+
+def _cmd_transcribe(ns: argparse.Namespace, root: Path) -> list[str]:
+    from montaj.captions import transcribe
+
+    clip = _at(root, ns.clip)
+    if not clip.is_file():  # an assets id
+        clip = resolve_clip(root, _assets_dir(root, _assets_rel(root / "montaj.yaml")), ns.clip)
+    out = _at(root, ns.out) if ns.out else _assets_dir(root, _assets_rel(root / "montaj.yaml")) / f"{clip.stem}.words.json"
+    path = transcribe(clip, out, lang=ns.lang, prompt=ns.prompt, log=root / "build" / "transcribe.log")
+    n = len(json.loads(path.read_text(encoding="utf-8"))["words"])
+    return [f"OK {_rel(root, path)} {n} words"]
+
+
 def _cmd_music_compose(ns: argparse.Namespace, root: Path) -> list[str]:
     try:
         result = compose_audio.compose(
@@ -902,6 +930,10 @@ def _dispatch(ns: argparse.Namespace, root: Path) -> list[str]:
         if ns.music_cmd == "analyze":
             return _cmd_music_analyze(ns, root)
         return _cmd_music_compose(ns, root)
+    if ns.cmd == "captions":
+        return _cmd_captions(root)
+    if ns.cmd == "transcribe":
+        return _cmd_transcribe(ns, root)
     if ns.cmd == "review":
         return review_summary(root)[0]
     if ns.cmd == "taste":

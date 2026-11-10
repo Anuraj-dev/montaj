@@ -135,6 +135,10 @@ class Frozen(BaseModel):
     model_config = ConfigDict(extra="forbid", populate_by_name=True)
 
 
+def _none_value(v: object) -> bool:
+    return v is None
+
+
 class SpecError(Exception):
     def __init__(self, errors: list[str]):
         self.errors = errors
@@ -359,6 +363,15 @@ class TextIdle(Frozen):
     amount: RealNum | None = None
 
 
+class TextBar(Frozen):
+    """A rounded bar hugging one word of a gpu line (#23 `highlight`). `from` slides it from another word."""
+
+    word: StrictInt
+    from_: StrictInt | None = Field(default=None, alias="from", exclude_if=_none_value)
+    color: str = "#ffe600"
+    pad: RealNum = 14.0
+
+
 def _none(v: object) -> bool:
     return v is None
 
@@ -410,11 +423,13 @@ class TextLine(Frozen):
     in_: Annotated[TextIn | None, BeforeValidator(_as_typed)] = Field(default=None, alias="in", exclude_if=_none)
     out: Annotated[TextOut | None, BeforeValidator(_as_typed)] = Field(default=None, exclude_if=_none)
     idle: Annotated[TextIdle | None, BeforeValidator(_as_typed)] = Field(default=None, exclude_if=_none)
+    # A bar behind one word (#23); drawn by the gpu engine. Unset it stays out of the dump.
+    bar: TextBar | None = Field(default=None, exclude_if=_none)
 
 
 def gpu_fields(line: TextLine) -> list[str]:
     """The fields of `line` only the gpu engine draws. Any of them makes the line a gpu line."""
-    out = [n for n in ("font", "case", "emphasis", "stroke", "glow", "pos", "rotate", "in_", "out", "idle")
+    out = [n for n in ("font", "case", "emphasis", "stroke", "glow", "pos", "rotate", "in_", "out", "idle", "bar")
            if getattr(line, n) is not None]
     out = ["in" if n == "in_" else n for n in out]
     if isinstance(line.shadow, TextShadow):
@@ -689,6 +704,28 @@ class CheckSpec(Frozen):
     sample: StrictInt = 3  # strict: YAML `true` must not coerce to 1
 
 
+class CaptionOverride(Frozen):
+    """One sparse fix: `word` (index) with `text` / `emphasis`, or `chunk_break_before` (word index)."""
+
+    word: StrictInt | None = None
+    text: str | None = None
+    emphasis: bool | None = None
+    chunk_break_before: StrictInt | None = None
+
+
+class Captions(Frozen):
+    """Word timings in, styled caption chunks out. `captions.expand` turns this into `text` blocks."""
+
+    source: str
+    preset: str = "punch"
+    words_per_chunk: tuple[StrictInt, StrictInt] = (1, 3)
+    accent: str = "#ffe600"
+    emphasis: str | list[StrictInt] = "auto"
+    y: RealNum | None = None
+    offset: DurationStr | None = None
+    overrides: list[CaptionOverride] = Field(default_factory=list)
+
+
 class Spec(Frozen):
     video: Video
     assets: str = "assets"
@@ -701,6 +738,7 @@ class Spec(Frozen):
     tracks: Tracks | None = None
     overlays: list[Overlay] = Field(default_factory=list)
     check: CheckSpec | None = None
+    captions: Captions | None = Field(default=None, exclude_if=_none_value)
 
 
 def _yaml_path(loc: tuple) -> str:
@@ -2564,6 +2602,14 @@ def _check_text_styling(path: str, line: TextLine, errors: list[str]) -> None:
         sc = line.emphasis.scale
         if not math.isfinite(sc) or sc <= 0 or sc > 3:
             errors.append(_line(f"{path}.emphasis.scale", f"must be > 0 and <= 3, got {_fmt_num(sc)}", "use 1.0-1.3"))
+    if line.bar is not None:
+        _check_color(f"{path}.bar.color", line.bar.color, errors)
+        n_words = len(glyphs.parse_emphasis(line.text)[0].split(" "))
+        for name, v in (("word", line.bar.word), ("from", line.bar.from_)):
+            if v is not None and not 0 <= v < n_words:
+                errors.append(_line(f"{path}.bar.{name}", f"{v} is not a word of the line", f"use 0 to {n_words - 1}"))
+        if not math.isfinite(line.bar.pad) or line.bar.pad < 0:
+            errors.append(_line(f"{path}.bar.pad", f"must be >= 0, got {_fmt_num(line.bar.pad)}", "use design px, e.g. 14"))
     if line.stroke is not None:
         _check_color(f"{path}.stroke.color", line.stroke.color, errors)
         w = line.stroke.width
@@ -2928,7 +2974,8 @@ def _reject_overlap_windows(
                 )
 
 
-def load_spec(path: Path | str) -> Spec:
+def load_spec(path: Path | str, *, expand: bool = True) -> Spec:
+    """Parse and validate. `expand=False` keeps a `captions` block unexpanded (for `montaj captions`)."""
     path = Path(path)
     try:
         text = path.read_text()
@@ -2952,6 +2999,10 @@ def load_spec(path: Path | str) -> Spec:
     assets_dir = path.parent / str(assets_rel)
     _collect_photos(data, assets_dir, path.parent, errors)
 
+    if spec is not None and expand and spec.captions is not None and not errors:
+        from montaj.captions import expand_captions
+
+        spec = expand_captions(spec, path.parent, errors)
     if spec is not None:
         validate_spec(spec, errors, spec_dir=path.parent)
     if errors:

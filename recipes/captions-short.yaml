@@ -1,0 +1,5 @@
+# A voice clip with punch captions. Needs assets/voice.mp4 and `montaj transcribe voice` first.
+video: {size: 1080x1920, fps: 30, look: clean}
+shots:
+  - {clip: voice, range: [0s, 30s]}
+captions: {source: voice, preset: punch}

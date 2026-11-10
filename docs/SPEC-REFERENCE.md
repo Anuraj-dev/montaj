@@ -197,8 +197,18 @@ Photo fields (`crop`, `focus`, swirl `center`, wall `at`) are source-image pixel
 - `text[].lines[].out.to` — `left`, `right`, `top` or `bottom`, default `right` — side a `slide` exit leaves toward.
 - `text[].lines[].out.distance` — design px 0–2000, default `160` — travel of a `slide` exit.
 - `text[].lines[].idle` — `float` or `pulse` (or `{type, amount}`), default none — loop every `1.5s` once a unit lands: `float` bobs `amount` design px (default `4`), `pulse` scales by `amount` percent (default `4`); 0–100.
+- `text[].lines[].bar` — `{word, from?, color?, pad?}`, default none — a rounded bar behind the 0-based word `word` of the line (gpu engine), hugging its ink; `from` (another word) makes it slide from there over 3 frames; `color` default `#ffe600`; `pad` design px, default `14`. Written by `captions` for `preset: highlight`.
 - `validate` — shapes every text line (card lines too) and reports `ERR text[1].lines[0]: 132px wider than the frame at size 100 (fits at size 88; or set fit: true)` when the line box leaves the 1080-wide frame. Lines with a character the bundled fonts lack are not measured.
 - `text[].lower_third` — `{title, subtitle?, at?, side?, y?}`, replaces `lines` — sugar for a bold sans title chip with a gold dot and a sans subtitle 110 design px below. `at` default the block `from`, `side` `left` or `right` default `left`, `y` default `1500` (design px, title top). `fade_in`/`fade_out` default `0.4s`. No bar or slide yet.
+- `captions` — mapping, default none — word timings expanded at load into gpu `text` blocks after your own (the renderer and the cache see only those); `montaj captions --print` lists `chunk start end text`. Rules and presets: `docs/CAPTIONS.md`.
+- `captions.source` — string, required — `audio.markers`, a words JSON beside the spec (`{words: [{i, w, s, e}]}`), or a clip id whose `assets/<id>.words.json` `montaj transcribe <id>` wrote.
+- `captions.preset` — `punch`, `karaoke`, `highlight`, `clean`, `comic` or `minimal`, default `punch` — the look; each sets font, stroke, shadow, entry and the accent treatment.
+- `captions.words_per_chunk` — `[min, max]` within 1 to 6, default `[1, 3]` — a chunk breaks at `max` words, at a pause of 0.3 s, at `. ! ? …`, at a comma once it holds `min`, or when its width passes the frame budget.
+- `captions.accent` — `#rrggbb`, default `#ffe600` — colour of the accented word (the `highlight` bar, the `minimal` serif word).
+- `captions.emphasis` — `auto`, `none` or a list of word indexes, default `auto` — which word per chunk takes the accent; `auto` picks a number, a negation, or a long content word, never in two chunks running.
+- `captions.y` — number, default 64.6 % of the frame height on portrait, 80 % otherwise — design-px centre of the caption.
+- `captions.offset` — duration, default none — shifts every word time (a trimmed clip).
+- `captions.overrides` — list, default none — per-word fixes: `{word, text?, emphasis?}` rewrites a word or forces/clears its accent; `{chunk_break_before}` starts a chunk at that word. An index not in the source is an error. Trailing `.` and `,` are dropped from every word; `?` `!` stay.
 - `subs` — list, default none — lyric subtitles, one fixed style.
 - `subs[].from` — time expression, required — subtitle window start.
 - `subs[].to` — time expression, required — subtitle window end.
