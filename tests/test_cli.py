@@ -278,6 +278,28 @@ def _solid(path: Path, seconds: float, fps: int = 30) -> None:
     )
 
 
+def test_check_falls_back_to_an_export_output(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    """A project with only `export --target X` output is checked; final/preview still win."""
+    proj = tmp_path / "proj"
+    code, out, _err = _run(["-C", str(proj), "check"], capsys)
+    assert code == 1 and "out/<target>.mp4" in out
+
+    older, newer = proj / "out" / "master.mp4", proj / "out" / "whatsapp.mp4"
+    _clip(older, black=False)
+    _clip(newer, black=True)
+    os.utime(older, (1_000, 1_000))
+    os.utime(newer, (2_000, 2_000))
+    code, out, err = _run(["-C", str(proj), "check"], capsys)
+    assert code == 0 and err == "", out
+    assert any(line.startswith("WARN black") for line in out.splitlines())  # the newer export
+
+    _clip(proj / "out" / "preview.mp4", black=False)
+    os.utime(proj / "out" / "preview.mp4", (500, 500))
+    code, out, err = _run(["-C", str(proj), "check"], capsys)
+    assert code == 0 and err == "", out
+    assert not any(line.startswith("WARN black") for line in out.splitlines())  # the preview
+
+
 def test_check_ignores_still_holds_but_warns_on_transition_freeze(
     tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch,
 ) -> None:

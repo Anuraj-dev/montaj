@@ -277,12 +277,17 @@ def _recipe(name: str) -> Path:
 
 
 def _video(root: Path, given: str | None) -> Path:
-    """Explicit path, else the newer of out/final.mp4 and out/preview.mp4."""
+    """Explicit path, else the newer of out/final.mp4 and out/preview.mp4; with neither, the newest
+    `export` output out/<target>.mp4 (a project that only ran `montaj export` still has a film)."""
     if given:
         return _at(root, given)
-    cands = [p for p in (root / "out" / "final.mp4", root / "out" / "preview.mp4") if p.is_file()]
+    out = root / "out"
+    cands = [p for p in (out / "final.mp4", out / "preview.mp4") if p.is_file()]
     if not cands:
-        raise FileNotFoundError("video: no out/final.mp4 or out/preview.mp4 (render first, or pass --video)")
+        cands = [p for p in (out / f"{name}.mp4" for name in TARGETS) if p.is_file()]
+    if not cands:
+        raise FileNotFoundError(
+            "video: no out/final.mp4, out/preview.mp4 or out/<target>.mp4 (render first, or pass --video)")
     return max(cands, key=lambda p: p.stat().st_mtime)
 
 
