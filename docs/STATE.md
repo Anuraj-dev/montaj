@@ -2,13 +2,18 @@
 > Agent-native video harness: YAML spec in, finished video out, zero-token re-render/review · Last checkpoint: 2026-11-10
 
 ## Issue status (source of truth; 2026-11-10)
-- **Closed** (merged to `main`, closed on GitHub with merge sha): #1–33 except open ones below, plus #37, #40, #42.
-  Do not reopen or re-implement these. Changes go in a new issue or a follow-up commit.
-- **In progress** (label `in-progress`; a worker owns each worktree): #34 `i34`, #39 `i39`, #46 `i46`, and the
-  M5 exit-gate fix `m5gate` (`fix/caption-safe-rate`, no issue). Do not touch another worker's worktree. Driver merges.
-- **Open, not started:** #35, #36, #38 (after #34), #41, #43–#45, #47, #48.
-- Tracker #49 checkboxes match this list. `main` is 70+ merges ahead of `origin/main` (not pushed).
-- M5 7/7 (exit gate pending `m5gate`) · M6 3/3 · M7 4/4 · M8 1/5 · M9 2/4 · M10 0/4 · M11 0/2.
+- **Closed** (merged to `main`, closed on GitHub with merge sha): #1–34, #37, #39, #40, #42, #46, and the M5 gate fix
+  (`fix/caption-safe-rate`, 8d974ef). Do not reopen or re-implement these.
+- **In progress** (label `in-progress`; a worker owns each worktree): #35 `i35`, #36 `i36`, #38 `i38`.
+  Do not touch another worker's worktree. Driver merges.
+- **Open, not started:** #41 (after #35, #38), #43, #44 (after #43, #36), #45 (after #43), #47, #48.
+- Tracker #49 checkboxes match this list. `main` is 80+ merges ahead of `origin/main` (not pushed).
+- M5 7/7 · M6 3/3 · M7 4/4 · M8 2/5 · M9 3/4 · M10 1/4 · M11 0/2. Tests on main a781c41: CPU 937, GPU 107 passed.
+- Follow-ups found while merging (no issue yet):
+  - `recipes/captions-short.yaml` renders with `INFO no audio`: a captioned voice film loses the voice.
+  - Strict mode refuses the wall's print shadows (PIL GaussianBlur on the CPU), so `birthday-short` can't run strict.
+  - `montaj cut` splits only on word-timing gaps, so continuous speech gives one span.
+  - `check` without `--video` ignores `out/<target>.mp4` from `export`.
 
 ## 🚧 In progress / next
 - Next: `docs/ROADMAP.md` (M5–M11, issues #20–#48, tracker #49). Caption design contract: `docs/CAPTIONS.md`.
