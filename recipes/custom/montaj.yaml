@@ -1,0 +1,16 @@
+# Code-drawn shots, an effect and a transition (#37): no photos, no pre-render step.
+# Every pixel comes from the fx/*.py draw(ctx) functions, run on the GPU in the render loop.
+# A spec with `custom:` executes those files with its author's trust (see SPEC-REFERENCE "Custom code").
+video:
+  size: 1080x1920
+  fps: 30
+  look: warm-film
+  background: '#000000'
+assets: assets
+shots:
+  - {custom: fx/starfield.py, hold: 75f, params: {speed: 0.6, seed: 3}}
+  - custom: fx/blackhole.py
+    hold: 120f
+    params: {mass: 0.22, tilt: 0.28, spin: 0.35, seed: 3}
+    effects: [{custom: fx/chroma.py, params: {amount: 0.012}}]
+    in: {type: custom, src: fx/portal.py, dur: 24f, params: {rim: '#ffb35c'}}

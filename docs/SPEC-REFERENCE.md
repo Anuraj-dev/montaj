@@ -59,11 +59,16 @@ Photo fields (`crop`, `focus`, swirl `center`, wall `at`) are source-image pixel
 - `shots[].card` — mapping, one source: photo, wall, clip, blank, sequence or card — a solid colour and text as this shot's picture, with no blank shot and no `text` block. Mutually exclusive with the other sources.
 - `shots[].card.color` — `#rrggbb`, required — the card's background.
 - `shots[].card.text` — list, required — lines with the same fields as `text[].lines[]`. `at`, `stagger`, `dur` and `sweep` are durations from this shot's start (`0s`, `12f`, `1b`), not film markers. The colour and the lines are one picture, so a fade or whip carries both.
+- `shots[].custom` — path to a `.py` file, relative to the spec, one source: photo, wall, clip, blank, sequence, card or custom — the shot is drawn by that file's `draw(ctx)` on the GPU. Mutually exclusive with the other sources; `crop`, `focus` and `zoom` do not apply. **A spec with `custom:` executes that code in-process with its author's trust (like `music compose`); Montaj does not sandbox it.** See custom code.
+- `shots[].params` — mapping, default none — values handed to the shot's `draw` as `ctx.params`. Needs `custom`. Part of the segment hash.
+- `shots[].effects` — list, default none — custom effects applied in order to this shot's picture (any source except blank), before the look. A transition carries each side's effects.
+- `shots[].effects[].custom` — path to a `.py` file, required — `draw(ctx)` gets the shot picture as `ctx.inputs[0]` and returns the new picture.
+- `shots[].effects[].params` — mapping, default none — `ctx.params` for that effect.
 - `shots[].crop` — `[x0, y0, x1, y1]`, default the full image — the part of the photo that is shown. On a clip it is a box of the source video frame, in source px, inside the video.
 - `shots[].focus` — `[x, y]`, `face`, `face:N` or `subject`, default the crop centre — the photo point placed at the screen centre. On a clip it is a source-video pixel inside the crop, a one-key `camera`. `face` is the centre of the largest face box, `face:N` the N-th largest, `subject` the saliency peak, all read from `assets/analysis.json` and written into the shot as `[x, y]` before hashing; on a clip they come from the scene holding the shot's start. A photo with no face is `ERR shots[i].focus: no face in <stem> (use subject or [x, y])`.
 - `shots[].zoom` — number, default cover — design pixels per photo pixel. Cover fits the crop with a hair of overscan. On a clip it is a multiple of cover (>= 1), a one-key `camera`, as in `camera[].zoom`.
 - `shots[].in` — mapping, default none — how this shot arrives from the previous one. Omit `in` for a cut. See transitions.
-- `shots[].in.type` — `cut`, `fade`, `swirl`, `whip`, `glitch`, `zoom`, `dip`, `push`, `wall-pullback` or `burn-white`, required inside `in` — which transition.
+- `shots[].in.type` — `cut`, `fade`, `swirl`, `whip`, `glitch`, `zoom`, `dip`, `push`, `wall-pullback`, `burn-white` or `custom`, required inside `in` — which transition.
 - `shots[].in.dur` — duration, required except for a cut — length of the transition. It has to fit in the shots it overlaps.
 - `shots[].in.center` — `[x, y]`, default the outgoing shot's focus — where a swirl opens, in the outgoing photo.
 - `shots[].in.axis` — `x` or `y`, default `x` — which way a whip or push travels.
@@ -72,6 +77,8 @@ Photo fields (`crop`, `focus`, swirl `center`, wall `at`) are source-image pixel
 - `shots[].in.color` — `#rrggbb`, default `#000000` — colour the picture dips through. Dip only.
 - `shots[].in.blur` — number, default `0` — design-px blur on fading layers. Shot 0 may use `fade` (from `video.background`); other transitions on shot 0 stay an error.
 - `shots[].in.zoom` — number, default `3.2` — wall-pullback only. Magnification of the incoming frame at the start; the camera eases to 1. Must be > 1.
+- `shots[].in.src` — path to a `.py` file, required for `custom` — the transition's `draw(ctx)`; `ctx.inputs` is `[outgoing, incoming]` and `ctx.p` runs 0..1 across the window. Custom only.
+- `shots[].in.params` — mapping, default none — `ctx.params` for the custom transition. Custom only.
 - `shots[].flash` — number, default none — white flash on this shot's first frame, fading out over the next 6 frames.
 - `shots[].wall` — mapping, one source: photo, wall, clip, blank, sequence or card — a flat field of prints. The camera only pans and zooms. Mutually exclusive with the other sources.
 - `wall.grid` — `WxH` string, required — distance between print cells, in world design pixels.
@@ -272,6 +279,16 @@ Transitions (`shots[].in`):
 - `push` — across the first `dur` frames the new shot slides in along `axis` and shoves the old one out. Starts on the cut, softer ease than whip.
 - `wall-pullback` — camera eases with `outc` from `zoom` (default 3.2) down to the incoming frame. The outgoing frame shrinks as an opaque centre card, then dissolves, so the incoming shot opens as a wall. First `dur` frames of the incoming shot.
 - `burn-white` — the outgoing shot burns to white over the first half (highlights clip first) and the incoming shot emerges from white over the second half. First `dur` frames of the incoming shot.
+- `custom` — the `draw(ctx)` in `src` mixes `ctx.inputs = [outgoing, incoming]` as `ctx.p` goes 0..1. First `dur` frames of the incoming shot.
+
+Custom code (`custom:`, `effects[].custom`, `in.src`):
+
+- Contract — `def draw(ctx)` at the file's top level, pure (no IO, no globals, no randomness outside `ctx`), returns a float32 tensor on `ctx.device`: `(3, H, W)` RGB in 0..1, or `(4, H, W)` premultiplied RGBA composited over `inputs[0]` (or `video.background`). Output is clamped to 0..1 before the look.
+- `ctx` — `uv (H, W, 2)` pixel centres, x right, y up, short side spans [-1, 1]; `t` seconds since the shot (or transition) start; `p` progress 0..1; `f` film frame; `fps`; `beat` (beats since the grid start, or None with no `video.bpm`); `params` (a copy); `inputs` (copies); `W`, `H`, `k` (design px scale); `device`.
+- Helpers — `ctx.noise(seed)` (H, W) uniform, `hash(p, seed)`, `vnoise(p, seed)`, `fbm(p, octaves, seed)`, `sd_circle(p, r, center)`, `sd_box(p, half, center)`, `fill(d, soft)`, `polar(p)` -> (r, angle), `palette(t, a, b, c, d)`, `rgb('#hex')`, `sample(img, p)` (warp by uv coordinates), `blur(img, sigma)` in design px, `smoothstep`, `mix`. Seeded and deterministic.
+- Cache — the segment hash covers each used file's bytes, its params and the helper API version, so editing a file re-renders only the segments that draw it.
+- Errors — `validate` checks the file exists, parses and defines `draw`. At render, an exception, a wrong shape or dtype, NaN/inf or a CPU tensor is `ERR render: custom <file>:<line>: <problem> (<hint>)`; the traceback goes to `build/render.log`.
+- `montaj custom test <file.py> [--kind shot|effect|transition] [--params JSON] [--size WxH]` — runs `draw` at a small size across a few frames, checks range and determinism, writes a strip and prints `OK <file> <ms>ms/frame peak <n>MB strip <path>`.
 
 Looks (`video.look`):
 
@@ -332,6 +349,6 @@ Reuse (`styles`, `defaults`, `components`, `use`, `include`) is expanded before 
 `~/.config/montaj/config.toml`:
 - `[gpu] strict = true` — any CPU pixel path stops the command with `ERR gpu-strict: <what> would run on the CPU: <hint>` instead of falling back. Default false. `MONTAJ_GPU_STRICT=1|0` overrides it for one run.
 - `[gpu] device = "cuda:0"` — the CUDA device every stage uses; also a GPU UUID or name substring (`"RTX 5050"`), so an integrated GPU is never picked. Default: the current CUDA device.
-- Policed pixel stages: **decode** (clip not openable by NVDEC -> ffmpeg), **photo** (nvJPEG for JPEG under strict, PIL otherwise so non-strict stays film2-exact; PNG/WebP and prints' PIL shadow blur are CPU), **text** (lines on the Chromium engine, card lines, subs, frame captions are CPU; `engine: gpu` is not), **encode** (`libx264` when NVENC is unusable; NVENC through the ffmpeg pipe still counts as GPU). A cached segment runs nothing, so strict does not recheck it.
+- Policed pixel stages: **decode** (clip not openable by NVDEC -> ffmpeg), **photo** (nvJPEG for JPEG under strict, PIL otherwise so non-strict stays film2-exact; PNG/WebP and prints' PIL shadow blur are CPU), **text** (lines on the Chromium engine, card lines, subs, frame captions are CPU; `engine: gpu` is not), **encode** (`libx264` when NVENC is unusable; NVENC through the ffmpeg pipe still counts as GPU), **custom** (`draw(ctx)` runs on the canvas device; a CPU canvas is a fallback, and a CPU tensor returned on CUDA is an error, never a copy). A cached segment runs nothing, so strict does not recheck it.
 - `render` / `watch` `OK` lines end `gpu=all`, or `gpu=partial(text,decode)` naming stages that fell back (non-strict). `montaj doctor` prints one line per stage (`composite`, `decode`, `photo`, `text`, `encode`, `capture`); under strict a stage that would fall back is `FAIL`.
 - Not pixel work, not policed: text shaping, demux/mux, audio mix, Python orchestration. Named exceptions: `capture` rasterises the page in headless Chromium (CPU); its encode uses NVENC (libx264 only when NVENC is unusable, an error under strict). `ingest` and `sheet` use PIL on the CPU.

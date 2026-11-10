@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import math
 import zlib
 from dataclasses import dataclass, field, replace
@@ -105,10 +106,19 @@ class Card:
 
 
 @dataclass(frozen=True)
+class Custom:
+    """A code-drawn shot (#37). The renderer runs the shot's `custom` file; `t0`/`end` are its frames."""
+
+    shot: int
+    t0: int
+    end: int
+
+
+@dataclass(frozen=True)
 class Trans:
     kind: str
-    a: Still | Wall | Clip | Blank | Sequence | Card | Trans
-    b: Still | Wall | Clip | Blank | Sequence | Card | Trans
+    a: Still | Wall | Clip | Blank | Sequence | Card | Custom | Trans
+    b: Still | Wall | Clip | Blank | Sequence | Card | Custom | Trans
     t0: float
     dur: float
     axis: str = "x"
@@ -119,9 +129,12 @@ class Trans:
     seed: int | None = None
     dip_color: str | None = None
     zoom: float | None = None
+    # `type: custom`: the file and its params as canonical JSON, so the plan hash sees both.
+    src: str | None = None
+    params: str | None = None
 
 
-type Scene = Still | Wall | Clip | Blank | Sequence | Card | Trans
+type Scene = Still | Wall | Clip | Blank | Sequence | Card | Custom | Trans
 
 
 def sequence_index(start: int, every: int, n: int, t: float) -> int:
@@ -273,9 +286,11 @@ def _base_scene(
     shot: ResolvedShot,
     span: tuple[int, int] | None = None,
     card_span: tuple[float, float] | None = None,
-) -> Still | Wall | Clip | Blank | Sequence | Card:
+) -> Still | Wall | Clip | Blank | Sequence | Card | Custom:
     if shot.kind == "blank":
         return Blank()
+    if shot.kind == "custom":
+        return Custom(shot=shot.index, t0=shot.start, end=shot.end)
     if shot.kind == "card":
         window = card_span or (float(shot.start) - 1.0, float(shot.end) + 1.0)
         return Card(shot=shot.index, t0=shot.start, end=shot.end, span=window)
@@ -517,6 +532,8 @@ def _shot_kind(sh: Shot) -> str:
         return "clip"
     if sh.sequence is not None:
         return "sequence"
+    if sh.custom is not None:
+        return "custom"
     return "still"
 
 
@@ -986,6 +1003,9 @@ def resolve(spec: Spec, spec_dir: Path) -> Timeline:
                 extra["axis"] = tr.axis
             if tr.type == "wall-pullback":
                 extra["zoom"] = float(tr.zoom)
+            if tr.type == "custom":
+                extra["src"] = tr.src
+                extra["params"] = json.dumps(tr.params or {}, sort_keys=True, separators=(",", ":"), default=str)
             windows.append(
                 (
                     t0,

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import json
 import math
 import re
@@ -36,10 +37,12 @@ from montaj.events import (
 
 EASE = ("linear", "smooth", "cubic", "outc", "inc", "expo", "ramp", "sine")
 EASE_HINT = "use linear, smooth, cubic, outc, inc, expo, ramp or sine"
-TRANS_TYPES = ("cut", "fade", "swirl", "whip", "glitch", "zoom", "dip", "push", "wall-pullback", "burn-white")
+TRANS_TYPES = (
+    "cut", "fade", "swirl", "whip", "glitch", "zoom", "dip", "push", "wall-pullback", "burn-white", "custom",
+)
 # These occupy [start, start+dur) of the incoming shot. Whip is centred on the cut.
-INCOMING_TRANS = ("fade", "swirl", "glitch", "zoom", "dip", "push", "wall-pullback", "burn-white")
-TRANS_HINT = "use cut, fade, swirl, whip, glitch, zoom, dip, push, wall-pullback or burn-white"
+INCOMING_TRANS = ("fade", "swirl", "glitch", "zoom", "dip", "push", "wall-pullback", "burn-white", "custom")
+TRANS_HINT = "use cut, fade, swirl, whip, glitch, zoom, dip, push, wall-pullback, burn-white or custom"
 TRANS_STRENGTH_MAX = 4.0
 # Starting magnification of a wall pull-back. Materialised onto the shot so the hash sees it.
 WALL_PULLBACK_ZOOM = 3.2
@@ -225,6 +228,9 @@ class Transition(Frozen):
     seed: Annotated[int, Field(strict=True)] | None = Field(default=None, exclude_if=lambda v: v is None)
     color: str | None = Field(default=None, exclude_if=lambda v: v is None)
     zoom: RealNum | None = Field(default=None, exclude_if=lambda v: v is None)
+    # `type: custom`: the .py file (relative to montaj.yaml) and what its draw(ctx) reads as ctx.params.
+    src: str | None = Field(default=None, exclude_if=lambda v: v is None)
+    params: dict[str, Any] | None = Field(default=None, exclude_if=lambda v: v is None)
 
 
 class WallPrint(Frozen):
@@ -520,6 +526,13 @@ class CardSpec(Frozen):
     text: list[TextLine]
 
 
+class CustomEffect(Frozen):
+    """`shots[].effects[]`: a custom file that redraws the shot's layer (ctx.inputs[0])."""
+
+    custom: str
+    params: dict[str, Any] | None = Field(default=None, exclude_if=lambda v: v is None)
+
+
 class Shot(Frozen):
     photo: PhotoId | None = None
     wall: WallSpec | None = None
@@ -548,6 +561,10 @@ class Shot(Frozen):
     # Absent stays out of model_dump so films without a sequence keep their segment hash.
     sequence: SequenceSpec | None = Field(default=None, exclude_if=lambda v: v is None)
     card: CardSpec | None = Field(default=None, exclude_if=lambda v: v is None)
+    # Code-drawn shot (#37): a .py file whose draw(ctx) paints the frame; params reach ctx.params.
+    custom: str | None = Field(default=None, exclude_if=lambda v: v is None)
+    params: dict[str, Any] | None = Field(default=None, exclude_if=lambda v: v is None)
+    effects: list[CustomEffect] | None = Field(default=None, exclude_if=lambda v: v is None)
     in_: Transition | None = Field(default=None, alias="in")
     flash: float | None = None
 
@@ -2108,6 +2125,49 @@ def _check_trans_params(i: int, tr: Transition, errors: list[str]) -> None:
             errors.append(_line(f"{p}.color", f"not used by {tr.type}", "use it on dip"))
         elif not _HEX.match(tr.color):
             errors.append(_line(f"{p}.color", f"unknown colour {tr.color!r}", "use #rrggbb"))
+    for name in ("src", "params"):
+        if getattr(tr, name) is not None and tr.type != "custom":
+            errors.append(_line(f"{p}.{name}", f"not used by {tr.type}", "use it on type: custom"))
+
+
+def _check_custom_file(path: str, rel: str, spec_dir: Path | None, errors: list[str]) -> None:
+    """A custom file exists, parses and defines top-level draw(ctx). It is not run here."""
+    if not rel.endswith(".py"):
+        errors.append(_line(path, f"{rel!r} is not a .py file", "name a Python file like fx/stars.py"))
+        return
+    if spec_dir is None:
+        return
+    file = Path(spec_dir) / rel
+    if not file.is_file():
+        errors.append(_line(path, f"{rel} not found", "paths are relative to montaj.yaml"))
+        return
+    try:
+        tree = ast.parse(file.read_bytes(), filename=str(file))
+    except SyntaxError as e:
+        errors.append(_line(path, f"{rel}:{e.lineno}: syntax error: {e.msg}", "fix the file"))
+        return
+    for node in tree.body:
+        if isinstance(node, ast.FunctionDef) and node.name == "draw":
+            if not node.args.args:
+                errors.append(_line(path, f"{rel}:{node.lineno}: draw takes no ctx", "use def draw(ctx):"))
+            return
+    errors.append(_line(path, f"{rel}: no top-level draw(ctx)", "define def draw(ctx): ... return rgb"))
+
+
+def _validate_custom_shot(sh: Shot, i: int, spec_dir: Path | None, errors: list[str]) -> None:
+    if sh.custom is not None:
+        _check_custom_file(f"shots[{i}].custom", sh.custom, spec_dir, errors)
+        for name in ("crop", "focus", "zoom"):
+            if getattr(sh, name) is not None:
+                errors.append(_line(f"shots[{i}].{name}", "not used on a custom shot", "pass it in params"))
+    elif sh.params is not None:
+        errors.append(_line(f"shots[{i}].params", "params needs custom", "add custom: fx/name.py"))
+    for j, fx in enumerate(sh.effects or ()):
+        _check_custom_file(f"shots[{i}].effects[{j}].custom", fx.custom, spec_dir, errors)
+    if sh.effects is not None and not sh.effects:
+        errors.append(_line(f"shots[{i}].effects", "empty list", "remove effects or add {custom: fx/name.py}"))
+    if sh.blank and sh.effects:
+        errors.append(_line(f"shots[{i}].effects", "not used on a blank shot", "use a custom shot"))
 
 
 def _check_ease(path: str, ease: str, errors: list[str]) -> None:
@@ -2271,17 +2331,21 @@ def validate_spec(
         has_b = sh.blank
         has_s = sh.sequence is not None
         has_card = sh.card is not None
-        n_src = has_p + has_w + has_c + has_b + has_s + has_card
+        has_custom = sh.custom is not None
+        n_src = has_p + has_w + has_c + has_b + has_s + has_card + has_custom
         if n_src > 1:
             errors.append(
                 _line(
                     f"shots[{i}]",
-                    "photo, wall, clip, blank, sequence and card are mutually exclusive",
+                    "photo, wall, clip, blank, sequence, card and custom are mutually exclusive",
                     "remove extra",
                 )
             )
         elif n_src == 0:
-            errors.append(_line(f"shots[{i}]", "need photo, wall, clip, blank, sequence or card", "add one"))
+            errors.append(
+                _line(f"shots[{i}]", "need photo, wall, clip, blank, sequence, card or custom", "add one")
+            )
+        _validate_custom_shot(sh, i, spec_dir, errors)
         if sh.card is not None:
             _validate_card(sh.card, i, fps, bpm, errors)
         if not has_p:
@@ -2424,6 +2488,11 @@ def validate_spec(
                     )
                 )
         _check_trans_params(i, tr, errors)
+        if tr.type == "custom":
+            if tr.src is None:
+                errors.append(_line(f"shots[{i}].in.src", "required for custom", "set src: fx/name.py"))
+            else:
+                _check_custom_file(f"shots[{i}].in.src", tr.src, spec_dir, errors)
         if tr.type == "cut":
             continue
         if tr.type in ("whip", "push") and tr.axis not in ("x", "y"):
