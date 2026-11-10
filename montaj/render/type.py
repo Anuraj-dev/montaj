@@ -329,6 +329,30 @@ def draw_run_crop(cv, run: G.GlyphRun, style: TextStyle, per_glyph_xform=None, *
     return _over(layer, under), X0, Y0
 
 
+def draw_bar(cv, rect: tuple[float, float, float, float], color: str, *, radius: float,
+             opacity: float = 1.0) -> tuple[torch.Tensor, int, int]:
+    """A rounded bar (premul RGBA crop, x0, y0) over `rect` = (x0, y0, x1, y1) design px (#23 `highlight`).
+
+    Edges are antialiased from the rounded-box distance; `radius` is design px.
+    """
+    k = float(cv.k)
+    x0, y0, x1, y1 = (v * k for v in rect)
+    ix0, iy0, ix1, iy1 = math.floor(x0) - 1, math.floor(y0) - 1, math.ceil(x1) + 1, math.ceil(y1) + 1
+    w, h = ix1 - ix0, iy1 - iy0
+    if w <= 2 or h <= 2:
+        return torch.zeros(4, 0, 0, device=cv.device), 0, 0
+    dev = torch.device(cv.device)
+    ys = torch.arange(h, device=dev, dtype=torch.float32).view(h, 1) + (iy0 + 0.5)
+    xs = torch.arange(w, device=dev, dtype=torch.float32).view(1, w) + (ix0 + 0.5)
+    cx, cy, hx, hy = (x0 + x1) / 2, (y0 + y1) / 2, (x1 - x0) / 2, (y1 - y0) / 2
+    r = min(radius * k, hx, hy)
+    qx, qy = (xs - cx).abs() - (hx - r), (ys - cy).abs() - (hy - r)
+    dist = torch.sqrt(qx.clamp(min=0) ** 2 + qy.clamp(min=0) ** 2) + torch.maximum(qx, qy).clamp(max=0) - r
+    a = (0.5 - dist).clamp(0.0, 1.0) * opacity
+    rgb_ = torch.tensor(rgb(color), device=dev, dtype=torch.float32).view(3, 1, 1)
+    return torch.cat([rgb_ * a, a.unsqueeze(0)], dim=0), ix0, iy0
+
+
 def draw_run(cv, run: G.GlyphRun, style: TextStyle, per_glyph_xform=None, *, atlas: GlyphAtlas) -> torch.Tensor:
     """`run` painted onto a transparent canvas: (4, H, W) premultiplied RGBA on `cv.device`."""
     crop, x0, y0 = draw_run_crop(cv, run, style, per_glyph_xform, atlas=atlas)

@@ -12,6 +12,7 @@ from montaj.render import motion as M
 from montaj.render.glyphs import FontBook, GlyphRun, layout_line, parse_emphasis, plan_text
 from montaj.render.motion import Motion
 from montaj.spec import (
+    TextBar,
     TextEmphasis,
     TextShadow,
     TextStroke,
@@ -170,6 +171,7 @@ class ResolvedLine:
     glyphs: GlyphRun | None = None
     # Per-unit motion (#22), gpu lines with `in`/`out`/`idle`/emphasis motion; hashed by project.segment_hash.
     motion: Motion | None = None
+    bar: TextBar | None = None  # a rounded bar behind one word (#23)
 
 
 @dataclass(frozen=True)
@@ -692,6 +694,7 @@ def _resolve_texts(spec: Spec, times: dict[str, float], fps: int) -> list[Resolv
                         # Marked words without an `emphasis:` mapping take its defaults.
                         emphasis=line.emphasis if line.emphasis is not None or run is None or not run.spans else TextEmphasis(),
                         motion=piece_motion,
+                        bar=line.bar,
                     )
                 )
         out.append(
@@ -914,6 +917,10 @@ def _resolve_tracks(spec: Spec, times: dict[str, float]) -> dict[str, list]:
 
 def resolve(spec: Spec, spec_dir: Path) -> Timeline:
     errors: list[str] = []
+    if spec.captions is not None:  # a spec built in code; load_spec has already expanded a file's
+        from montaj.captions import expand_captions
+
+        spec = expand_captions(spec, spec_dir)
     parsed, times, markers, bpm, beat0, clip_ins = validate_spec(spec, errors, spec_dir=spec_dir)
     size = parse_wh(spec.video.size, "video.size", errors, even=True)
     if errors:
