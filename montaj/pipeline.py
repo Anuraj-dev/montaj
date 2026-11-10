@@ -17,7 +17,7 @@ from montaj.project import file_sha, find_photo, resolve_clip, segment_hash
 from montaj.render.canvas import Canvas
 from montaj.render.frame import Renderer
 from montaj.spec import Spec, _dur_frames, _parse_beat0, load_spec
-from montaj.timeline import Card, Clip, Segment, Sequence, Still, Trans, Wall, resolve
+from montaj.timeline import Card, Clip, Custom, Segment, Sequence, Still, Trans, Wall, resolve
 
 # Bump when a pixel changes. Concatenated onto __version__ inside every segment hash.
 RENDER_REV = "+4"  # duration hash, photo/clip shas, sine fades, zoom, clip tail, warm fade
@@ -87,6 +87,19 @@ def _asset_shas(spec: Spec, spec_dir: Path) -> dict[str, str]:
     look = spec.video.look
     if not isinstance(look, str):
         out[f"lut:{look.lut}"] = file_sha(spec_dir / look.lut)
+    for rel in custom_files(spec):
+        out[f"custom:{rel}"] = file_sha(spec_dir / rel)
+    return out
+
+
+def custom_files(spec: Spec) -> list[str]:
+    """Every `custom:` file the spec names: shots, effects and custom transitions."""
+    out: list[str] = []
+    for shot in spec.shots:
+        names = [shot.custom, *(fx.custom for fx in shot.effects or ())]
+        if shot.in_ is not None and shot.in_.type == "custom":
+            names.append(shot.in_.src)
+        out.extend(n for n in names if n is not None and n not in out)
     return out
 
 
@@ -97,7 +110,7 @@ def _log(path: Path, message: str) -> None:
 
 
 def _shots_in(scene) -> set[int]:
-    if isinstance(scene, (Still, Wall, Clip, Sequence, Card)):
+    if isinstance(scene, (Still, Wall, Clip, Sequence, Card, Custom)):
         return {scene.shot}
     if isinstance(scene, Trans):
         return _shots_in(scene.a) | _shots_in(scene.b)

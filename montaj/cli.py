@@ -53,7 +53,7 @@ class _Usage(Exception):
 
 _COMMANDS = (
     "doctor", "new", "ingest", "ingest-rec", "validate", "render", "sheet", "check", "export", "music",
-    "review", "watch", "taste", "capture", "inspect", "captions", "transcribe", "ref",
+    "review", "watch", "taste", "capture", "inspect", "captions", "transcribe", "ref", "custom",
 )
 
 
@@ -130,6 +130,15 @@ def _parser() -> argparse.ArgumentParser:
     comp.add_argument("script")
     comp.add_argument("--out", default="music/song.wav")
     comp.add_argument("--timeout", type=float, default=600.0)
+
+    cu = sub.add_parser("custom")
+    cu_sub = cu.add_subparsers(dest="custom_cmd", required=True, metavar="test")
+    cut = cu_sub.add_parser("test")
+    cut.add_argument("file")
+    cut.add_argument("--kind", choices=("shot", "effect", "transition"), default="shot")
+    cut.add_argument("--params", default="{}")
+    cut.add_argument("--size", default="270x480")
+    cut.add_argument("--frames", type=int, default=6)
 
     cp = sub.add_parser("captions")
     mode = cp.add_mutually_exclusive_group(required=True)
@@ -915,6 +924,36 @@ def _cmd_transcribe(ns: argparse.Namespace, root: Path) -> list[str]:
     return [f"OK {_rel(root, path)} {n} words"]
 
 
+def _cmd_custom_test(ns: argparse.Namespace, root: Path) -> list[str]:
+    """Run one custom `draw(ctx)` at a small size: shape, range, determinism, ms/frame, peak VRAM, a strip."""
+    import torch
+    from PIL import Image
+
+    from montaj.gpu_policy import load_policy, resolve_device
+    from montaj.render.custom import probe
+
+    path = _at(root, ns.file)
+    if not path.is_file():
+        return [f"ERR custom: {ns.file} not found"]
+    try:
+        params = json.loads(ns.params)
+        W, H = (int(v) for v in ns.size.lower().split("x"))
+    except (ValueError, TypeError):
+        return ["ERR custom: --params must be a JSON object and --size WxH"]
+    if not isinstance(params, dict):
+        return ["ERR custom: --params must be a JSON object"]
+    device = resolve_device(load_policy().device) if torch.cuda.is_available() else "cpu"
+    rel = _rel(root, path)
+    base, rel = (path.parent, path.name) if Path(rel).is_absolute() else (root, rel)
+    frames, ms, peak = probe(base, rel, params, kind=ns.kind, W=W, H=H, device=device, frames=ns.frames)
+    strip = torch.cat([f.clamp(0, 1) for f in frames], dim=2)
+    pixels = (strip.permute(1, 2, 0) * 255).round().to(torch.uint8).cpu().numpy()
+    out = root / "build" / f"custom-{path.stem}.jpg"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    Image.fromarray(pixels).save(out, quality=90)
+    return [f"OK {rel} {ms:.1f}ms/frame peak {peak / 2**20:.0f}MB {device} strip {_rel(root, out)}"]
+
+
 def _cmd_music_compose(ns: argparse.Namespace, root: Path) -> list[str]:
     try:
         result = compose_audio.compose(
@@ -991,6 +1030,8 @@ def _dispatch(ns: argparse.Namespace, root: Path) -> list[str]:
         if ns.music_cmd == "analyze":
             return _cmd_music_analyze(ns, root)
         return _cmd_music_compose(ns, root)
+    if ns.cmd == "custom":
+        return _cmd_custom_test(ns, root)
     if ns.cmd == "captions":
         return _cmd_captions(ns, root)
     if ns.cmd == "ref":

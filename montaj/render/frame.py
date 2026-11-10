@@ -10,6 +10,7 @@ on the first frame that needs them, one batch per kind, under ``<project>/build/
 """
 from __future__ import annotations
 
+import json
 import math
 from collections import OrderedDict
 from dataclasses import dataclass
@@ -25,6 +26,7 @@ from montaj.project import find_photo, resolve_clip
 from montaj.render.canvas import Canvas
 from montaj.render.clip import ClipSource, window_key
 from montaj.render.core import Photo, fit_s, sine, still
+from montaj.render.custom import CustomRunner
 from montaj.render.finish import LOOKS, finish, lut_texture
 from montaj.render.shots import (
     card_frame,
@@ -57,11 +59,12 @@ from montaj.render.overlay import draw_overlays
 from montaj.render.type import GlyphAtlas, GlyphLine, line_style
 from montaj.render.transitions import burn_white, dip, fade, glitch, push, swirl, wall_pullback, whip, zoom
 from montaj.render.wall import build_wall, wall_camera, wall_frame
-from montaj.spec import _dur_frames
+from montaj.spec import _dur_frames, _parse_beat0
 from montaj.timeline import (
     Blank,
     Card,
     Clip,
+    Custom,
     Scene,
     Sequence,
     Still,
@@ -251,6 +254,9 @@ class Renderer:
         self._shot: int | None = None
         self._lut = None
         self._owners: dict[str, dict[tuple, set[int]]] = {"photos": {}, "bgs": {}, "cards": {}}
+        video = tl.spec.video
+        beat0 = _parse_beat0(video.beat0, tl.fps, []) if video.beat0 is not None else None
+        self._custom = CustomRunner(self._dir, cv.W, cv.H, cv.device, tl.fps, video.bpm, beat0 or 0.0, log=log)
 
     def begin_segment(self, shots) -> None:
         """Drop cached resources this segment's frames cannot read.
@@ -807,9 +813,39 @@ class Renderer:
 
         return overlay
 
-    def _eval(self, scene: Scene, t: float) -> torch.Tensor:
+    def _run_custom(self, rel: str, params: dict | None, *, t: float, p: float, f: float,
+                    inputs: list[torch.Tensor]) -> torch.Tensor:
+        """Run one custom file. The policy sees a `custom` seam: gpu on CUDA, a CPU fallback otherwise."""
+        if self._policy is not None:
+            if torch.device(self.cv.device).type == "cuda":
+                self._policy.gpu("custom")
+            else:
+                self._policy.cpu("custom", f"custom {rel}", "render on a CUDA device")
+        return self._custom.run(rel, params, t=t, p=p, f=f, inputs=inputs, background=self._background())
+
+    def _custom_shot(self, scene: Custom, t: float) -> torch.Tensor:
+        sh = self.tl.shots[scene.shot].spec
+        local = t - scene.t0
+        return self._run_custom(sh.custom, sh.params, t=local / self.tl.fps,
+                                p=local / max(1, scene.end - 1 - scene.t0), f=t, inputs=[])
+
+    def _effects(self, scene: Scene, t: float) -> torch.Tensor:
+        """The base scene, then each `effects[]` file in order, each reading the layer so far."""
+        img = self._eval(scene, t, effects=False)
+        shot = self.tl.shots[scene.shot]
+        local = t - shot.start
+        for fx in shot.spec.effects:
+            img = self._run_custom(fx.custom, fx.params, t=local / self.tl.fps,
+                                   p=local / max(1, shot.end - 1 - shot.start), f=t, inputs=[img])
+        return img
+
+    def _eval(self, scene: Scene, t: float, effects: bool = True) -> torch.Tensor:
         if isinstance(scene, Blank):
             return self._background()
+        if effects and not isinstance(scene, Trans) and self.tl.shots[scene.shot].spec.effects:
+            return self._effects(scene, t)
+        if isinstance(scene, Custom):
+            return self._custom_shot(scene, t)
         if isinstance(scene, Card):
             return self._word_card(scene, t)
         if isinstance(scene, Still):
@@ -853,6 +889,9 @@ class Renderer:
             return wall_pullback(self.cv, a, b, x, scene.zoom)
         if scene.kind == "burn-white":
             return burn_white(a, b, x)
+        if scene.kind == "custom":
+            return self._run_custom(scene.src, json.loads(scene.params or "{}"), t=(t - scene.t0) / self.tl.fps,
+                                    p=x, f=t, inputs=[a, b])
         raise ValueError(f"transition: unknown {scene.kind!r}")
 
     def _look(self):

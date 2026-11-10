@@ -85,15 +85,37 @@ def file_sha(path: Path) -> str:
 
 
 def _scene_shots(scene: object) -> set[int]:
-    from montaj.timeline import Blank, Card, Clip, Sequence, Still, Trans, Wall
+    from montaj.timeline import Blank, Card, Clip, Custom, Sequence, Still, Trans, Wall
 
     if isinstance(scene, Blank):
         return set()
-    if isinstance(scene, (Still, Wall, Clip, Sequence, Card)):
+    if isinstance(scene, (Still, Wall, Clip, Sequence, Card, Custom)):
         return {scene.shot}
     if isinstance(scene, Trans):
         return _scene_shots(scene.a) | _scene_shots(scene.b)
     raise TypeError(f"unknown scene {type(scene)!r}")
+
+
+def scene_custom_files(scene: object, shots) -> set[str]:
+    """Custom files a scene runs: a custom shot, its shots' effects, a custom transition.
+
+    `shots` maps a shot index to its Shot. Walks the scene, not the referenced shots, so a
+    transition's file reaches only the segments that draw that transition.
+    """
+    from montaj.timeline import Blank, Custom, Trans
+
+    if isinstance(scene, Blank):
+        return set()
+    if isinstance(scene, Trans):
+        out = scene_custom_files(scene.a, shots) | scene_custom_files(scene.b, shots)
+        if scene.src is not None:
+            out.add(scene.src)
+        return out
+    sh = shots[scene.shot]
+    out = {fx.custom for fx in sh.effects or ()}
+    if isinstance(scene, Custom) and sh.custom is not None:
+        out.add(sh.custom)
+    return out
 
 
 def _shot_photos(shot) -> list[str]:
@@ -177,7 +199,7 @@ def _uses_ext_text(lines) -> frozenset[str] | None:
 # Plan fields added after the first release. A None value is left out of the hash input so
 # films that never use the field keep their cached segments. Append here when adding one.
 # Names must be unique across plan dataclasses: another None-valued field with the same name would vanish too.
-_HASH_OMIT_NONE = ("zoom", "strength", "seed", "dip_color")
+_HASH_OMIT_NONE = ("zoom", "strength", "seed", "dip_color", "src", "params")
 # Same for list fields that are empty unless the film uses the feature.
 _HASH_OMIT_EMPTY = ("splits",)
 
@@ -243,6 +265,8 @@ def segment_hash(
     sub_ids: set[int] = set()
     plans = []
     overlay_ids: set[int] = set()
+    custom_files: set[str] = set()
+    by_index = {sh.index: sh.spec for sh in tl.shots}
     for f in range(seg.start, seg.end):
         plan = tl.plan(f)
         plan_d = asdict(plan)
@@ -252,6 +276,7 @@ def segment_hash(
         plans.append(_hash_form(plan_d))
         overlay_ids.update(plan.overlays)
         referenced |= _scene_shots(plan.scene)
+        custom_files |= scene_custom_files(plan.scene, by_index)
         text_ids.update(plan.texts)
         sub_ids.update(plan.subs)
     shots = {str(i): _shot_payload(tl.shots[i].spec) for i in sorted(referenced)}
@@ -327,5 +352,13 @@ def segment_hash(
         payload["markers"] = {k: tl.markers[k] for k in sorted(tl.markers)}
     if clips:
         payload["clips"] = clips
+    if custom_files:
+        # The file bytes and the helper API decide the pixels; params ride in the shot/plan payloads.
+        from montaj.render.custom import HELPER_VERSION
+
+        payload["custom"] = {
+            "api": HELPER_VERSION,
+            "files": {rel: asset_sha[f"custom:{rel}"] for rel in sorted(custom_files)},
+        }
     blob = json.dumps(payload, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(blob.encode()).hexdigest()
