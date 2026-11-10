@@ -1,0 +1,118 @@
+# 16:9 gaming highlight, 30 s, 120 BPM (1 beat = 0.5 s, 60 beats), cut from one match recording and its event log.
+# Integration recipe for event-log shots (at_event/pre), a freeze-and-zoom key moment, impact effects with sfx,
+# comic captions and its own pacing targets.
+#   Hook     0b-2b    flash-forward to the key moment, "watch this"
+#   Run      2b-26b   round start, then the five kills: 4b each, the kill lands 2b in with a shake + chroma hit
+#   Moment   26b-48b  build-up cut on the kill, freeze + punch-in with bloom, a slow-motion replay, a second look
+#   Out      48b-60b  round won, GG over a blurred last frame, fade to black
+# Every gameplay shot picks its in-point from assets/match.events.json (`montaj ingest-rec match.mp4 --events ...`).
+# Demo assets (no real footage): montaj new <project> --recipe gaming-highlight. Slots: gaming-highlight.md.
+video: {size: 1920x1080, fps: 60, bpm: 120, look: cool-tech, background: "#05060d", outro: {type: fade, dur: 1s}}
+assets: assets
+# hitN: film time of the N-th kill (shot start + its `pre`); drop: the key moment (sfx: auto peaks a riser here).
+markers: {hit1: 8b, hit2: 12b, hit3: 16b, hit4: 20b, hit5: 24b, drop: 30b, replay: 38b, look2: 44b, win: 48b, gg: 54b}
+shots:
+  # ---- Hook (0b-2b): the key moment first, half speed, tinted by a chroma split ----
+  - clip: match
+    at_event: {kind: kill, label: ace}
+    pre: 0.25s
+    hold: 2b
+    speed: 0.5
+    effects: [{type: chroma, amount: 0.8}, {type: shake, amount: 14, at: 0.5s, dur: 12f, seed: 1}]
+  # ---- Run (2b-26b) ----
+  - {clip: match, at_event: {kind: round, phase: start}, hold: 4b, in: {type: glitch, dur: 8f, strength: 1.5, seed: 2}}
+  - clip: match
+    at_event: {kind: kill, nth: 1}
+    pre: 2b
+    hold: 4b
+    in: {type: whip, dur: 8f}
+    effects: [{type: shake, amount: 22, at: hit1, dur: 10f, seed: 3}, {type: chroma, amount: 1.2, at: hit1, dur: 8f}]
+  - clip: match
+    at_event: {kind: kill, nth: 2}
+    pre: 2b
+    hold: 4b
+    in: {type: zoom, dur: 8f, strength: 1.2}
+    effects: [{type: shake, amount: 22, at: hit2, dur: 10f, seed: 4}, {type: chroma, amount: 1.2, at: hit2, dur: 8f}]
+  - clip: match
+    at_event: {kind: kill, nth: 3}
+    pre: 2b
+    hold: 4b
+    in: {type: whip, dur: 8f, axis: y}
+    effects: [{type: shake, amount: 24, at: hit3, dur: 10f, seed: 5}, {type: chroma, amount: 1.4, at: hit3, dur: 8f}]
+  - clip: match
+    at_event: {kind: kill, nth: 4}
+    pre: 2b
+    hold: 4b
+    in: {type: glitch, dur: 8f, strength: 2, seed: 6}
+    effects: [{type: shake, amount: 26, at: hit4, dur: 10f, seed: 7}, {type: chroma, amount: 1.6, at: hit4, dur: 8f}]
+  - clip: match
+    at_event: {kind: kill, nth: 5}
+    pre: 2b
+    hold: 4b
+    in: {type: zoom, dur: 8f, strength: 1.5}
+    camera: [{t: 0f, zoom: 1}, {t: 2b, zoom: 1.25, ease: cubic}]
+    effects: [{type: shake, amount: 30, at: hit5, dur: 12f, seed: 8}, {type: chroma, amount: 2, at: hit5, dur: 10f}]
+  # ---- Moment (26b-48b) ----
+  # Build-up: cut exactly on the kill (pre = hold).
+  - clip: match
+    at_event: {kind: kill, label: ace}
+    pre: 4b
+    hold: 4b
+    in: {type: dip, dur: 6f}
+    camera: [{t: 0f, zoom: 1}, {t: 4b, zoom: 1.2, ease: inc}]
+  # The freeze: picture stops 6f after the kill (flash gone, banner up); the camera pushes in on the target.
+  - clip: match
+    at_event: {kind: kill, label: ace}
+    hold: 8b
+    freeze: 6f
+    camera: [{t: 0f, zoom: 1}, {t: 0.4s, zoom: 1.6, focus: [800, 320], ease: outc}, {t: 8b, zoom: 1.85}]
+    in: {type: dip, dur: 4f, color: "#ffffff"}
+    effects:
+      - {type: shake, amount: 40, at: drop, dur: 14f, seed: 9}
+      - {type: chroma, amount: 2.5, at: drop, dur: 12f}
+      - {type: bloom, amount: [{t: 0f, v: 1.6}, {t: 1s, v: 0.5}], threshold: 0.6, radius: 40}
+  # Replay: 0.4x into the kill, then a second look at full speed.
+  - clip: match
+    at_event: {kind: kill, label: ace}
+    pre: 0.8s
+    hold: 6b
+    speed: 0.4
+    in: {type: glitch, dur: 8f, strength: 1.2, seed: 10}
+    effects: [{type: trails, frames: 4, decay: 0.5}, {type: shake, amount: 18, at: replay+2s, dur: 10f, seed: 11}]
+  - clip: match
+    at_event: {kind: kill, label: ace}
+    pre: 0.5s
+    hold: 4b
+    camera: [{t: 0f, zoom: 1.4, focus: [640, 360]}, {t: 4b, zoom: 1.1, ease: outc}]
+    in: {type: whip, dur: 8f}
+    effects: [{type: chroma, amount: 1.4, at: look2+0.5s, dur: 8f}]
+  # ---- Out (48b-60b) ----
+  - {clip: match, at_event: {kind: round, phase: end, result: win}, pre: 1s, hold: 6b, in: {type: zoom, dur: 8f}}
+  - clip: match
+    clip_in: 52s
+    hold: 6b
+    in: {type: fade, dur: 12f}
+    effects: [{type: blur, amount: [{t: 0f, v: 2}, {t: 1s, v: 16}]}]
+captions: {source: words.json, preset: comic, words_per_chunk: [1, 3], accent: "#ffe600"}
+text:
+  - from: gg+0.3s
+    to: 30s
+    fade_in: 0.2s
+    fade_out: 0.6s
+    lines: [{text: GG, style: sans, weight: 700, size: 150, y: 250, at: gg+0.3s}]
+audio:
+  track: music/song.wav
+  fade_out: 1s
+  sfx: auto
+  sfx_gain: -10dB
+  clips:
+    - {src: "synth:hit", at: [hit1, hit2, hit3, hit4, hit5], gain: -10dB}
+    - {src: "synth:boom", at: drop, gain: -10dB}
+    - {src: "synth:bass-drop", at: drop, gain: -14dB}
+    - {src: "synth:shutter", at: drop+0.15s, gain: -12dB}
+    - {src: "synth:hit", at: [replay+2s, look2+0.5s], gain: -12dB}
+    - {src: "synth:ding", at: win, gain: -12dB}
+check:
+  expect:
+    - {black: [29.5s, 30s], why: "fade to black"}
+  pacing: {max_shot: 4s, min_per10s: 3, hook_text_by: 0.5s}
