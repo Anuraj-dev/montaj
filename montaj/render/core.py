@@ -7,7 +7,9 @@ from pathlib import Path
 import numpy as np
 import torch
 import torch.nn.functional as F
-from PIL import Image, ImageDraw, ImageFilter
+from PIL import Image
+
+from montaj.render.pil_blur import gaussian_blur_u8
 
 
 # ---------------------------------------------------------------- easing / keys
@@ -136,6 +138,32 @@ def decode_rgb(path: str, device, policy=None) -> np.ndarray:
     return np.asarray(Image.open(path).convert("RGB"), np.float32) / 255
 
 
+def print_texture(photo: np.ndarray, pad: int, device) -> tuple[tuple[int, int], torch.Tensor]:
+    """film2's print on `device`: the cropped (h, w, 3) photo in a cream border over a soft drop
+    shadow, `pad` px of room around it. Returns the photo's top-left in the texture and the
+    (1, 4, H, W) premultiplied rgba texture. The shadow is a 255 rectangle (PIL's inclusive
+    `rectangle`, clipped) blurred by the exact torch port of PIL's GaussianBlur(pad / 2.5), so the
+    texture is bit-identical to the PIL build film2 uses (tests/test_print_shadow.py pins it)."""
+    ch, cw = photo.shape[:2]
+    b = int(0.035 * min(cw, ch))
+    P = pad
+    TW, TH = cw + 2 * b + 2 * P, ch + 2 * b + 2 * P
+    card_a = torch.zeros((TH, TW), dtype=torch.float32, device=device)
+    card_a[P:P + ch + 2 * b, P:P + cw + 2 * b] = 1
+    sh = torch.zeros((TH, TW), dtype=torch.uint8, device=device)
+    sh[P + 28:P + ch + 2 * b + 29, P + 10:P + cw + 2 * b + 11] = 255
+    # uint8 -> alpha through numpy's float32 maths: torch's CUDA divide-by-scalar multiplies by the
+    # reciprocal, which rounds differently from film2's `/ 255 * 0.7`.
+    lut = torch.from_numpy(np.arange(256, dtype=np.float32) / 255 * 0.7).to(device)
+    sh = lut[gaussian_blur_u8(sh, P / 2.5).long()]
+    col = torch.empty((3, TH, TW), dtype=torch.float32, device=device)
+    col[:] = torch.tensor((0.95, 0.92, 0.86), dtype=torch.float32, device=device)[:, None, None]
+    col[:, P + b:P + b + ch, P + b:P + b + cw] = torch.from_numpy(np.ascontiguousarray(photo)).to(device).permute(2, 0, 1)
+    a = card_a + (1 - card_a) * sh
+    rgb = col * card_a  # shadow is premultiplied black
+    return (P + b, P + b), torch.cat([rgb, a[None]])[None]
+
+
 class Photo:
     """film.Img minus the depth channel (film2 never uses relief)."""
 
@@ -152,26 +180,13 @@ class Photo:
             tex = np.dstack([rgb * a[..., None], a])
             self.th, self.tw = h, w
         else:  # print: cream border + soft drop shadow around the cropped photo
-            if policy is not None:  # the shadow is PIL's GaussianBlur on the host
-                policy.cpu("photo", f"print shadow of {Path(path).name} (PIL GaussianBlur)",
-                           "use a flat photo or a frame instead of a print/wall until the shadow is on the GPU")
-            cw, ch = x1 - x0, y1 - y0
-            b = int(0.035 * min(cw, ch))
-            P = pad
-            TW, TH = cw + 2 * b + 2 * P, ch + 2 * b + 2 * P
-            card_a = np.zeros((TH, TW), np.float32)
-            card_a[P:P + ch + 2 * b, P:P + cw + 2 * b] = 1
-            sh = Image.new("L", (TW, TH), 0)
-            ImageDraw.Draw(sh).rectangle((P + 10, P + 28, P + cw + 2 * b + 10, P + ch + 2 * b + 28), fill=255)
-            sh = np.asarray(sh.filter(ImageFilter.GaussianBlur(P / 2.5)), np.float32) / 255 * 0.7
-            col = np.zeros((TH, TW, 3), np.float32)
-            col[:] = (0.95, 0.92, 0.86)
-            col[P + b:P + b + ch, P + b:P + b + cw] = rgb[y0:y1, x0:x1]
-            a = card_a + (1 - card_a) * sh
-            rgb = col * card_a[..., None]  # shadow is premultiplied black
-            self.off = (P + b - x0, P + b - y0)
-            tex = np.dstack([rgb, a])
-            self.th, self.tw = TH, TW
+            if policy is not None and torch.device(cv.device).type != "cuda":
+                policy.cpu("photo", f"print shadow of {Path(path).name} (device is not cuda)",
+                           "render on a CUDA device")
+            self.off, self.tex = print_texture(rgb[y0:y1, x0:x1], pad, cv.device)
+            self.off = (self.off[0] - x0, self.off[1] - y0)
+            self.th, self.tw = self.tex.shape[-2:]
+            return
         self.tex = torch.from_numpy(tex).permute(2, 0, 1)[None].to(cv.device)
 
     def sample(self, sx, sy, chans, mode):
