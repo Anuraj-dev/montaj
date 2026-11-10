@@ -38,6 +38,10 @@ Photo fields (`crop`, `focus`, swirl `center`, wall `at`) are source-image pixel
 - `shots[].gain` — dB string, default `0dB` — level of the shot's own sound. Needs `audio: true`.
 - `shots[].audio_lead` — duration (`ms`, `s`, `f`, `b`), default none — J cut: the sound starts this early, over the previous shot, reading the source before `clip_in`. Needs `audio: true`; not on the first shot; at most the previous shot's hold; not with an `audio_tail` on a linked previous shot.
 - `shots[].audio_tail` — duration, default none — L cut: the sound runs this long past the cut, under the next shot (replacing a linked next shot's sound there). Needs `audio: true`; not on the last shot; at most the next shot's hold.
+- `shots[].cuts` — `auto`, default none — talking-head cuts: expands at load into one `range` shot per kept span of `assets/<clip>.cuts.json` (`montaj cut`), linked audio joined by a 20 ms crossfade.
+- `shots[].cuts_pad` — `[before, after]` durations, default `[60ms, 120ms]` — kept before / after each span, never into the cut gap. Needs `cuts`.
+- `shots[].cuts_punch` — `alternate`, default none — every second span zooms 1 / 1.12 so jump cuts read as intent. Needs `cuts`.
+- `shots[].drop` — span indexes, default none — spans removed after reading `montaj cut --print`. Needs `cuts`.
 - `shots[].id` — `[a-z][a-z0-9_]*`, default none — names the shot's own sound for `audio.duck.under` and waveform `overlays[].source`, like `audio.clips[].id`. Needs `audio: true`.
 - `shots[].hold` — duration, hold, until or range — how long this shot is on screen. Exactly one of `hold`, `until` or `range`. A whole-beat hold (`4b`) ends on a beat of the grid (moving forward if the shot started off-beat), and beat holds never drift from rounding.
 - `shots[].until` — time expression, hold or until — the shot ends at this time from film start. Must fall after the shot's start.
@@ -114,7 +118,7 @@ Photo fields (`crop`, `focus`, swirl `center`, wall `at`) are source-image pixel
 - `fx[].dir` — `1` or `-1`, required with a leak — which side the leak comes in from. Not used on a flash, hit or burst.
 - `markers` — mapping, default none — name to a time expression from film start, or `word:<i>`.
 - `audio` — mapping, default none — soundtrack. No audio block is a silent film.
-- `audio.track` — string, required with audio — wav/path relative to the spec file: their track, a `music gen` candidate, or `music/song.wav` from `montaj music compose`.
+- `audio.track` — string, default none (a silent bed, so linked clip audio needs no music) — wav/path relative to the spec file: their track, a `music gen` candidate, or `music/song.wav` from `montaj music compose`.
 - `audio.markers` — string, default none — JSON `{bpm, beats: [s…], words: [{i, w, s, e}, …]}` from `montaj music analyze`, relative to the spec file. Needed for `word:` markers; supplies the beat grid when `video.bpm` is omitted. `bpm` must be > 0 and `beats` ≥ 0.
 - `audio.fade_out` — duration, default `0s` — afade at the end of the film.
 - `audio.loudnorm` — boolean, default true — loudnorm `-14` LUFS, TP `-1.5`, LRA `11`.
