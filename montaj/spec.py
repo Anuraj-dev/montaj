@@ -16,6 +16,7 @@ from pydantic import (
     ConfigDict,
     Discriminator,
     Field,
+    StrictBool,
     StrictInt,
     Tag,
     ValidationError,
@@ -550,6 +551,13 @@ class Shot(Frozen):
     card: CardSpec | None = Field(default=None, exclude_if=lambda v: v is None)
     in_: Transition | None = Field(default=None, alias="in")
     flash: float | None = None
+    # Linked clip audio (#40): the clip's own sound follows this shot. Audio-only, so
+    # `project._shot_payload` keeps them out of the segment hash; absent stays out of model_dump.
+    audio: StrictBool | None = Field(default=None, exclude_if=lambda v: v is None)
+    gain: str | None = Field(default=None, exclude_if=lambda v: v is None)
+    audio_lead: str | None = Field(default=None, exclude_if=lambda v: v is None)
+    audio_tail: str | None = Field(default=None, exclude_if=lambda v: v is None)
+    id: str | None = Field(default=None, exclude_if=lambda v: v is None)
 
 
 class TextBackdrop(Frozen):
@@ -2470,6 +2478,9 @@ def validate_spec(
                 )
 
     _reject_overlap_windows(spec, holds, parsed, errors)
+    from montaj.audio.mix import check_links
+
+    check_links(spec, spec_dir, holds, fps, bpm, errors)
     _check_finish(spec, errors, spec_dir)
     if spec.check is not None and not 1 <= spec.check.sample <= 30:
         errors.append(_line("check.sample", f"must be 1 to 30, got {spec.check.sample}", "use sample: 3"))
@@ -2964,13 +2975,15 @@ def _finite_all(vals) -> bool:
 
 
 def _check_waveform_source(spec: Spec, ov: Overlay, path: str, errors: list[str]) -> None:
-    """`source` is `music` or an `audio.clips[].id`. No audio block is its own error."""
+    """`source` is `music`, an `audio.clips[].id` or a linked shot's `id`. No audio block is its own error."""
     if spec.audio is None:
         errors.append(_line(f"{path}.source", "no audio block", "add audio: with a track or clips"))
         return
     if ov.source is None or ov.source == "music":
         return  # a missing source is already "required for waveform"
-    ids = sorted({c.id for c in spec.audio.clips if c.id})
+    from montaj.audio.mix import linked_ids
+
+    ids = sorted({c.id for c in spec.audio.clips if c.id} | linked_ids(spec))
     if ov.source not in ids:
         errors.append(_line(
             f"{path}.source",

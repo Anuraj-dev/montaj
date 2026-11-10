@@ -7,6 +7,11 @@ A spec without any of the three never reaches this module at render time (`MixPl
 
 `source_window` slices one source's part of that mix (same code, same duck and ceiling) for waveform levels.
 Resolve stores those levels; the renderer does not call into here.
+
+A clip shot with `audio: true` is a `Linked` placement (#40): its own sound, locked to the picture
+through the same `clip_in` / range / speed / freeze the renderer reads, so a retime keeps lip sync.
+`audio_lead` / `audio_tail` move the audio cut off the picture cut (J and L cuts); the neighbouring
+linked shot's sound starts or stops at that moved cut. Speed is varispeed: pitch follows speed.
 """
 from __future__ import annotations
 
@@ -24,7 +29,7 @@ from pathlib import Path
 import numpy as np
 
 from montaj.encode import FFMPEG, FFPROBE, EncodeError
-from montaj.spec import _DUR, _assets_dir, _line, _parse_time
+from montaj.spec import _DUR, _assets_dir, _dur_frames, _line, _parse_time
 
 SR = 48000
 MIX_REV = "1"  # bump when the mixed samples change for the same plan
@@ -69,6 +74,28 @@ class Placed:
 
 
 @dataclass(frozen=True)
+class Linked:
+    """A clip shot's own sound over film samples `[a, b)`.
+
+    Film sample `s` plays source frame `clip_in + pos(s * fps / SR - start)` (film-fps frames from
+    the source start, the clock `-ss clip_in` gives the picture), where `pos` integrates `speed`
+    and stops at `freeze`. `lag` is the audio stream's start after the container's, in seconds.
+    """
+
+    id: str | None
+    src: str  # absolute path of the clip
+    fps: int
+    start: int  # shot start frame
+    a: int
+    b: int
+    clip_in: float  # source frames
+    speed: float | tuple[tuple[float, float, str], ...] | None
+    freeze: float | None  # shot frames
+    gain_db: float
+    lag: float = 0.0
+
+
+@dataclass(frozen=True)
 class DuckPlan:
     under: tuple[str, ...]
     depth_db: float
@@ -82,10 +109,11 @@ class MixPlan:
     edits: tuple[EditOp, ...] = ()
     clips: tuple[Placed, ...] = ()
     duck: DuckPlan | None = None
+    links: tuple[Linked, ...] = ()
 
     @property
     def active(self) -> bool:
-        return bool(self.edits or self.clips or self.duck)
+        return bool(self.edits or self.clips or self.duck or self.links)
 
 
 @dataclass(frozen=True)
@@ -261,12 +289,160 @@ def time_strings(spec) -> list[str]:
         out += [x for x in (c.offset, c.in_, c.out) if isinstance(x, str)]
     if a.duck is not None:
         out += [x for x in (a.duck.attack, a.duck.release) if isinstance(x, str)]
+    for sh in spec.shots:
+        out += [x for x in (sh.audio_lead, sh.audio_tail) if isinstance(x, str)]
+    return out
+
+
+def linked_ids(spec) -> set[str]:
+    """Ids of clip shots whose own sound is in the mix: duck and waveform sources, like clip ids."""
+    return {sh.id for sh in spec.shots if sh.audio and sh.id}
+
+
+_LINK_FIELDS = ("gain", "audio_lead", "audio_tail", "id")
+
+
+def check_links(spec, spec_dir: Path | None, holds: list[int | None], fps: int, bpm: float | None,
+                errors: list[str]) -> None:
+    """Shot-level linked audio fields. Runs after layout, so a lead or tail is checked against its neighbour."""
+    n = len(spec.shots)
+    lead: list[float] = [0.0] * n
+    tail: list[float] = [0.0] * n
+    for i, sh in enumerate(spec.shots):
+        at = f"shots[{i}]"
+        if not sh.audio:
+            for name in _LINK_FIELDS:
+                if getattr(sh, name) is not None:
+                    errors.append(_line(f"{at}.{name}", f"{name} needs audio: true", "add audio: true"))
+            continue
+        if sh.clip is None:
+            errors.append(_line(f"{at}.audio", "audio needs clip", "add clip:, or use audio.clips for a sound file"))
+            continue
+        if spec.audio is None:
+            errors.append(_line(f"{at}.audio", "linked clip audio needs an audio block", "add audio: {track: ...}"))
+        if sh.id is not None and not re.match(r"^[a-z][a-z0-9_]*$", sh.id):
+            errors.append(_line(f"{at}.id", f"invalid id {sh.id!r}", "use [a-z][a-z0-9_]*"))
+        if sh.gain is not None:
+            _db(sh.gain, f"{at}.gain", errors)
+        for name, out in (("audio_lead", lead), ("audio_tail", tail)):
+            raw = getattr(sh, name)
+            v = _span_s(raw, fps, bpm, f"{at}.{name}", errors) if raw is not None else None
+            if v is not None:
+                out[i] = v
+        if spec_dir is not None:
+            path = _link_src(spec, spec_dir, sh.clip)
+            if path is not None and _audio_start(path) is None:
+                errors.append(_line(f"{at}.audio", f"clip {sh.clip!r} has no audio stream",
+                                    "remove audio: true, or use a clip with sound"))
+    for i, sh in enumerate(spec.shots):
+        if not sh.audio or fps <= 0:
+            continue
+        at = f"shots[{i}]"
+        if lead[i] > 0:
+            prev = holds[i - 1] if i > 0 else None
+            if i == 0:
+                errors.append(_line(f"{at}.audio_lead", "no shot before the first one to lead under", "remove audio_lead"))
+            elif prev is not None and lead[i] * fps > prev + 1e-6:
+                errors.append(_line(f"{at}.audio_lead", f"{lead[i] * fps:g}f is longer than shots[{i - 1}] ({prev}f)",
+                                    "shorten audio_lead"))
+            elif spec.shots[i - 1].audio and tail[i - 1] > 0:
+                errors.append(_line(f"{at}.audio_lead", f"shots[{i - 1}].audio_tail already moves this audio cut",
+                                    "keep one of audio_tail and audio_lead"))
+        if tail[i] > 0:
+            nxt = holds[i + 1] if i + 1 < n else None
+            if i + 1 == n:
+                errors.append(_line(f"{at}.audio_tail", "no shot after the last one to tail under", "remove audio_tail"))
+            elif nxt is not None and tail[i] * fps > nxt + 1e-6:
+                errors.append(_line(f"{at}.audio_tail", f"{tail[i] * fps:g}f is longer than shots[{i + 1}] ({nxt}f)",
+                                    "shorten audio_tail"))
+
+
+def _link_src(spec, spec_dir: Path, clip: str) -> Path | None:
+    from montaj.project import AssetMissing, resolve_clip
+
+    try:
+        return resolve_clip(spec_dir, _assets_dir(spec, spec_dir) or spec_dir / "assets", clip)
+    except AssetMissing:
+        return None  # the clip check reports it
+
+
+def _audio_start(path: Path) -> float | None:
+    """Audio stream 0's start after the container's, seconds; None when the file has no audio."""
+    proc = subprocess.run(
+        [FFPROBE, "-v", "error", "-select_streams", "a:0", "-show_entries", "stream=start_time:format=start_time",
+         "-of", "json", str(path)], stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+    try:
+        info = json.loads(proc.stdout.decode() or "{}")
+    except ValueError:
+        return None
+    streams = info.get("streams") or []
+    if not streams:
+        return None
+
+    def num(v: object) -> float:
+        try:
+            x = float(v)  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            return 0.0
+        return x if math.isfinite(x) else 0.0
+
+    return num(streams[0].get("start_time")) - num((info.get("format") or {}).get("start_time"))
+
+
+def _links(spec, spec_dir: Path | None, shots, fps: int, bpm: float | None) -> list[Linked]:
+    """`Linked` placements from the laid-out shots (`.start`, `.end`, `.spec` with frame keys).
+
+    The audio cut before shot `i` sits at its picture cut, moved back by its own `audio_lead` or on
+    by the previous linked shot's `audio_tail`. `check_links` has already rejected bad values.
+    """
+    if spec_dir is None or fps <= 0:
+        return []
+    n = len(shots)
+    linked = [bool(r.spec.audio and r.spec.clip) for r in shots]
+
+    def span(raw: str | None) -> int:
+        v = _span_s(raw, fps, bpm, "", []) if raw is not None else None
+        return 0 if v is None else round(v * SR)
+
+    def cut(i: int) -> int:
+        """Film sample of the audio cut between shots `i - 1` and `i`."""
+        s = frame_sample(shots[i].start, fps)
+        if i > 0 and linked[i - 1]:
+            s += span(shots[i - 1].spec.audio_tail)
+        if linked[i]:
+            s -= span(shots[i].spec.audio_lead)
+        return s
+
+    out: list[Linked] = []
+    for i, r in enumerate(shots):
+        if not linked[i]:
+            continue
+        sh = r.spec
+        path = _link_src(spec, spec_dir, sh.clip)
+        lag = _audio_start(path) if path is not None else None
+        if lag is None:
+            continue
+        a = cut(i)
+        b = cut(i + 1) if i + 1 < n else frame_sample(r.end, fps) + span(sh.audio_tail)
+        raw_in = sh.range[0] if sh.range is not None else sh.clip_in
+        clip_in = _dur_frames(raw_in, fps, bpm, "", []) if raw_in is not None else 0.0
+        speed = sh.speed
+        if isinstance(speed, list):
+            speed = tuple((float(k.t), float(k.v), k.ease) for k in speed)
+        elif speed is not None:
+            speed = float(speed)
+        gain = _db(sh.gain, "", []) if sh.gain is not None else 0.0
+        out.append(Linked(sh.id, str(path), fps, r.start, a, b, float(clip_in or 0.0), speed,
+                          None if sh.freeze is None else float(sh.freeze), gain or 0.0, lag))
     return out
 
 
 def plan_audio(spec, spec_dir: Path | None, markers: dict[str, float], fps: int, bpm: float | None,
-               beat0: float, errors: list[str]) -> MixPlan | None:
-    """Validate `audio.edit/clips/duck` and resolve them to seconds. None without an audio block."""
+               beat0: float, errors: list[str], shots=None) -> MixPlan | None:
+    """Validate `audio.edit/clips/duck` and resolve them to seconds. None without an audio block.
+
+    `shots` are the laid-out shots (`Timeline.shots`); with them, `audio: true` shots become links.
+    """
     a = spec.audio
     if a is None:
         return None
@@ -306,7 +482,7 @@ def plan_audio(spec, spec_dir: Path | None, markers: dict[str, float], fps: int,
     duck = None
     if a.duck is not None:
         d = a.duck
-        ids = {c.id for c in a.clips if c.id}
+        ids = {c.id for c in a.clips if c.id} | linked_ids(spec)
         if not d.under:
             errors.append(_line("audio.duck.under", "need at least one clip id", "use under: [voice]"))
         for j, name in enumerate(d.under):
@@ -320,7 +496,8 @@ def plan_audio(spec, spec_dir: Path | None, markers: dict[str, float], fps: int,
         rel = _span_s(d.release, fps, bpm, "audio.duck.release", errors)
         if None not in (depth, att, rel):
             duck = DuckPlan(tuple(d.under), depth, att, rel)
-    return MixPlan(str((root / a.track).resolve()), tuple(ops), tuple(clips), duck)
+    links = tuple(_links(spec, spec_dir, shots, fps, bpm)) if shots is not None else ()
+    return MixPlan(str((root / a.track).resolve()), tuple(ops), tuple(clips), duck, links)
 
 
 def _track_seconds(path: Path) -> float | None:
@@ -552,6 +729,62 @@ def _render_clip(c: Placed, cache: dict, log: Path | None) -> tuple[int, np.ndar
     return at, piece
 
 
+def _source_frames(speed, freeze: float | None, u: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """`(source frames from clip_in, sounding)` at shot clock `u` (frames, may be negative).
+
+    The integral of the speed curve, as `clipmap.source_index` takes it (16 midpoint steps a
+    frame), unfloored. It stops at `freeze`, and from there the sound is muted.
+    """
+    stop = math.inf if freeze is None else float(freeze)
+    uc = np.minimum(u, stop)
+    live = u < stop
+    if not isinstance(speed, tuple):
+        return (1.0 if speed is None else float(speed)) * uc, live
+    from montaj.render.core import EASE, key
+
+    keys = [(t, v, EASE[e]) for t, v, e in speed]
+    steps = 16
+    j0 = min(0, math.floor(float(uc.min()) * steps) - 1) if len(uc) else 0
+    j1 = max(0, math.ceil(float(uc.max()) * steps) + 1) if len(uc) else 0
+    inc = np.array([float(key((j + 0.5) / steps, keys)) / steps for j in range(j0, j1)])
+    grid = np.concatenate([[0.0], np.cumsum(inc)])
+    grid -= grid[-j0]  # pos(0) = 0
+    return np.interp(uc, np.arange(j0, j1 + 1) / steps, grid), live
+
+
+def _read_at(x: np.ndarray, q: np.ndarray) -> np.ndarray:
+    """`x` at fractional sample positions `q`, linearly interpolated; zero outside the array."""
+    i0 = np.floor(q).astype(np.int64)
+    frac = (q - i0).astype(np.float32)[:, None]
+    pad = np.concatenate([np.zeros((1, x.shape[1]), x.dtype), x, np.zeros((1, x.shape[1]), x.dtype)])
+    lo = np.clip(i0 + 1, 0, len(pad) - 1)
+    hi = np.clip(i0 + 2, 0, len(pad) - 1)
+    return pad[lo] * (1 - frac) + pad[hi] * frac
+
+
+def _render_link(link: Linked, cache: dict, log: Path | None) -> tuple[int, np.ndarray]:
+    """`(start sample, stereo samples)` for one linked shot: its source under its own clock."""
+    key = (link.src, 0)
+    if key not in cache:
+        cache[key] = decode(link.src, 0, log=log)
+    x = cache[key]
+    a = max(0, link.a)  # nothing plays before the film starts
+    if link.b <= a:
+        return a, np.zeros((0, 2), np.float32)
+    fps = link.fps
+    if link.speed in (None, 1.0) and link.freeze is None:
+        # Integer-exact: film sample s plays source sample s - shot start + clip_in.
+        off = round((link.clip_in / fps - link.lag) * SR) - frame_sample(link.start, fps)
+        piece = _slice(x, a + off, link.b + off).astype(np.float32, copy=True)
+    else:
+        s = np.arange(a, link.b, dtype=np.float64)
+        pos, live = _source_frames(link.speed, link.freeze, s * fps / SR - link.start)
+        piece = _read_at(x, ((link.clip_in + pos) / fps - link.lag) * SR).astype(np.float32)
+        piece[~live] = 0.0
+    _shape_placement(piece, 0, len(piece), link.gain_db, 0.0)
+    return a, piece
+
+
 def frame_sample(frame: int, fps: int) -> int:
     """First 48 kHz sample of integer film frame `frame`."""
     return int(round(int(frame) * SR / float(fps)))
@@ -615,6 +848,7 @@ def _mix_parts(plan: MixPlan, cache: dict, log: Path | None) -> tuple[np.ndarray
         cache[key] = decode(plan.track, 0, log=log)
     music = apply_edits(cache[key], plan.edits) if plan.edits else cache[key]
     placed = [(c, *_render_clip(c, cache, log)) for c in plan.clips]
+    placed += [(link, *_render_link(link, cache, log)) for link in plan.links]
     total = max([len(music)] + [s + len(x) for _, s, x in placed])
     bed = np.zeros((total, 2), dtype=np.float32)
     bed[: len(music)] = music
@@ -682,14 +916,17 @@ def source_window(plan: MixPlan, source: str, s0: int, s1: int, *, cache: dict |
 def plan_hash(plan: MixPlan) -> str:
     """Digest of the plan and the bytes of every input file."""
     shas: dict[str, str] = {}
-    for p in [plan.track, *(c.src for c in plan.clips)]:
+    for p in [plan.track, *(c.src for c in plan.clips), *(link.src for link in plan.links)]:
         if not p.startswith("synth:") and p not in shas:
             h = hashlib.sha256()
             with open(p, "rb") as fh:
                 for block in iter(lambda: fh.read(1 << 20), b""):
                     h.update(block)
             shas[p] = h.hexdigest()
-    payload = json.dumps({"rev": MIX_REV, "plan": asdict(plan), "shas": shas}, sort_keys=True)
+    body = asdict(plan)
+    if not plan.links:
+        del body["links"]  # a plan without linked shots keeps the wav it had before links existed
+    payload = json.dumps({"rev": MIX_REV, "plan": body, "shas": shas}, sort_keys=True)
     return hashlib.sha256(payload.encode()).hexdigest()[:16]
 
 
@@ -720,6 +957,7 @@ def check_lines(stats: dict) -> list[str]:
     return lines
 
 
-__all__ = ["DuckPlan", "EditOp", "MixPlan", "MixStats", "Placed", "apply_edits", "band_levels",
-           "check_lines", "decode", "duck_gain", "edit_ops", "edit_range_error", "frame_sample",
+__all__ = ["DuckPlan", "EditOp", "Linked", "MixPlan", "MixStats", "Placed", "apply_edits", "band_levels",
+           "check_lines", "check_links", "decode", "duck_gain", "edit_ops", "edit_range_error", "frame_sample",
+           "linked_ids",
            "plan_audio", "plan_hash", "render_mix", "shift_words", "source_window", "synth"]

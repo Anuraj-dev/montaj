@@ -808,6 +808,7 @@ def _waveform_levels(
     bpm: float | None,
     beat0: float,
     n_frames: int,
+    shots: list[ResolvedShot],
 ) -> list[tuple[tuple[float, ...], ...] | None]:
     """Per-frame bar peaks for each waveform, as heard. None for every other shape.
 
@@ -820,7 +821,7 @@ def _waveform_levels(
     from montaj.spec import _dur_frames
 
     errors: list[str] = []
-    plan = plan_audio(spec, spec_dir, markers, spec.video.fps, bpm, beat0, errors)
+    plan = plan_audio(spec, spec_dir, markers, spec.video.fps, bpm, beat0, errors, shots=shots)
     if plan is None or errors:
         raise SpecError(errors or [_line("audio", "no audio block", "add audio: with a track or clips")])
     fps = spec.video.fps
@@ -868,9 +869,10 @@ def _resolve_overlays(
     bpm: float | None,
     beat0: float,
     n_frames: int,
+    shots: list[ResolvedShot],
 ) -> list[ResolvedOverlay]:
     levels = (
-        _waveform_levels(spec, times, spec_dir, markers, bpm, beat0, n_frames)
+        _waveform_levels(spec, times, spec_dir, markers, bpm, beat0, n_frames, shots)
         if any(ov.shape == "waveform" for ov in spec.overlays)
         else [None] * len(spec.overlays)
     )
@@ -1063,7 +1065,7 @@ def resolve(spec: Spec, spec_dir: Path) -> Timeline:
         markers=markers,
         texts=texts,
         subs=subs,
-        overlays=_resolve_overlays(spec, times, spec_dir, markers, bpm, beat0, n_frames),
+        overlays=_resolve_overlays(spec, times, spec_dir, markers, bpm, beat0, n_frames, resolved),
         _hits=hits,
         _splits=splits,
         _bursts=bursts,
