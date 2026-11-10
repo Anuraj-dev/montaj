@@ -241,6 +241,12 @@ Photo fields (`crop`, `focus`, swirl `center`, wall `at`) are source-image pixel
 - `overlays[].glow` — number ≥ 0, default `0` — soft halo around the stroke, screened under it. About `0.6` is a gentle neon.
 - `overlays[].ease` — easing name, default `smooth` — curve for radius, sweep and draw.
 - `overlays[].above_finish` — boolean, default false — skip the look, so the shape stays crisp and ungraded; still under text, and fades with the picture.
+- `styles` — mapping, default none — named bundles of `text[].lines[]` fields, used as `style: <name>` on a line. A name must not be a built-in text style (`serif`, `script`, `caps`, `deva`, `sans`, `mono`): that is an error. A style may set the built-in `style` itself. Precedence: the line's own fields, then its style, then `defaults`; nested mappings merge field by field.
+- `styles.<name>.extends` — string, default none — another `styles` entry to start from; chains are allowed, a cycle or unknown name is an error.
+- `defaults` — mapping, default none — fields filled in where an item leaves them out, keyed by path: `shots`, `text`, `text.lines`, `fx`, `subs`, `overlays`. An explicit value always wins; `in: null` drops a default transition.
+- `components` — mapping, default none — named groups of `shots`, `text`, `fx`, `subs` or `overlays` items. `params` is a list of required names or a `{name: default}` mapping. `$name` in a value is replaced by the argument (a whole-value `$name` keeps its type); `$at+1.2s` adds a duration to a duration or marker offset, one unit only.
+- `use` — list, default none — `{component: name, <param>: value}` instances; their items are appended to the matching top-level lists. Inside `shots`, `text`, … an item `{use: name, <param>: value}` is replaced in place by the component's items.
+- `include` — path or list, default none — files (relative to the spec) holding only `styles`, `defaults` and `components`; the including file wins on a clash.
 - `check` — mapping, default none — designed QA exceptions. The renderer does not read this, so it does not change the segment hash.
 - `check.expect` — list, default none — black or frozen spans `check` treats as designed. A span that matches no detected span prints `INFO expect <kind> <start>–<end>s not found`.
 - `check.expect[].black` — `[start, end]` time expressions, black or frozen — a designed black window. Set this or `frozen`, not both. `end` must be later than `start`.
@@ -310,6 +316,8 @@ Content guards (under `check`, read by `montaj check` only; they never change th
 - `check.digits` — `none` or `spec`, default off — OCR the sampled frames. `none`: any on-screen digit warns. `spec`: a digit run warns unless it appears in `text[].lines[].text`, `subs[].text` or `shots[].frame.caption`. Needs the `tesseract` binary.
 - `check.faces` — `none`, default off — a face in a sampled frame warns. Needs `uv sync --extra guards` (OpenCV).
 - `check.sample` — integer 1 to 30, default `3` — frames sampled per shot, evenly across the shot. Output: `WARN digits shot=<n> frame=<f> "<digits>"`, `WARN faces shot=<n> frame=<f> (<k>)`; a missing backend gives `ERR <guard>: <install hint>`.
+
+Reuse (`styles`, `defaults`, `components`, `use`, `include`) is expanded before validation, so the expanded spec is what is hashed and rendered; errors name the author's key and line. `montaj validate --expand` prints the expanded spec.
 
 ## Inspecting a frame
 `montaj inspect --at 4.2s|--shot N|--range A B --every 10f|--problems [--fast] [--json]` prints what is on screen as numbers: per text element (cards, `text`, `subs`) the ink `box` in output px, `size`, `off_frame_px`, `safe` (inside a 5% margin) and, unless `--fast`, `contrast` (WCAG ratio vs. the frame around the box; `--problems` flags < 3); `over_face` is always null (no face boxes in the engine). Geometry needs no render; `--problems` ends `OK inspect 0 problems` or `WARN inspect N problems`.

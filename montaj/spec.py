@@ -3143,6 +3143,13 @@ def load_spec(path: Path | str, *, expand: bool = True) -> Spec:
     if not isinstance(data, dict):
         raise SpecError([_line(".", f"spec must be a mapping, got {type(data).__name__}", "start with video:")])
 
+    from montaj.expand import ExpandError, expand_spec
+
+    try:
+        data, smap = expand_spec(data, text, path, TEXT_STYLES)
+    except ExpandError as e:
+        raise SpecError(e.lines(text)) from e
+
     errors: list[str] = []
     spec: Spec | None = None
     try:
@@ -3161,6 +3168,6 @@ def load_spec(path: Path | str, *, expand: bool = True) -> Spec:
     if spec is not None:
         validate_spec(spec, errors, spec_dir=path.parent)
     if errors:
-        raise SpecError(errors)
+        raise SpecError([smap.remap(e) for e in errors] if smap else errors)
     assert spec is not None
     return spec
