@@ -164,9 +164,9 @@ def skill_lines() -> list[str]:
         elif state == "missing":
             lines.append(f"WARN skill {SKILL}: no link in {d} (montaj skill link)")
         elif state == "dangling":
-            lines.append(f"WARN skill {SKILL}: link is dangling (montaj skill link)")
+            lines.append(f"WARN skill {SKILL}: {link} is dangling (montaj skill link)")
         elif state == "other":
-            lines.append(f"WARN skill {SKILL}: points at another checkout {target} (montaj skill link)")
+            lines.append(f"WARN skill {SKILL}: {link} points at another checkout {target} (montaj skill link)")
         else:
             lines.append(f"WARN skill {SKILL}: {link} is not a symlink (remove it, then montaj skill link)")
     return lines
@@ -188,15 +188,23 @@ def link_skill() -> list[str]:
     linked: list[Path] = []
     for d in dirs:
         link = d / SKILL
-        if link.is_symlink() and os.readlink(link) == str(source):
+        # Leave a correct link alone, even one stored through a symlinked parent; a chain through
+        # another skill link (codex -> claude -> checkout) is rewritten to point straight here.
+        stored = Path(os.readlink(link)) if link.is_symlink() else None
+        if stored is not None and link.exists() and not (link.parent / stored).is_symlink() \
+                and link.resolve() == source.resolve():
             linked.append(d)
             continue
         if os.path.lexists(link) and not link.is_symlink():
-            lines.append(f"ERR skill {SKILL}: {link} is a real directory: remove it first")
+            lines.append(f"ERR skill {SKILL}: {link} is not a symlink: remove it first")
             continue
-        if link.is_symlink():
-            link.unlink()
-        link.symlink_to(source, target_is_directory=True)
+        try:
+            if link.is_symlink():
+                link.unlink()
+            link.symlink_to(source, target_is_directory=True)
+        except OSError as e:
+            lines.append(f"ERR skill {SKILL}: {link}: {e.strerror or e}")
+            continue
         linked.append(d)
     failed = len(dirs) - len(linked)
     if failed:

@@ -39,7 +39,7 @@ def test_dangling_link_warns_then_link_repairs_it(home: Path, tmp_path: Path) ->
     link = home / ".claude" / "skills" / "make-video"
     link.symlink_to(tmp_path / "gone" / "skills" / "make-video")
 
-    assert doctor.skill_lines() == ["WARN skill make-video: link is dangling (montaj skill link)"]
+    assert doctor.skill_lines() == [f"WARN skill make-video: {link} is dangling (montaj skill link)"]
 
     assert doctor.link_skill()[-1] == "OK skill make-video linked in 1 dir: " + str(home / ".claude" / "skills")
     assert os.readlink(link) == str(doctor.skill_source())
@@ -52,7 +52,7 @@ def test_wrong_target_warns_and_is_repaired(home: Path, tmp_path: Path) -> None:
     link.symlink_to(other)
 
     assert _warns(doctor.skill_lines()) == [
-        f"WARN skill make-video: points at another checkout {other.resolve()} (montaj skill link)"
+        f"WARN skill make-video: {link} points at another checkout {other.resolve()} (montaj skill link)"
     ]
 
     doctor.link_skill()
@@ -106,7 +106,7 @@ def test_real_directory_is_never_replaced(home: Path, capsys: pytest.CaptureFixt
     ]
 
     lines = doctor.link_skill()
-    assert lines[0] == f"ERR skill make-video: {real} is a real directory: remove it first"
+    assert lines[0] == f"ERR skill make-video: {real} is not a symlink: remove it first"
     assert lines[-1] == "ERR skill link: 1 of 1 dirs not linked (see above)"
     assert not real.is_symlink()
     assert (real / "SKILL.md").read_text() == "hand-copied\n"
@@ -146,4 +146,15 @@ def test_doctor_report_carries_the_skill_check(home: Path, tmp_path: Path) -> No
     (home / ".claude" / "skills" / "make-video").symlink_to(tmp_path / "gone")
 
     lines = doctor.doctor()
-    assert "WARN skill make-video: link is dangling (montaj skill link)" in lines
+    dangling = home / ".claude" / "skills" / "make-video"
+    assert f"WARN skill make-video: {dangling} is dangling (montaj skill link)" in lines
+
+
+def test_link_is_left_alone_when_it_resolves_to_this_checkout(home: Path, tmp_path: Path) -> None:
+    """A link stored through a symlinked parent still counts as correct: not deleted and recreated."""
+    alias = tmp_path / "alias"
+    alias.symlink_to(doctor.skill_source().parent)
+    link = home / ".claude" / "skills" / "make-video"
+    link.symlink_to(alias / "make-video")
+    assert doctor.link_skill()[-1].startswith("OK skill make-video linked in 1 dir")
+    assert os.readlink(link) == str(alias / "make-video")
