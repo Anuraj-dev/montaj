@@ -64,14 +64,26 @@ def _speech(row: dict, words: list[tuple[float, str]]) -> list[str]:
 
 
 def _loudness(path: Path) -> str:
-    """`loud -24dBFS peak -2dBFS@12.4s` over the first audio stream; `no audio` when there is none."""
-    from montaj.audio.mix import SR, decode
-    from montaj.encode import EncodeError
+    """`loud -24dBFS peak -2dBFS@12.4s` over the first audio stream; `no audio` when the file has none,
+    `unreadable` when ffprobe or the decode fails."""
+    import subprocess
 
+    from montaj.audio.mix import SR, decode
+    from montaj.encode import FFPROBE, EncodeError
+
+    try:
+        probe = subprocess.run([FFPROBE, "-v", "error", "-select_streams", "a", "-show_entries", "stream=index",
+                                "-of", "csv=p=0", str(path)], capture_output=True, check=False)
+    except OSError:
+        return "unreadable"
+    if probe.returncode != 0:
+        return "unreadable"
+    if not probe.stdout.strip():
+        return "no audio"
     try:
         pcm = decode(str(path)).mean(axis=1)
     except (EncodeError, OSError):
-        return "no audio"
+        return "unreadable"
     if not len(pcm):
         return "no audio"
     rms = float(np.sqrt(np.mean(pcm.astype(np.float64) ** 2)))
@@ -96,10 +108,12 @@ def summary(assets_dir: Path, stem: str | None = None) -> list[str]:
         return [f"ERR assets: {what} in {assets_dir} (montaj ingest --list shows every asset)"]
     cap = (SPEECH_CAP, EVENT_CAP) if stem is None else (None, None)
     out: list[str] = []
+    stale = 0
     for p in clips:
         row = rows.get(p.name)
         if not fresh(row, p):
             out.append(f"{p.stem} not analysed (run montaj ingest)")
+            stale += 1
             continue
         cuts = " ".join(f"{c:.1f}" for c in row.get("cuts") or ()) or "none"
         out.append(f"{p.stem} {row.get('duration', 0):g}s {row.get('w', 0)}x{row.get('h', 0)} "
@@ -110,5 +124,11 @@ def summary(assets_dir: Path, stem: str | None = None) -> list[str]:
         events = _events(p.with_name(f"{p.stem}.events.json"))
         if events:
             out.append("  events " + " | ".join(_more(events, cap[1], p.stem)))
-    out.append(f"OK assets: {len(clips)} clip{'s' if len(clips) != 1 else ''}")
+    n = f"{len(clips)} clip{'s' if len(clips) != 1 else ''}"
+    if stale == len(clips):
+        out.append(f"ERR assets: {n}, none analysed: run montaj ingest")
+    elif stale:
+        out.append(f"WARN assets: {n}, {stale} not analysed: run montaj ingest")
+    else:
+        out.append(f"OK assets: {n}")
     return out

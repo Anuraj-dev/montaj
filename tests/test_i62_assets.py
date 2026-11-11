@@ -71,3 +71,28 @@ def test_caps_without_a_stem(tmp_path: Path, capsys) -> None:
     main(["-C", str(root), "assets", "talk"])
     line = [x for x in capsys.readouterr().out.splitlines() if x.startswith("  events")][0]
     assert line.count(" | ") == 19
+
+
+def test_unanalysed_clips_warn_or_err(tmp_path: Path, capsys) -> None:
+    root = _project(tmp_path)
+    rows = json.loads((root / "assets" / "analysis.json").read_text())
+    del rows["mute.mov"]
+    (root / "assets" / "analysis.json").write_text(json.dumps(rows))
+    assert main(["-C", str(root), "assets"]) == 0
+    out = capsys.readouterr().out.strip().splitlines()
+    assert "mute not analysed (run montaj ingest)" in out
+    assert out[-1] == "WARN assets: 2 clips, 1 not analysed: run montaj ingest"
+    (root / "assets" / "analysis.json").write_text("{}")
+    assert main(["-C", str(root), "assets"]) == 1
+    assert capsys.readouterr().out.strip().splitlines()[-1] == "ERR assets: 2 clips, none analysed: run montaj ingest"
+
+
+def test_a_broken_file_is_unreadable_not_silent(tmp_path: Path, capsys) -> None:
+    root = _project(tmp_path)
+    bad = root / "assets" / "bad.mov"
+    bad.write_bytes(b"not a video at all")
+    rows = json.loads((root / "assets" / "analysis.json").read_text())
+    rows["bad.mov"] = _row(bad, cuts=[])
+    (root / "assets" / "analysis.json").write_text(json.dumps(rows))
+    assert main(["-C", str(root), "assets", "bad"]) == 0
+    assert capsys.readouterr().out.splitlines()[0].endswith("| unreadable")
