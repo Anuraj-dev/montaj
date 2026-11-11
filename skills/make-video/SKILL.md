@@ -50,8 +50,9 @@ Python). Every render, check and review after that is a `montaj` command that co
    `montaj spec` lists them). Shorthands that keep a short short:
    - Titles: one line each, `- {at: 4b, to: 6b, text: "SWITCH *WORKSPACES*"}`; style and position come
      from `styles:`/`defaults:`. In a `lines:` block a line's `at` defaults to the block's `from`.
-   - Sound: `audio.sfx: [text, cuts]` puts a hit on each slam and a swish on each hard cut, never doubling
-     a sound you placed; `auto` adds emphasis, transition and drop sounds.
+   - Sound: `audio.sfx: [text, cuts]` puts a hit on each slam and a swish on each hard cut (not a jump cut
+     within a take, nor the cut to a blank or textless card), never doubling a sound you placed; `auto` adds
+     transition whooshes, the `drop` riser and the `reveal: type` tick.
    - A PNG sequence is one layer: `{frames: "m*.png", every: 6f}`, not a layer per image.
    - Endings: `video.outro: {type: fade, dur: 30f, hold: 15f}` ends on true black; `card: {color: "#000"}`
      is a textless card.

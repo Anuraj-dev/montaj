@@ -16,6 +16,8 @@ MUST = [
     "`{frames: \"m*.png\", every: 6f}`",
     "`- {at: 4b, to: 6b, text: \"SWITCH *WORKSPACES*\"}`",
     "`audio.sfx: [text, cuts]`",
+    "not a jump cut within a take, nor the cut to a blank or textless card",
+    "`auto` adds transition whooshes, the `drop` riser and the `reveal: type` tick",
     "`video.outro: {type: fade, dur: 30f, hold: 15f}`",
     "`card: {color: \"#000\"}`",
 ]
