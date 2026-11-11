@@ -372,6 +372,10 @@ def _cmd_new(ns: argparse.Namespace, root: Path) -> list[str]:
     local = src.with_suffix("")  # recipes/<name>/: the recipe's own draw files, beside the spec
     if local.is_dir():
         shutil.copytree(local, dest / local.name, dirs_exist_ok=True, ignore=shutil.ignore_patterns("__pycache__"))
+    compose = src.parent / "music" / f"{src.stem}-compose.py"  # the recipe's song: the agent Reads and Edits it
+    if compose.is_file():
+        (dest / "music").mkdir(exist_ok=True)
+        shutil.copyfile(compose, dest / "music" / "compose.py")
     if ns.photos is None:
         return _recipe_demo(demo, dest)
     assets = _assets_dir(dest, _assets_rel(src))
