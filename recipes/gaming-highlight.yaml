@@ -7,7 +7,7 @@
 #   Out      48b-60b  round won, GG over a blurred last frame, fade to black
 # Every gameplay shot picks its in-point from assets/match.events.json (`montaj ingest-rec match.mp4 --events ...`).
 # Demo assets (no real footage): montaj new <project> --recipe gaming-highlight. Slots: gaming-highlight.md.
-video: {size: 1920x1080, fps: 60, bpm: 120, look: cool-tech, background: "#05060d", outro: {type: fade, dur: 1s}}
+video: {size: 1920x1080, fps: 60, bpm: 120, look: cool-tech, background: "#05060d", outro: {type: fade, dur: 1s, hold: 0.5s}}
 assets: assets
 # hitN: the N-th kill on the film clock, through the shot whose at_event picked it (moves with that shot's
 # start, pre and speed). drop: the key moment (sfx: auto peaks a riser here).
@@ -125,5 +125,6 @@ audio:
     - {src: "synth:ding", at: win, gain: -12dB}
 check:
   expect:
+    # A fade alone is black only at its last frame (the GG text keeps it bright); outro.hold 0.5s is true black.
     - {black: [29.5s, 30s], why: "fade to black"}
   pacing: {max_shot: 4s, min_per10s: 3, hook_text_by: 0.5s}

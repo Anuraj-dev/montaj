@@ -5,7 +5,7 @@
 #   Drop   16b-21b  riser then boom; 2b/2b/1b glitch + zoom cuts, one speed punch and one freeze
 #   Logo   21b-28b  boom, wordmark + tagline, voice 2, fade to black
 # Demo assets (no private footage): montaj new <project> --recipe tech-launch. Retargeting: recipes/tech-launch.md.
-video: {size: 1920x1080, fps: 60, bpm: 120, look: cool-tech, background: "#05080f", outro: {type: fade, dur: 30f}}
+video: {size: 1920x1080, fps: 60, bpm: 120, look: cool-tech, background: "#05080f", outro: {type: fade, dur: 30f, hold: 15f}}
 assets: assets
 markers: {drop: 16b, logo: 21b}
 shots:
@@ -117,4 +117,5 @@ audio:
 check:
   expect:
     - {frozen: [9.5s, 10s], why: "freeze on the drop shot"}
-    - {black: [13.7s, 14s], why: "fade to black"}
+    # A fade alone is black only at its last frame (text or layers keep it bright); outro.hold 15f is true black.
+    - {black: [13.75s, 14s], why: "fade to black"}

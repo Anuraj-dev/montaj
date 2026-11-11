@@ -17,9 +17,10 @@ Photo fields (`crop`, `focus`, swirl `center`, wall `at`) are source-image pixel
 - `video.intro` — mapping, default none — opening treatment on the first frames.
 - `video.intro.type` — `white-lift`, required with intro — a white bloom that settles onto the picture, plus a short lift from white.
 - `video.intro.dur` — duration, required with intro — how long the opening bloom lasts.
-- `video.outro` — mapping, default none — ending treatment. Starts at `n_frames - dur`.
+- `video.outro` — mapping, default none — ending treatment. Starts at `n_frames - dur` (`- hold` with a hold).
 - `video.outro.type` — `glow` or `fade`, required with outro — `glow`: a bloom and warm rim that grow and then stay. `fade`: everything fades to black over the last `dur`.
 - `video.outro.dur` — duration, required with outro — how long the ending lasts.
+- `video.outro.hold` — duration, default none, `fade` only — black held after the fade, inside the film: the fade ends `hold` before the last frame, then text and layers are black too. To end on black, use `outro: {type: fade, dur: 30f, hold: 15f}` and `check.expect: [{black: [<end − hold>, <end>]}]`; a fade alone is black only at its last frame.
 - `video.motion_blur` — integer, default `1` — sub-frames averaged into each frame. `1` is off. Preview uses at most 2. Text and subtitles are composited once at the integer frame, after that average.
 - `assets` — string, default `assets` — photo folder relative to the spec file. A photo is the file stem (`jpg`, `jpeg`, `png` or `webp`).
 - `shots` — list, required — played in order. Each shot starts when the previous one ends.
@@ -97,8 +98,8 @@ Photo fields (`crop`, `focus`, swirl `center`, wall `at`) are source-image pixel
 - `shots[].sequence.every` — duration (`f` or `s`), required — how long each item stays. Rounds to a whole frame of at least 1. Beats and booleans are an error. `check` treats each step as a designed hold but still flags a freeze that runs across an item change.
 - `shots[].sequence.items` — list, required — at least two. A photo stem, a quoted `#rrggbb`, `{photo: stem}` or `{color: "#rrggbb"}`. The list repeats until the shot ends.
 - `shots[].card` — mapping, one source: photo, wall, clip, blank, sequence or card — a solid colour and text as this shot's picture, with no blank shot and no `text` block. Mutually exclusive with the other sources.
-- `shots[].card.color` — `#rrggbb`, required — the card's background.
-- `shots[].card.text` — list, required — lines with the same fields as `text[].lines[]`. `at`, `stagger`, `dur` and `sweep` are durations from this shot's start (`0s`, `12f`, `1b`), not film markers. The colour and the lines are one picture, so a fade or whip carries both.
+- `shots[].card.color` — `#rrggbb` (or `#rgb`), required — the card's background.
+- `shots[].card.text` — list, default none — with no lines the card is a flat colour frame (`card: {color: "#000"}`). Lines with the same fields as `text[].lines[]`. `at`, `stagger`, `dur` and `sweep` are durations from this shot's start (`0s`, `12f`, `1b`), not film markers. The colour and the lines are one picture, so a fade or whip carries both.
 - `shots[].custom` — path to a `.py` file, relative to the spec, one source: photo, wall, clip, blank, sequence, card or custom — the shot is drawn by that file's `draw(ctx)` on the GPU. Mutually exclusive with the other sources; `crop`, `focus` and `zoom` do not apply. **A spec with `custom:` executes that code in-process with its author's trust (like `music compose`); Montaj does not sandbox it.** See custom code.
 - `shots[].params` — mapping, default none — values handed to the shot's `draw` as `ctx.params`. Needs `custom`. Part of the segment hash.
 - `shots[].effects` — list, default none — effects applied in order to this shot's picture (any source except blank), before the look; each entry is a built-in `type` or a `custom` file. A transition carries each side's effects.

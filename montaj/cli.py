@@ -656,7 +656,12 @@ def _intended_freeze(root: Path) -> list[tuple[float, float]]:
             start = None
     if start is not None:
         spans.append((start / fps, tl.n_frames / fps))
-    return _split_sequence_steps(tl, spans, fps)
+    spans = _split_sequence_steps(tl, spans, fps)
+    # `video.outro.hold` (#58): the frames after the fade are black by design, so a freeze there is too.
+    fade = tl.plan(tl.n_frames - 1).fade_out if tl.n_frames else None
+    if fade is not None and fade[0] + fade[1] < tl.n_frames:
+        spans.append(((fade[0] + fade[1]) / fps, tl.n_frames / fps))
+    return spans
 
 
 def _split_sequence_steps(tl, spans: list[tuple[float, float]], fps: float) -> list[tuple[float, float]]:

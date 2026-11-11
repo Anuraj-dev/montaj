@@ -1196,7 +1196,8 @@ def resolve(spec: Spec, spec_dir: Path) -> Timeline:
     fade_out = None
     if spec.video.outro is not None:
         dur = parsed["video.outro.dur"]
-        start = n_frames - dur
+        # #58: a `hold` ends the fade that many frames early; fade_layer keeps them at black.
+        start = max(0, n_frames - dur - parsed.get("video.outro.hold", 0))
         if spec.video.outro.type == "fade":
             fade_out = (dur, start)
         else:

@@ -45,8 +45,6 @@ def test_card_validation_errors(tmp_path: Path) -> None:
     assert any("card.text[0].at" in e for e in bare)
     marker = _errors(tmp_path, _CARD.replace("at: 0s", "at: v1"))
     assert any("card.text[0].at" in e for e in marker)
-    empty = _errors(tmp_path, '  - card: {color: "#223344", text: []}\n    hold: 5f\n')
-    assert any("card.text" in e and "at least one line" in e for e in empty)
     both = _errors(tmp_path, _CARD.replace("hold: 20f", "hold: 20f\n    blank: true"))
     assert any("mutually exclusive" in e for e in both)
     style = _errors(tmp_path, _CARD.replace("at: 0s", "at: 0s, style: bogus"))
