@@ -1,7 +1,7 @@
 """Word-anchored edits and automatic transition sound (#41).
 
 `expand_emphasis` runs where `expand_captions` does (`spec.load_spec`, and `timeline.resolve` for a spec built
-in code). It turns `emphasis:` and `audio.sfx: auto` into the mechanisms that already exist: shot `effects`
+in code). It turns `emphasis:` and `audio.sfx` (`auto`, or a list of `auto`/`text`/`cuts`) into the mechanisms that already exist: shot `effects`
 (shake), clip `camera` keys (zoom), top-level `fx` (flash), `audio.clips` (sounds) and `captions.overrides`
 (accent). The expansion is what the segment hash and the mix hash see; `emphasis` and `sfx` are cleared.
 
@@ -30,6 +30,7 @@ MATCH = re.compile(r"^(.+?)(?:#([1-9]\d*))?$")
 AUTO_WHOOSH = ("whip", "push", "zoom")  # transitions that get a whoosh; its peak lands on the cut / window middle
 DROP_MARKER = "drop"
 CLOSE_S = 0.080  # two sfx peaks nearer than this smear into one hit (`check` warns)
+TEXT_HIT, CUT_HIT = "hit", "swish"  # `audio.sfx: [text]` on a slam's impact, `[cuts]` on a hard cut (#62)
 
 
 @dataclass(frozen=True)
@@ -225,10 +226,62 @@ def _auto_events(spec: Spec, parsed: dict[str, int], markers: dict[str, float], 
     return out
 
 
+def _sfx_kinds(spec: Spec) -> set[str]:
+    """`audio.sfx` as a set: `auto` alone is `{"auto"}`; a list names each kind."""
+    sfx = spec.audio.sfx if spec.audio is not None else None
+    return set() if sfx is None else {sfx} if isinstance(sfx, str) else set(sfx)
+
+
+def _hit_events(spec: Spec, parsed: dict[str, int], markers: dict[str, float], bpm, beat0,
+                kinds: set[str]) -> list[tuple[str, float]]:
+    """`(sound, film frame of its peak)` for slam text impacts (`text`) and hard cuts (`cuts`).
+
+    A slam line hits when its first unit lands: `at` + its `in.dur` (else `dur`, else the slam default). A hard
+    cut is a shot after the first with no `in` transition.
+    """
+    from montaj.render.motion import IN_DUR
+
+    fps = spec.video.fps
+    out: list[tuple[str, float]] = []
+    if "text" in kinds:
+        for block in spec.text:
+            for line in block.lines:
+                if line.in_ is None or line.in_.type != "slam":
+                    continue
+                at = _parse_time(line.at, markers, fps, bpm, "", [], beat0=beat0)
+                raw = line.in_.dur or line.dur
+                dur = _dur_frames(raw, fps, bpm, "", []) if raw else IN_DUR["slam"] * fps
+                if at is not None and dur is not None:
+                    out.append((TEXT_HIT, at + dur))
+    if "cuts" in kinds:
+        for i, sh in enumerate(spec.shots):
+            start = parsed.get(f"shots[{i}].start")
+            if i > 0 and sh.in_ is None and start is not None:
+                out.append((CUT_HIT, float(start)))
+    return out
+
+
+def _placed_peaks(base: Spec, spec_dir: Path, markers: dict[str, float], bpm, beat0) -> list[float]:
+    """Film seconds where the author's own clips start or peak; ducked-under clips (voices) are not hits."""
+    from montaj.audio.mix import peak_lead, plan_audio
+
+    plan = plan_audio(base, spec_dir, markers, base.video.fps, bpm, beat0, [])
+    if plan is None:
+        return []
+    voices = set(plan.duck.under) if plan.duck is not None else set()
+    out: list[float] = []
+    for c in plan.clips:
+        if c.id in voices:
+            continue
+        out += [c.at_s, c.at_s + peak_lead(c.src, c.stream) - c.in_s]
+    return out
+
+
 def expand_emphasis(spec: Spec, spec_dir: Path | None, errors: list[str]) -> Spec:
     """`spec` without `emphasis` / `audio.sfx`, their effects, keys, fx, clips and accents in place."""
-    auto = spec.audio is not None and spec.audio.sfx == "auto"
-    if not spec.emphasis and not auto:
+    kinds = _sfx_kinds(spec)
+    auto = "auto" in kinds
+    if not spec.emphasis and not kinds:
         return spec
     words = []
     if any(e.word is not None or e.match is not None for e in spec.emphasis or ()):
@@ -255,6 +308,7 @@ def expand_emphasis(spec: Spec, spec_dir: Path | None, errors: list[str]) -> Spe
     clips: list[AudioClip] = []
     overrides: list[CaptionOverride] = []
     zooms: dict[int, list[tuple[int, float]]] = {}
+    peaks: list[float] = []  # film seconds of each sound this adds; `text` / `cuts` hits skip them
     entries = spec.emphasis or []
     for ev in events:
         e = entries[ev.entry]
@@ -293,6 +347,7 @@ def expand_emphasis(spec: Spec, spec_dir: Path | None, errors: list[str]) -> Spe
                 clip = _sfx_clip(spec, spec_dir, e.sfx, expr, f / fps, gain, f"{path}.sfx", errors)
                 if clip is not None:
                     clips.append(clip)
+                    peaks.append(f / fps)
             if e.caption is not None and ev.word is not None:
                 overrides.append(CaptionOverride(word=ev.word, emphasis=True))
     for si, peaks in zooms.items():
@@ -312,6 +367,19 @@ def expand_emphasis(spec: Spec, spec_dir: Path | None, errors: list[str]) -> Spe
             clip = _sfx_clip(spec, spec_dir, name, f"{f / fps:.4f}s", f / fps, gain, "audio.sfx", errors)
             if clip is not None:
                 clips.append(clip)
+                peaks.append(f / fps)
+    hits = _hit_events(spec, parsed, markers, bpm, beat0, kinds)
+    if hits:
+        # Never double a sound already on that frame: the author's clips, emphasis sfx, `auto`, earlier hits.
+        peaks += _placed_peaks(base, spec_dir, markers, bpm, beat0)
+        for name, f in sorted(hits, key=lambda h: h[1]):
+            t = f / fps
+            if any(abs(t - p) < CLOSE_S for p in peaks):
+                continue
+            clip = _sfx_clip(spec, spec_dir, name, f"{t:.4f}s", t, gain, "audio.sfx", errors)
+            if clip is not None:
+                clips.append(clip)
+                peaks.append(t)
     if clips:
         audio = (audio or Audio()).model_copy(update={"clips": [*(audio.clips if audio else ()), *clips]})
     return spec.model_copy(update={"emphasis": None, "shots": shots, "fx": fx, "audio": audio,

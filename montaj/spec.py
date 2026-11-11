@@ -851,7 +851,9 @@ class Audio(Frozen):
     clips: list[AudioClip] = Field(default_factory=list)
     duck: AudioDuck | None = None
     # #41: `auto` adds transition sounds at layout (`emphasis.expand_emphasis`); both are consumed there, so only clips are hashed.
-    sfx: Literal["auto"] | None = Field(default=None, exclude_if=lambda v: v is None)
+    # `auto`, or a list of `auto` / `text` / `cuts` (#62). Consumed by `emphasis.expand_emphasis`.
+    sfx: Literal["auto"] | list[Literal["auto", "text", "cuts"]] | None = Field(
+        default=None, exclude_if=lambda v: v is None)
     sfx_gain: str | None = Field(default=None, exclude_if=lambda v: v is None)
 
 
