@@ -1,5 +1,6 @@
-"""Issue #56: a staggered `by: word` slam never lands on the word before it, and `inspect --problems`
-reports ink over ink (`overlap`) at the animated pose."""
+"""Issue #56: a staggered `by: word` slam never lands on the word before it — each word grows away from
+the words on screen, keeping its zoom — and `inspect --problems` reports ink over ink (`overlap`) at the
+animated pose."""
 from __future__ import annotations
 
 from dataclasses import replace
@@ -31,6 +32,19 @@ STYLES = """styles:
     emphasis: {color: "#ffe600", scale: 1.12, shake: 12}
 """
 SENTENCE = '{text: "ONE *SENTENCE.*", style: slamx, size: 100, pos: [540, 300], at: 0.5s}'
+# Every staggered slam of the Auren short, one per block.
+AUREN = [
+    '{text: YOUR PC, style: slam, size: 130, pos: [540, 230], at: 0.5s}',
+    '{text: "*TALKS BACK*", style: slamx, size: 150, pos: [540, 370], at: 0.5s}',
+    '{text: "*SPOTIFY* ON", style: slamx, pos: [540, 500], at: 0.5s}',
+    '{text: "*NEW SPACE*", style: slamx, size: 120, pos: [540, 500], at: 0.5s}',
+    '{text: "TOKYO *NIGHT*", style: slamx, size: 140, pos: [540, 300], at: 0.5s}',
+    SENTENCE,
+    '{text: PICK YOUR, style: slam, size: 100, pos: [330, 220], at: 0.5s}',
+    '{text: "OR *VEYRA*", style: slamx, size: 150, pos: [540, 470], at: 0.5s}',
+    '{text: READY WHEN, style: slam, size: 130, pos: [540, 470], at: 0.5s}',
+    '{text: "*YOU* ARE", style: slamx, size: 150, pos: [540, 470], at: 0.5s}',
+]
 
 
 def _proj(tmp: Path, *lines_: str) -> Path:
@@ -77,16 +91,21 @@ def _worst_gap(ln, motion, pad: float, frames: float = 120) -> float:
 def test_staggered_word_slam_never_covers_the_word_before(tmp_path: Path) -> None:
     ln = _line(tmp_path)
     m = ln.motion
-    assert m.kind == "slam" and ln.stagger > 0 and m.slam_from is not None and m.slam_from < M.SLAM_FROM
+    assert m.kind == "slam" and ln.stagger > 0 and m.slam_units is not None
+    (one, one_x, _), (sentence, sentence_x, _) = m.slam_units
+    # ONE keeps the full slam growing leftward, SENTENCE. grows rightward from its left edge as far as
+    # the safe area allows (1.5 would need 642 px between ONE and the safe edge; there are 617).
+    assert one == M.SLAM_FROM and one_x > 0
+    assert sentence >= 1.43 and sentence_x < 0
     space = max(g.advance for g in ln.glyphs.glyphs if g.ink[2] <= g.ink[0])
-    rest_gap = _worst_gap(ln, replace(m, slam_from=1.0, shake=0.0), 0.0)
+    rest_gap = _worst_gap(ln, replace(m, slam_from=1.0, slam_units=None, shake=0.0), 0.0)
     stroke = ln.stroke.width
     # Painted ink (stroke included) never touches, and the outline keeps a space (or its resting gap).
     assert _worst_gap(ln, m, stroke) > 0
     entry = ln.stagger + m.dur  # until SENTENCE. lands; its shake after that is not the slam's to cap
     assert _worst_gap(ln, m, 0.0, entry) >= min(space, rest_gap) - 0.5
     # The test can fail: the slam before #56 (capped only at the frame edge) covered ONE.
-    assert _worst_gap(ln, replace(m, slam_from=1.731), stroke) < -50
+    assert _worst_gap(ln, replace(m, slam_from=1.731, slam_units=None), stroke) < -50
 
 
 def test_words_that_start_together_keep_the_edge_cap(tmp_path: Path) -> None:
@@ -94,8 +113,43 @@ def test_words_that_start_together_keep_the_edge_cap(tmp_path: Path) -> None:
     together = _line(tmp_path / "a", SENTENCE.replace("at: 0.5s", "at: 0.5s, in: {type: slam, by: word, stagger: 0s}"))
     staggered = _line(tmp_path / "b")
     assert together.stagger == 0
-    assert together.motion.slam_from == pytest.approx(1.731)
-    assert staggered.motion.slam_from < together.motion.slam_from
+    assert together.motion.slam_from == pytest.approx(1.731) and together.motion.slam_units is None
+    assert staggered.motion.slam_units is not None
+
+
+def test_a_single_word_slam_keeps_its_centre(tmp_path: Path) -> None:
+    ln = _line(tmp_path, '{text: "*PAUSED.*", style: slamx, pos: [540, 500], at: 0.5s}')
+    assert ln.motion.slam_units is None and ln.motion.slam_from == pytest.approx(1.08)
+
+
+def test_auren_word_slams_keep_their_zoom_without_overlap(tmp_path: Path) -> None:
+    """Every Auren two-word slam: no word covers another, and each still zooms (the first #56 fix capped
+    them all to ~1.0). A word's start is bounded only by the room the safe area leaves beside it."""
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    blocks = "".join(f"  - from: {k}s\n    to: {k + 1}s\n    lines: [{ln.replace('at: 0.5s', f'at: {k + 0.2}s')}]\n"
+                     for k, ln in enumerate(AUREN))
+    root = _write(tmp_path, f"  - {{photo: a, hold: {len(AUREN) + 1}s}}\n", ["a"],
+                  video="size: 1920x1080\n  fps: 60\n  bpm: 120\n  look: cool-tech", extra=f"{STYLES}text:\n{blocks}").parent
+    tl = resolve(load_spec(root / "montaj.yaml"), root)
+    starts = {b.lines[0].text: [s for s, _, _ in b.lines[0].motion.slam_units] for b in tl.texts}
+    assert all(s >= 1.3 for v in starts.values() for s in v), starts
+    assert sum(s >= 1.5 for v in starts.values() for s in v) >= 13, starts
+    assert [p for p in Inspector(root, fast=True).problems() if p["issue"] == "overlap"] == []
+
+
+def test_a_slam_under_a_line_on_screen_grows_away_from_it(tmp_path: Path) -> None:
+    """TALKS BACK lands 2 px under YOUR PC: it grows downward instead of over the line above."""
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    root = _write(tmp_path, "  - {photo: a, hold: 3s}\n", ["a"],
+                  video="size: 1920x1080\n  fps: 60\n  bpm: 120\n  look: cool-tech",
+                  extra=STYLES + "text:\n  - from: 0s\n    to: 2s\n    lines:\n"
+                  "      - {text: YOUR PC, style: slam, size: 130, pos: [540, 230], at: 0s}\n"
+                  "      - {text: TALKS BACK, style: slam, size: 150, pos: [540, 370], at: 0.5s}\n").parent
+    talks = resolve(load_spec(root / "montaj.yaml"), root).texts[0].lines[1]
+    ink = [g.ink for g in talks.glyphs.glyphs if g.ink[2] > g.ink[0]]
+    h = max(b[3] for b in ink) - min(b[1] for b in ink)
+    assert all(oy == pytest.approx(-h / 2, abs=0.01) for _, _, oy in talks.motion.slam_units)
+    assert [p for p in Inspector(root, fast=True).problems() if p["issue"] == "overlap"] == []
 
 
 def test_inspect_reports_the_uncapped_word_slam(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
