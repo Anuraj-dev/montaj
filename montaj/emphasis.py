@@ -12,6 +12,7 @@ moment of the sample, not its first sample, lands on the word or the cut.
 """
 from __future__ import annotations
 
+import functools
 import math
 import re
 from dataclasses import dataclass
@@ -237,7 +238,9 @@ def _hit_events(spec: Spec, parsed: dict[str, int], markers: dict[str, float], b
     """`(sound, film frame of its peak)` for slam text impacts (`text`) and hard cuts (`cuts`).
 
     A slam line hits when its first unit lands: `at` + its `in.dur` (else `dur`, else the slam default). A hard
-    cut is a shot after the first with no `in` transition.
+    cut is a shot after the first with no `in` transition, except a cut that is not heard as one: into the next
+    piece of the same clip (a `cuts:` jump cut, or any range that carries on forward), or into a `blank` shot or a
+    textless `card` (the end on black).
     """
     from montaj.render.motion import IN_DUR
 
@@ -256,14 +259,42 @@ def _hit_events(spec: Spec, parsed: dict[str, int], markers: dict[str, float], b
     if "cuts" in kinds:
         for i, sh in enumerate(spec.shots):
             start = parsed.get(f"shots[{i}].start")
-            if i > 0 and sh.in_ is None and start is not None:
+            if i > 0 and sh.in_ is None and start is not None and not _soft_cut(spec.shots[i - 1], sh, fps, bpm):
                 out.append((CUT_HIT, float(start)))
     return out
 
 
+def _soft_cut(prev, sh, fps: int, bpm) -> bool:
+    """A cut `cuts` leaves silent: to a blank or textless card, or to a later range of the same clip."""
+    if sh.blank or (sh.card is not None and not sh.card.text):
+        return True
+    if sh.clip is None or sh.clip != prev.clip or not isinstance(sh.range, tuple) or not isinstance(prev.range, tuple):
+        return False
+    s = _dur_frames(sh.range[0], fps, bpm, "", [])
+    e = _dur_frames(prev.range[1], fps, bpm, "", [])
+    return s is not None and e is not None and s >= e
+
+
+@functools.lru_cache(maxsize=32)
+def _envelope(src: str, stream: int, stamp: tuple[int, int]):
+    """4 ms RMS energy of `src`, as `mix.peak_lead` measures it; `stamp` (size, mtime) re-decodes an edited file."""
+    import numpy as np
+
+    from montaj.audio.mix import SR, decode, synth
+
+    x = synth(src[6:]) if src.startswith("synth:") else decode(src, stream)
+    x = np.sqrt((x ** 2).mean(axis=1)) if x.ndim == 2 else x
+    w = max(1, int(0.004 * SR))
+    return np.convolve(x.astype(np.float64) ** 2, np.ones(w) / w, mode="same")
+
+
 def _placed_peaks(base: Spec, spec_dir: Path, markers: dict[str, float], bpm, beat0) -> list[float]:
-    """Film seconds where the author's own clips start or peak; ducked-under clips (voices) are not hits."""
-    from montaj.audio.mix import peak_lead, plan_audio
+    """Film seconds of the loudest moment each of the author's clips plays, inside its `in`/`out` window.
+
+    Only the peak counts, not the clip's start: a sound that swells in late does not cover a hit at its start.
+    Ducked-under clips (voices) are not hits. Envelopes are cached per file, so re-loading the spec is cheap.
+    """
+    from montaj.audio.mix import SR, plan_audio
 
     plan = plan_audio(base, spec_dir, markers, base.video.fps, bpm, beat0, [])
     if plan is None:
@@ -273,7 +304,18 @@ def _placed_peaks(base: Spec, spec_dir: Path, markers: dict[str, float], bpm, be
     for c in plan.clips:
         if c.id in voices:
             continue
-        out += [c.at_s, c.at_s + peak_lead(c.src, c.stream) - c.in_s]
+        stamp = (0, 0)
+        if not c.src.startswith("synth:"):
+            try:
+                st = Path(c.src).stat()
+            except OSError:
+                continue
+            stamp = (st.st_size, st.st_mtime_ns)
+        env = _envelope(c.src, c.stream, stamp)
+        lo = max(0, round(c.in_s * SR))
+        hi = len(env) if c.out_s is None else min(len(env), round(c.out_s * SR))
+        if hi > lo:
+            out.append(c.at_s + (lo + int(env[lo:hi].argmax())) / SR - c.in_s)
     return out
 
 
@@ -350,10 +392,10 @@ def expand_emphasis(spec: Spec, spec_dir: Path | None, errors: list[str]) -> Spe
                     peaks.append(f / fps)
             if e.caption is not None and ev.word is not None:
                 overrides.append(CaptionOverride(word=ev.word, emphasis=True))
-    for si, peaks in zooms.items():
+    for si, keys in zooms.items():
         sh = shots[si]
         end_local = parsed[f"shots[{si}].end"] - parsed[f"shots[{si}].start"]
-        shots[si] = sh.model_copy(update={"camera": _zoom_keys(sh, peaks, end_local), "zoom": None, "focus": None})
+        shots[si] = sh.model_copy(update={"camera": _zoom_keys(sh, keys, end_local), "zoom": None, "focus": None})
     if overrides:
         if spec.captions is None:
             errors.append(_line("emphasis", "caption: accent needs a captions block", "add captions: {source: ...}"))
