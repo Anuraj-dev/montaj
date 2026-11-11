@@ -20,7 +20,7 @@ import yaml
 from montaj.audio import analyze as analyze_audio
 from montaj.audio import compose as compose_audio
 from montaj.audio import music as music_gen
-from montaj.audio.mix import check_lines, has_links
+from montaj.audio.mix import _find_src, check_lines, has_links
 from montaj.audio.music import parse_duration
 from montaj.capture import run as run_capture
 from montaj.doctor import doctor, link_skill
@@ -861,7 +861,7 @@ def _audio_mix_lines(root: Path) -> list[str]:
     audio = spec.audio
     if audio is None or not (audio.clips or audio.edit or audio.duck or has_links(spec)):
         return []
-    return check_lines(json.loads(stats_file.read_text()))
+    return check_lines(json.loads(stats_file.read_text()), loudnorm=audio.loudnorm)
 
 
 def _join_lines(tl, root: Path, video: Path) -> list[str]:
@@ -1207,18 +1207,59 @@ def _cmd_cut(ns: argparse.Namespace, root: Path) -> list[str]:
             f"silence>{silence:g}s removed  fillers={plan['fillers']}"]
 
 
+BED_HEADROOM_DB = -6.0  # a composed bed's peak: room for voice and SFX on top (#64)
+
+
+def _is_bed(root: Path, out: Path) -> bool:
+    """`out` is (or will be) the spec's music bed: no spec yet, no `audio.track`, or it is the track.
+
+    It is not when the spec's track is another file, or an `audio.clips` src names it, found the way
+    `mix._clip_src` finds it: `synth:<name>` in `sfx/`, else the spec dir, then the assets dir, with
+    the extension optional. Raw YAML, not `load_spec`: the spec often names a track that does not
+    exist yet.
+    """
+    try:
+        raw = yaml.safe_load((root / "montaj.yaml").read_text())
+    except (OSError, yaml.YAMLError):
+        return True
+    raw = raw if isinstance(raw, dict) else {}
+    audio = raw.get("audio") if isinstance(raw.get("audio"), dict) else {}
+    track = audio.get("track")
+    if isinstance(track, str) and track:
+        return (root / track).resolve() == out
+    assets = raw.get("assets") if isinstance(raw.get("assets"), str) else "assets"
+    clips = audio.get("clips") if isinstance(audio.get("clips"), list) else []
+    for c in clips:
+        src = c.get("src") if isinstance(c, dict) else None
+        if not isinstance(src, str):
+            continue
+        dirs = [root / "sfx"] if src.startswith("synth:") else [root, root / assets]
+        name = src.removeprefix("synth:")
+        found = next((f for d in dirs if (f := _find_src(d, name)) is not None), None)
+        # An existing file is the clip `_clip_src` would pick; before compose writes it, any candidate.
+        bases = [found.resolve()] if found is not None else [(d / name).resolve() for d in dirs]
+        if {out, out.with_suffix("")} & set(bases):  # `src` may leave off the extension
+            return False
+    return True
+
+
 def _cmd_music_compose(ns: argparse.Namespace, root: Path) -> list[str]:
+    out = _at(root, ns.out)
     try:
         result = compose_audio.compose(
             _at(root, ns.script),
-            _at(root, ns.out),
+            out,
             root=root,
             timeout=ns.timeout,
             log=root / "build" / "music.log",
+            headroom_db=BED_HEADROOM_DB if _is_bed(root, out) else None,
         )
     except compose_audio.ComposeError as exc:
         return [f"ERR music compose: {exc}"]
     lines: list[str] = []
+    if result.scaled_db < 0:
+        lines.append(f"INFO music compose: bed turned down {-result.scaled_db:.1f} dB to "
+                     f"{BED_HEADROOM_DB:.0f} dBFS peak, room for voice/SFX (loudnorm at render restores the level)")
     if result.peak_dbfs >= -0.1:
         lines.append(f"WARN music compose: clipping (peak {compose_audio.format_db(result.peak_dbfs)} dBFS)")
     lines.append(

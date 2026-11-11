@@ -4301,6 +4301,12 @@ def load_spec(path: Path | str, *, expand: bool = True) -> Spec:
     assets_rel = data.get("assets", "assets")
     assets_dir = path.parent / str(assets_rel)
     _collect_photos(data, assets_dir, path.parent, errors)
+    if spec is not None and spec.audio is not None:
+        from montaj.emphasis import SFX_ID
+
+        # Checked before `expand_emphasis` adds its own `sfx` clips: check lines treat the id as `audio.sfx_gain`.
+        errors.extend(_line(f"audio.clips[{i}].id", f"{SFX_ID!r} is reserved for emphasis and sfx: auto sounds",
+                            "pick another id") for i, c in enumerate(spec.audio.clips) if c.id == SFX_ID)
 
     if spec is not None and not errors and any(sh.cuts for sh in spec.shots):
         from montaj.cuts import expand_cuts

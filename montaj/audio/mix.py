@@ -29,6 +29,7 @@ from pathlib import Path
 import numpy as np
 
 from montaj.encode import FFMPEG, FFPROBE, EncodeError
+from montaj.emphasis import DEFAULT_SFX_GAIN, SFX_ID
 from montaj.spec import _DUR, _assets_dir, _dur_frames, _line, _parse_time
 
 SR = 48000
@@ -96,6 +97,7 @@ class Linked:
     lag: float = 0.0
     xin: int = 0  # half-width (samples) of the crossfade with the linked shot before; 0: a plain fade-in
     xout: int = 0  # the same, with the linked shot after
+    fixed: bool = False  # an audio layer: no spec field sets its gain, so a check line never asks to cut it
 
 
 @dataclass(frozen=True)
@@ -127,6 +129,10 @@ class MixStats:
     clips: int  # placements mixed in
     duck_db: float  # deepest reduction applied to the music (<= 0)
     hash: str = ""
+    peak_s: float | None = None  # film time of the peak; None in stats written before #64
+    peak_parts: tuple = ()  # ((label, dBFS), …) what each source adds at the peak sample, loudest first
+    # when clipped: (kind, name, placements, dB) from `_peak_fix`: a cut that keeps the mix under the ceiling
+    fix: tuple = ()
 
 
 def _span_s(raw: object, fps: int, bpm: float | None, path: str, errors: list[str],
@@ -471,7 +477,7 @@ def _links(spec, spec_dir: Path | None, shots, fps: int, bpm: float | None) -> l
             xin = half if not layer.from_ and i > 0 and heard_out[i - 1] and a > 0 else 0
             xout = half if b == last and i + 1 < n and heard_in[i + 1] else 0
             out.append(Linked(layer.id, str(path), fps, start, a, b, float(clip_in or 0.0), None, None, 0.0,
-                              lag, xin, xout))
+                              lag, xin, xout, fixed=True))
         if not linked[i]:
             continue
         path, lag = source(sh.clip)
@@ -995,16 +1001,128 @@ def _mix_parts(plan: MixPlan, cache: dict, log: Path | None) -> tuple[np.ndarray
     return bed, placed, duck_db
 
 
+TRACK = "music (track)"  # the bed in a check line; a clip may itself be called `music`
+
+
+def _key(c: Placed | Linked) -> tuple[str, str]:
+    """`(kind, name)` of the spec knob that sets a placement's level, as a check line names it.
+
+    `sfx`: emphasis / `sfx: auto` sounds, all set by `audio.sfx_gain`; `id`: every clip (or linked
+    shot) with that id; `src`: unnamed clips of that file, keyed on its full path (`synth:hit` as is).
+    """
+    if c.id == SFX_ID:
+        return ("sfx", "")
+    if c.id:
+        return ("id", c.id)
+    return ("src", c.src)
+
+
+def _shown(key: tuple[str, str]) -> str:
+    """The key as a check line prints it: an unnamed clip by its file name, not its path."""
+    if key[0] == "src" and not key[1].startswith("synth:"):
+        return Path(key[1]).name
+    return {"track": TRACK, "sfx": "audio.sfx_gain"}.get(key[0], key[1])
+
+
+def _db_of(v: float) -> float:
+    return 20 * math.log10(abs(v)) if v else -120.0
+
+
+def _cut_db(h: float) -> float:
+    """dB for scale `h`, rounded up to 0.1 dB so the printed cut clears it."""
+    return math.ceil((-20 * math.log10(h) + 0.005) * 10) / 10
+
+
+def _max_scale(other: np.ndarray, part: np.ndarray) -> float | None:
+    """Largest factor `g` in (0, 1] with `|other + g*part| <= PEAK_CEILING` on every sample, else None.
+
+    Each sample bounds `g` to an interval holding 0 (once `other` alone fits), so the bounds intersect
+    to `[0, H]` and any cut of at least `-20 log10 H` dB clears the whole mix, not just the peak.
+    """
+    if not len(other) or float(np.max(np.abs(other))) > PEAK_CEILING:
+        return None
+    nz = part != 0
+    o, p = other[nz].astype(np.float64), part[nz].astype(np.float64)
+    if not len(p):
+        return None
+    h = float(np.min(np.where(p > 0, (PEAK_CEILING - o) / p, (-PEAK_CEILING - o) / p)))
+    return min(1.0, h) if h > 0 else None
+
+
+def _peak_fix(full: np.ndarray, placed: list, plan: MixPlan, order: list[tuple[str, str]]) -> tuple:
+    """`(kind, name, placements, dB)`: a cut that keeps `full` under the ceiling everywhere.
+
+    Duck sources are never cut (a quieter voice moves the duck). The cheapest clip knob among the
+    sources pushing the peak (`order`) wins, since the spec sets it (audio layers have no gain
+    field, so they are skipped; an `sfx` cut names `default` while the sounds sit at the default
+    `audio.sfx_gain`); else the track (no spec field sets its level: re-compose or turn the file
+    down); else every non-duck source together (`name` lists the spared duck ids). If even that
+    cannot clear it, every source by the overshoot.
+    """
+    ducked = set(plan.duck.under) if plan.duck is not None else set()
+    is_duck = [c.id in ducked for c, _, _ in placed]
+    clip_best: tuple = ()
+    default_db = float(DEFAULT_SFX_GAIN.removesuffix("dB"))
+    for key in [k for k in order if k[0] != "track"]:
+        part = np.zeros_like(full)
+        mine = [c for (c, s, x), duck in zip(placed, is_duck) if _key(c) == key and not duck]
+        if not mine or any(getattr(c, "fixed", False) for c in mine):
+            continue
+        for (c, s, x), duck in zip(placed, is_duck):
+            if _key(c) == key and not duck:
+                part[s : s + len(x)] += x
+        if (h := _max_scale(full - part, part)) is None:
+            continue
+        if not clip_best or _cut_db(h) < clip_best[3]:
+            name = _shown(key)
+            if key[0] == "sfx":
+                name = "default" if all(abs(c.gain_db - default_db) < 1e-6 for c in mine) else ""
+            clip_best = (key[0], name, len(mine), _cut_db(h))
+    if clip_best:
+        return clip_best
+    duck_part = np.zeros_like(full)
+    for (c, s, x), duck in zip(placed, is_duck):
+        if duck:
+            duck_part[s : s + len(x)] += x
+    placed_sum = np.zeros_like(full)
+    for c, s, x in placed:
+        placed_sum[s : s + len(x)] += x
+    bed = full - placed_sum
+    track = Path(plan.track).name if plan.track else ""
+    if plan.track and (h := _max_scale(full - bed, bed)) is not None:
+        return ("track", track, 0, _cut_db(h))
+    if (h := _max_scale(duck_part, full - duck_part)) is not None:
+        return ("all", ", ".join(sorted(ducked)), 0, _cut_db(h))
+    return ("all", "", 0, _cut_db(PEAK_CEILING / float(np.max(np.abs(full)))))
+
+
 def mix_audio(plan: MixPlan, *, log: Path | None = None) -> tuple[np.ndarray, MixStats]:
     bed, placed, duck_db = _mix_parts(plan, {}, log)
     for _, s, x in placed:
         bed[s : s + len(x)] += x
     peak = float(np.max(np.abs(bed))) if len(bed) else 0.0
     clipped = peak > PEAK_CEILING
-    if clipped:
-        bed *= np.float32(PEAK_CEILING / peak)
+    peak_s: float | None = None
+    parts: list[tuple[str, float]] = []
+    fix: tuple = ()
+    if peak > 0:
+        i, ch = divmod(int(np.argmax(np.abs(bed))), bed.shape[1])
+        peak_s = i / SR
+        at: dict[tuple[str, str], float] = {}
+        for c, s, x in placed:
+            if s <= i < s + len(x):
+                at[_key(c)] = at.get(_key(c), 0.0) + float(x[i - s, ch])
+        at = {("track", ""): float(bed[i, ch]) - sum(at.values()), **at}
+        keyed = sorted(((k, v) for k, v in at.items() if abs(v) > 1e-3), key=lambda kv: -abs(kv[1]))
+        parts = [(_shown(k), v) for k, v in keyed]
+        if clipped:
+            sign = math.copysign(1.0, float(bed[i, ch]))
+            fix = _peak_fix(bed, placed, plan, [k for k, v in keyed if v * sign > 0])
+        if clipped:
+            bed *= np.float32(PEAK_CEILING / peak)
     peak_db = 20 * math.log10(peak) if peak > 0 else -120.0
-    return bed, MixStats(len(bed) / SR, peak_db, clipped, len(placed), duck_db)
+    return bed, MixStats(len(bed) / SR, peak_db, clipped, len(placed), duck_db, "", peak_s,
+                         tuple((n, round(_db_of(v), 2)) for n, v in parts), fix)
 
 
 def source_window(plan: MixPlan, source: str, s0: int, s1: int, *, cache: dict | None = None) -> np.ndarray:
@@ -1058,6 +1176,7 @@ def plan_hash(plan: MixPlan) -> str:
     if not plan.links:
         del body["links"]  # a plan without linked shots keeps the wav it had before links existed
     for link in body.get("links", ()):
+        del link["fixed"]  # a label for check lines; the samples do not depend on it
         if not link["xin"] and not link["xout"]:
             del link["xin"], link["xout"]  # an uncrossfaded link keeps the wav it had before crossfades
     payload = json.dumps({"rev": MIX_REV, "plan": body, "shas": shas}, sort_keys=True)
@@ -1069,8 +1188,10 @@ def render_mix(plan: MixPlan, build_dir: Path, *, log: Path | None = None) -> tu
     digest = plan_hash(plan)
     wav = build_dir / "audio" / f"{digest}.wav"
     meta = wav.with_suffix(".json")
-    if wav.is_file() and meta.is_file():
-        stats = MixStats(**json.loads(meta.read_text()))
+    cached = json.loads(meta.read_text()) if wav.is_file() and meta.is_file() else {}
+    if "peak_s" in cached:  # stats from before #64 lack the peak detail: mix again (same samples)
+        parts = tuple(map(tuple, cached["peak_parts"]))
+        stats = MixStats(**{**cached, "peak_parts": parts, "fix": tuple(cached["fix"])})
     else:
         audio, stats = mix_audio(plan, log=log)
         stats = MixStats(**{**asdict(stats), "hash": digest})
@@ -1080,14 +1201,40 @@ def render_mix(plan: MixPlan, build_dir: Path, *, log: Path | None = None) -> tu
     return wav, stats
 
 
-def check_lines(stats: dict) -> list[str]:
-    """`montaj check` lines from `build/audio-mix.json`."""
+def _fix_text(fix: list | tuple) -> str:
+    kind, name, n, cut = fix
+    if kind == "sfx":
+        default = f" (default {DEFAULT_SFX_GAIN})" if name == "default" else ""
+        return f"lower audio.sfx_gain{default} by {cut:.1f} dB"
+    if kind in ("id", "src"):
+        what = f"clip {name}" if kind == "id" else f"{name} clip"
+        return f"lower gain on {'every ' if n > 1 else 'the '}{what} by {cut:.1f} dB"
+    if kind == "track":
+        return f"re-compose {name} or turn the file down by {cut:.1f} dB (no spec field sets the track level)"
+    spared = f" except duck sources ({name})" if name else ""
+    return f"lower the track and every clip{spared} by {cut:.1f} dB"
+
+
+def check_lines(stats: dict, *, loudnorm: bool = True) -> list[str]:
+    """`montaj check` lines from `build/audio-mix.json`; `loudnorm` is the spec's `audio.loudnorm`."""
     parts = [f"{stats['clips']} clips"]
     if stats["duck_db"] < 0:
         parts.append(f"duck {stats['duck_db']:.1f} dB")
     lines = [f"OK audio-mix {', '.join(parts)}, peak {stats['peak_dbfs']:+.1f} dBFS"]
     if stats["clipped"]:
-        lines.append(f"WARN clip clipped (mix peak {stats['peak_dbfs']:+.1f} dBFS, scaled to -0.2 dBFS)")
+        # The ceiling scale is one clean gain on the whole mix (no distortion). With loudnorm at mux
+        # the level comes back, so it is INFO; with loudnorm off the film really is quieter: WARN.
+        scale = 20 * math.log10(PEAK_CEILING) - stats["peak_dbfs"]
+        line = f"{'INFO' if loudnorm else 'WARN'} clip mix peak {stats['peak_dbfs']:+.1f} dBFS"
+        if stats.get("peak_s") is not None:
+            srcs = [f"{n} {v:+.1f}" for n, v in stats.get("peak_parts", ())]
+            more = f", +{len(srcs) - 4} more" if len(srcs) > 4 else ""
+            line += f" at {stats['peak_s']:.2f}s = {', '.join(srcs[:4])}{more}"
+        line += f"; whole mix scaled {scale:.1f} dB, clean" + ("" if loudnorm else ", and loudnorm is off: "
+                                                                "the film is that much quieter")
+        if len(stats.get("fix") or ()) == 4:
+            line += f" (to skip the scale {_fix_text(stats['fix'])})"
+        lines.append(line)
     return lines
 
 

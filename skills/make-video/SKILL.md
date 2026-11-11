@@ -50,6 +50,9 @@ that costs no tokens. Run every command as `montaj -C <project> <cmd>`. Each pri
      music/compose.py`, and read the `OK` line (length, peak, LUFS) since you can't listen.
      `recipes/music/compose-example.py` is a starting point. Start the first downbeat at 0 s and set the
      same `video.bpm`.
+   - Gain staging: `music compose` turns the bed down to -6 dBFS peak so voice and SFX sit on top. For an
+     `INFO clip` peak, apply the cut `montaj check` names: a clip's `gain`, or `audio.sfx_gain` for emphasis
+     and `sfx: auto` sounds. Only when it names the track file, re-compose it quieter.
    Done when the song exists and you know its tempo and first beat.
 
 4. **Spec.** Start from the recipe and depart from it freely: the treatment decides, not the recipe. Before

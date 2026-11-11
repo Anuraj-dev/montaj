@@ -146,6 +146,8 @@ def test_music_compose_peak_thresholds_use_float_precision(
     (project / "build").mkdir(parents=True)
     script = project / "float.py"
     _float_wav_script(script, peak_db)
+    # Not the spec's track, so compose keeps the level it measures (a bed gets -6 dBFS headroom, #64).
+    (project / "montaj.yaml").write_text("audio: {track: music/other.wav}\n")
 
     actual, lines, err = _run(["-C", str(project), "music", "compose", "float.py"], capsys)
 
