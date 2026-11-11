@@ -1598,7 +1598,7 @@ def _require_frames(assets_dir: Path, name: str, path: str, errors: list[str]) -
     try:
         files = find_frames(assets_dir, name)
     except FileNotFoundError as e:
-        hint = "put the images in a folder under assets/ (or use a glob like mascot/*.png)"
+        hint = "put the images in a folder under assets/ (or a glob relative to assets/, like mascot/*.png)"
         errors.append(_line(path, str(e).replace(str(assets_dir), "assets/"), hint))
         return
     size = None
@@ -3782,7 +3782,8 @@ def _validate_mattes(spec: Spec, spec_dir: Path | None, errors: list[str]) -> No
             pass  # the missing asset itself is reported by the asset check
 
 
-def _check_frames(layer: Layer, p: str, parsed: dict[str, int], assets_dir: Path | None, errors: list[str]) -> None:
+def _check_frames(layer: Layer, p: str, parsed: dict[str, int], assets_dir: Path | None, fps: float,
+                  errors: list[str]) -> None:
     """#59: the playback options of a `frames:` layer, and only there."""
     opts = {"fps": layer.fps, "every": layer.every, "start": layer.start, "loop": layer.loop,
             "hold": layer.hold, "once": layer.once}
@@ -3799,7 +3800,11 @@ def _check_frames(layer: Layer, p: str, parsed: dict[str, int], assets_dir: Path
         errors.append(_line(f"{p}.fps", f"must be > 0, got {_fmt_num(layer.fps)}", "use fps: 12"))
     every = parsed.get(f"{p}.every")
     if every is not None and every <= 0:
-        errors.append(_line(f"{p}.every", f"must be > 0, got {every}f", "use every: 2f"))
+        if isinstance(layer.every, str) and not layer.every.rstrip().endswith("f"):
+            errors.append(_line(f"{p}.every", f"{layer.every} rounds to 0 frames at {_fmt_num(fps)} fps",
+                                "use a longer step, or every: 1f"))
+        else:
+            errors.append(_line(f"{p}.every", f"must be > 0, got {every}f", "use every: 2f"))
     if sum(bool(v) for v in (layer.loop, layer.hold, layer.once)) > 1:
         errors.append(_line(p, "loop, hold and once are mutually exclusive", "pick one (default hold)"))
     if layer.start is not None:
@@ -3847,7 +3852,7 @@ def _validate_layers(
         n_err = len(errors)
         if sum(x is not None for x in (layer.clip, layer.image, layer.frames)) != 1:
             errors.append(_line(p, "need exactly one of clip or image (or frames)", "set clip:, image: or frames:"))
-        _check_frames(layer, p, parsed, spec_dir and spec_dir / spec.assets, errors)
+        _check_frames(layer, p, parsed, spec_dir and spec_dir / spec.assets, spec.video.fps, errors)
         if layer.clip_in is not None and layer.clip is None:
             errors.append(_line(f"{p}.clip_in", "clip_in needs clip", "add clip:"))
         if layer.id is not None and not _NAME.match(layer.id):

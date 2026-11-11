@@ -79,6 +79,8 @@ def find_frames(assets_dir: Path, name: str) -> list[Path]:
     nothing matches.
     """
     assets_dir = Path(assets_dir)
+    if Path(name).is_absolute() or name.startswith("~"):
+        raise FileNotFoundError(f"'{name}' is an absolute path; frames folders and globs are relative to assets/")
     if _GLOB.search(name):
         found = [p for p in assets_dir.glob(name) if p.is_file()]
     else:
@@ -91,7 +93,7 @@ def find_frames(assets_dir: Path, name: str) -> list[Path]:
     found = [p for p in found if p.suffix.lower() in _EXTS and not p.name.startswith(".")]
     if not found:
         raise FileNotFoundError(f"'{name}' matches no .png/.jpg/.webp frames in {assets_dir}")
-    return sorted(found, key=_natural)
+    return sorted(found, key=lambda p: (_natural(p), str(p)))  # path breaks name ties from `**` globs
 
 
 def frames_step(layer, fps: float) -> float:
@@ -343,6 +345,19 @@ def _run_payload(run) -> dict:
 _TRAIL_FRAMES = 4  # render.effects.TRAIL_FRAMES (that module needs torch)
 
 
+def _trail_depth(fx) -> int:
+    """Frames a `trails` effect looks back (0 for any other effect)."""
+    return (fx.frames or _TRAIL_FRAMES) if fx.type == "trails" else 0
+
+
+def frames_lookback(shot) -> list[int]:
+    """Per `frames:` layer of `shot`, how many frames back its drawing reaches: the shot's trails (nested
+    ones add up) plus the layer's deepest own trails."""
+    shot_back = sum(_trail_depth(fx) for fx in shot.effects or ())
+    return [shot_back + max([0, *(_trail_depth(fx) for fx in layer.effects or ())])
+            for layer in shot.layers or () if layer.frames is not None]
+
+
 def frames_keys(asset_sha: dict[str, str], name: str) -> tuple[int, list[str]]:
     """(image count, sha per image) of a `frames:` source, from `pipeline._asset_shas` keys."""
     n = int(asset_sha[f"frames:{name}"])
@@ -361,12 +376,14 @@ def _note_frames(scene, f: int, shots, asset_sha: dict[str, str], fps: float, sh
         return
     if not isinstance(scene, Layers):
         return
+    # Shot-level trails redraw the whole stack at t-1..t-N, and a layer's own trails reach further back.
+    backs = iter(frames_lookback(shots[scene.shot]))
     for k, layer in enumerate(shots[scene.shot].layers or ()):
         if layer.frames is None:
             continue
         n, shas = frames_keys(asset_sha, layer.frames)
         local = f - scene.t0
-        back = max([0, *((fx.frames or _TRAIL_FRAMES) for fx in layer.effects or () if fx.type == "trails")])
+        back = next(backs)
         picks = [frame_index(layer, local - j, n, fps) for j in range(back + 1)]
         shown.setdefault(f"{scene.shot}.{k}", []).append([None if i is None else shas[i] for i in picks])
 

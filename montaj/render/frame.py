@@ -24,7 +24,7 @@ from PIL import Image
 from montaj.clipmap import camera_at, source_index
 from montaj.encode import probe
 from montaj.matte import find_matte
-from montaj.project import find_frames, find_photo, frame_index, matte_source, resolve_clip, shot_clips, shot_mattes
+from montaj.project import find_frames, find_photo, frame_index, frames_lookback, matte_source, resolve_clip, shot_clips, shot_mattes
 from montaj.render.canvas import Canvas
 from montaj.render.clip import ClipSource, window_key
 from montaj.grade import extras as grade_extras
@@ -105,7 +105,7 @@ _CLIP_CAP = 2
 _CAPTION_CAP = 8
 # Layer images (stickers, logos) a segment can composite: a transition's two layer shots, with slack.
 _LAYER_IMAGE_CAP = 8
-# Images of `frames:` layers (#59) resident at once: the current one plus a few trails ghosts, never the whole sequence.
+# Images of `frames:` layers (#59) resident at once: at least this, raised to what trails reach, never the whole sequence.
 _LAYER_FRAME_CAP = 6
 # Sub-frame samples for a `text[].motion_blur` block: at least this many, more when video.motion_blur is higher.
 TEXT_BLUR_SAMPLES = 5
@@ -339,6 +339,10 @@ class Renderer:
                     for s in tl.shots if s.spec.layers or shot_mattes(s.spec)), default=0)
         if most > 1:
             self._clips.cap = max(self._clips.cap, most + 1)
+        # #59: one frame draws each `frames:` image its trails reach (lookback + 1 per layer), for both shots
+        # of a transition; below that the LRU would re-decode every image on every frame.
+        seq = max((sum(b + 1 for b in frames_lookback(s.spec)) for s in tl.shots if s.spec.layers), default=0)
+        self._layer_frames.cap = max(self._layer_frames.cap, 2 * seq)
         video = tl.spec.video
         beat0 = _parse_beat0(video.beat0, tl.fps, []) if video.beat0 is not None else None
         self._custom = CustomRunner(self._dir, cv.W, cv.H, cv.device, tl.fps, video.bpm, beat0 or 0.0, log=log)

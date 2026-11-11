@@ -104,6 +104,8 @@ def test_frames_folder_and_glob_in_name_order(tmp_path: Path) -> None:
         ("{frames: seq, start: 5}", "past the last image (5 frames)"),
         ("{frames: seq, fps: 0}", "must be > 0"),
         ("{frames: seq, mask: subject}", "a frames layer has no matte"),
+        ("{frames: /abs/seq/*.png}", "relative to assets/"),
+        ("{frames: seq, every: 0.01s}", "0.01s rounds to 0 frames at 30 fps"),
     ],
 )
 def test_frames_errors_are_helpful(tmp_path: Path, layer: str, needle: str) -> None:
@@ -267,3 +269,45 @@ def test_cli_ingest_list_shows_the_folder_as_one_asset(tmp_path: Path, capsys) -
     assert cli.main(["-C", str(proj), "ingest", "--list"]) == 0
     assert capsys.readouterr().out.strip().splitlines() == ["mascot frames 3 40x20 alpha", "OK 1 assets"]
     assert analysis.media(proj / "assets") == []  # never analysed as photos
+
+
+# ---------------------------------------------------------------- review fixes
+
+
+def test_shot_trails_across_a_transition_hash_their_ghosts(tmp_path: Path) -> None:
+    # Shot 0's own trails redraw its whole stack at t-1..t-3, also while shot 1 fades in over it.
+    shots = ("  - hold: 4f\n    effects: [{type: trails, frames: 3}]\n    layers:\n      - {frames: seq}\n"
+             "  - hold: 4f\n    in: {type: fade, dur: 2f}\n    layers:\n      - {image: bg}\n")
+    spec = load_spec(_project(tmp_path, shots))
+    tl = resolve(spec, tmp_path)
+    shas = _asset_shas(spec, tmp_path)
+    seg = tl.segments[1]
+    base = segment_hash(tl, seg, shas, "e1")
+    # Its fade frames show image 4 (held) with ghosts of images 1-3; image 0 is never drawn there.
+    assert segment_hash(tl, seg, {**shas, "frames:seq:2": "x"}, "e1") != base
+    assert segment_hash(tl, seg, {**shas, "frames:seq:0": "x"}, "e1") == base
+
+
+def test_frames_cache_holds_what_trails_reach(tmp_path: Path) -> None:
+    plain, _ = _render(tmp_path, "  - hold: 4f\n    layers:\n      - {frames: seq}\n")
+    assert plain._layer_frames.cap == 6  # floor
+    shots = ("  - hold: 4f\n    effects: [{type: trails, frames: 3}]\n    layers:\n"
+             "      - {frames: seq, effects: [{type: trails, frames: 4}]}\n      - {frames: seq}\n")
+    rend, _ = _render(tmp_path, shots)
+    assert rend._layer_frames.cap == 2 * ((3 + 4 + 1) + (3 + 1))
+
+
+def test_ingest_list_reports_an_unreadable_folder(tmp_path: Path) -> None:
+    _project(tmp_path, "  - {photo: bg, hold: 1f}\n")
+    bad = tmp_path / "assets" / "broken"
+    bad.mkdir()
+    (bad / "000.png").write_bytes(b"not a png")
+    assert "broken frames 1 unreadable" in describe_all(tmp_path / "assets")
+
+
+def test_recursive_glob_breaks_name_ties_by_path(tmp_path: Path) -> None:
+    for d in ("b", "a"):
+        (tmp_path / d).mkdir()
+        _frame(0).save(tmp_path / d / "001.png")
+    got = find_frames(tmp_path, "**/*.png")
+    assert [p.relative_to(tmp_path).as_posix() for p in got] == ["a/001.png", "b/001.png"]

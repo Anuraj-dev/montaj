@@ -197,9 +197,12 @@ def describe_frames(name: str, files: list[Path]) -> str:
     """One `montaj ingest --list` line for a frames folder: count, first image's size, alpha or opaque."""
     from PIL import Image
 
-    with Image.open(files[0]) as im:
-        w, h = im.size
-        alpha = im.mode in ("RGBA", "LA", "PA") or "transparency" in im.info
+    try:
+        with Image.open(files[0]) as im:
+            w, h = im.size
+            alpha = im.mode in ("RGBA", "LA", "PA") or "transparency" in im.info
+    except OSError:
+        return f"{name} frames {len(files)} unreadable"
     return f"{name} frames {len(files)} {w}x{h} {'alpha' if alpha else 'opaque'}"
 
 
