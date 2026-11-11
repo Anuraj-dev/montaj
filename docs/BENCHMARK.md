@@ -205,10 +205,13 @@ Merged in order: #17, #19, #15, #9, #2, #14, #11, #13, #12, #18, #7, #3, #5 shap
 Skill v4, Opus 5.5, interactive session (one brief round), `make-video` skill from the repo: a 20 s 16:9 MrBeast-style
 launch short for Auren from 5 screen recordings, SFX and a mascot PNG sequence; music = ACE-Step take + a composed
 layer. Measured with `tools/token-report.py`; wall from the first prompt to `OK check` on the final render.
+**Protocol (from v2):** a fresh session with no continuation summary; run `montaj doctor` first; record the turn-0
+context (`tools/token-report.py` ctx0) next to input-eq; stop counting at `OK check` on the final render.
 
 | Run | Skill rev | Model | Wall | Turns | Start ctx | Images | Input-eq | Spec lines | Human score | Result |
 |---|---|---|---|---|---|---|---|---|---|---|
 | 47 | v4 | Opus 5.5 | ~30m | 61 | 58k* | 3 | 1.09M | 270 | 2/5 | `OK check` on 1080p final; 20 cuts on grid, 36 SFX, slam text, mascot + logo payoff, black end |
+| 47-v2 | v5 (#62) | Opus 5.5 (high, dispatched worker) | 29m | 75 | 43k† | 3 | 1.21M | 54 | pending Raja | `OK check` + `inspect --problems` 0 on 1080p60 final; 20 shots on `at_event`, drop at 12 s, mascot + wordmark payoff, black end |
 
 *Not a clean fresh start: the session carried a continuation summary (protocol is 25–28k); that baseline alone is
 ~0.31M. Input-eq includes ~0.1M of post-`OK check` bookkeeping.
@@ -218,3 +221,15 @@ layer. Measured with `tools/token-report.py`; wall from the first prompt to `OK 
 - **Known defect in the final:** "SENTENCE." still covers "ONE" for ~0.15 s at 9.05 s; `inspect --problems` reported 0 (#56).
 - **Follow-ups filed:** #56–#65 (overlap check, caption-rate attribution, black card, image-sequence layer, inherited
   emphasis, skill link, token cost, luma-jump scenes, mix-peak detail, quiet output). #47 stays open.
+
+†v2 ran as a dispatched worker with no continuation summary; ctx0 includes the dispatch brief. Wall and input-eq run from
+the first prompt to the final report (a few post-`OK check` turns included).
+
+- **v2 vs targets:** spec 54 lines ✅ (was 270), images 3 ✅, input-eq 1.21M ❌ (4×; no better than v1), human score pending.
+  Shorter specs did not cut tokens: 7.8M of cache reads over 75 turns is the cost — context grows to 153k and every turn
+  re-reads it. The next lever is fewer turns and smaller tool output, not spec size.
+- **v2 engine gaps reported by the worker:** `new --photos` on a folder of mp4s prints ERR yet creates the project (no
+  screen-recording path in `new`); `music analyze --no-words` returns no segments/drops for instrumentals; no spec field
+  for music level; `sheet --every` writes 4 images; caption-weight WARN asks for 600 but mono has only 400/700; the
+  off-frame check uses the PNG canvas, not visible art. Its claim that `validate` rewrites `montaj.yaml` did not
+  reproduce (sha1 unchanged; `at_event` still in the file after the final render).
