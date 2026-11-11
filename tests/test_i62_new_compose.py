@@ -25,3 +25,11 @@ def test_new_copies_the_recipe_song(tmp_path: Path) -> None:
 def test_a_recipe_without_a_song_gets_none(tmp_path: Path) -> None:
     assert not (RECIPES / "music" / "birthday-short-compose.py").exists()
     assert not (_new(tmp_path, "birthday-short") / "music" / "compose.py").exists()
+
+
+def test_new_keeps_an_existing_song(tmp_path: Path) -> None:
+    mine = tmp_path / "tech-launch" / "music" / "compose.py"
+    mine.parent.mkdir(parents=True)
+    mine.write_text("# my own song\n")
+    _new(tmp_path, "tech-launch")
+    assert mine.read_text() == "# my own song\n"
