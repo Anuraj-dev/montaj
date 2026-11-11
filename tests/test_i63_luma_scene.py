@@ -79,7 +79,7 @@ def test_expect_luma_accepts_the_jump_and_reports_a_stale_span() -> None:
     tl = _tl(_clip("cam", "10s"), _clip("cam", "15s"), expects=expects)
     assert warnings(LIGHT_DARK, tl, {}) == [
         "INFO scopes shots 0→1 (2.0s) luma jump ignored as intended: theme flips dark",
-        "INFO expect luma 8–9s not found",
+        "WARN expect luma (8–9s) not found",
     ]
 
 
@@ -154,7 +154,7 @@ def test_match_false_also_consumes_a_covering_expect() -> None:
 
 def test_stale_expect_label_matches_qa_format() -> None:
     tl = _tl(_clip("cam", "10s"), _clip("cam", "40s"), expects=[ResolvedExpect("luma", 1.5, 2.25, None)])
-    assert warnings(LIGHT_DARK, tl, {}) == ["INFO expect luma 1.5–2.25s not found"]
+    assert warnings(LIGHT_DARK, tl, {}) == ["WARN expect luma (1.5–2.25s) not found"]
 
 
 def test_keyed_speed_is_never_one_scene() -> None:

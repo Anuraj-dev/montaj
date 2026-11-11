@@ -8,7 +8,7 @@ Shake noise is hashed from a seed, so renders repeat exactly. Distances are desi
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from montaj.render.core import clamp01, outc, sine
 
@@ -69,6 +69,10 @@ class Motion:
     # Starting scale of a slam, capped at resolve time so the zoomed ink stays in the safe zone.
     # None = SLAM_FROM; left out of the hash while None (project.segment_hash).
     slam_from: float | None = None
+    # Per unit `(start, ox, oy)`: a staggered slam's own starting scale, and its scale origin as an offset
+    # (design px) from the unit's ink centre, so it grows away from the words on screen (#56). Overrides
+    # `slam_from`; None = every unit starts at `slam_from` about its centre. Left out of the hash while None.
+    slam_units: tuple[tuple[float, float, float], ...] | None = None
 
 
 @dataclass(frozen=True)
@@ -218,7 +222,10 @@ def unit_pose(m: Motion, unit: int, emph: bool, t: float, at: float, stagger: fl
         kind, dur, ov, distance = m.emph_kind, m.emph_dur, m.emph_overshoot, m.emph_distance
     else:
         kind, dur, ov, distance = m.kind, m.dur, m.overshoot, m.distance
-    pose = entry(kind, u, dur, ov, distance, m.from_, m.slam_from)
+    su = m.slam_units[unit] if m.slam_units is not None and unit < len(m.slam_units) else None
+    pose = entry(kind, u, dur, ov, distance, m.from_, m.slam_from if su is None else su[0])
+    if su is not None and kind == "slam" and pose.scale != 1.0:  # scale about the unit's own origin
+        pose = replace(pose, dx=pose.dx + (1.0 - pose.scale) * su[1], dy=pose.dy + (1.0 - pose.scale) * su[2])
     if pose.opacity <= 0.0:
         return pose
     land = settle_time(kind, dur)

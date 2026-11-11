@@ -841,6 +841,13 @@ class AudioDuck(Frozen):
     release: DurationStr = "200ms"
 
 
+def _sfx_form(v: object) -> object:
+    """One message for every wrong `audio.sfx` (pydantic would print one per union arm); `[]` is wrong too."""
+    if v is None or v == "auto" or (isinstance(v, list) and v and all(k in ("auto", "text", "cuts") for k in v)):
+        return v
+    raise ValueError(f"auto, or a list of auto/text/cuts (got {v!r})")
+
+
 class Audio(Frozen):
     # Absent: no music bed. Linked clip audio (`audio: true` shots) still mixes over silence.
     track: str | None = Field(default=None, exclude_if=lambda v: v is None)
@@ -851,7 +858,9 @@ class Audio(Frozen):
     clips: list[AudioClip] = Field(default_factory=list)
     duck: AudioDuck | None = None
     # #41: `auto` adds transition sounds at layout (`emphasis.expand_emphasis`); both are consumed there, so only clips are hashed.
-    sfx: Literal["auto"] | None = Field(default=None, exclude_if=lambda v: v is None)
+    # `auto`, or a list of `auto` / `text` / `cuts` (#62). Consumed by `emphasis.expand_emphasis`.
+    sfx: Annotated[Literal["auto"] | list[Literal["auto", "text", "cuts"]] | None, BeforeValidator(_sfx_form)] = Field(
+        default=None, exclude_if=lambda v: v is None)
     sfx_gain: str | None = Field(default=None, exclude_if=lambda v: v is None)
 
 
@@ -3524,12 +3533,12 @@ def _caption_warnings(spec: Spec) -> list[str]:
         if sub.punctuation is None and sub.text.rstrip().endswith((".", ",", "।")) and not sub.text.rstrip().endswith(".."):
             out.append(f"WARN subs[{i}] ends with a full stop or comma; set punctuation: drop")
     for i, block in enumerate(spec.text):
+        if not is_caption_block(spec, i, block, design_h):  # designed title text may end in a full stop
+            continue
         for j, line in enumerate(block.lines):
             plain = line.text.rstrip()
             if plain.endswith(STOP_ENDS) and not plain.endswith(".."):
                 out.append(f"WARN text[{i}].lines[{j}] ends with a full stop")
-        if not is_caption_block(spec, i, block, design_h):
-            continue
         boxed = (block.backdrop is not None and block.backdrop.type == "solid") or any(ln.box == "chip" for ln in block.lines)
         if boxed:
             out.append(f"WARN caption-box text[{i}] uses a static box; use stroke + shadow")

@@ -122,11 +122,11 @@ def test_check_json_has_structured_findings(tmp_path: Path, monkeypatch: pytest.
 
 
 def test_findings_keep_non_caption_warnings_and_unmet_expects() -> None:
-    lines = ["OK video", "WARN black 1.00-1.20s", "INFO expect frozen 5–6s not found (no frozen frames anywhere)",
+    lines = ["OK video", "WARN black 1.00-1.20s", "WARN expect frozen (5–6s) not found (no frozen frames anywhere)",
              "INFO frozen 1 span(s) ignored as intended", "WARN check: 1 warnings"]
     got = cli._findings(lines, [])
     assert [(f["kind"], f["level"], f["message"]) for f in got] == [("black", "WARN", lines[1]),
-                                                                     ("expect", "INFO", lines[2])]
+                                                                     ("expect", "WARN", lines[2])]
 
 
 @pytest.mark.parametrize("kind", ["caption-rate", "caption-safe", "caption-box", "black", "frozen", "expect"])
@@ -150,7 +150,7 @@ def test_unmet_expect_names_the_short_black_it_missed(tmp_path: Path) -> None:
     assert detected == []
     qa._note_expects(lines, "black", detected, [qa.Expect("black", (1.0, 1.5), None)],
                      lambda: qa.black_spans(video, min_s=0.0))
-    assert len(lines) == 1 and lines[0].startswith("INFO expect black 1–1.5s not found (black 1.9"), lines
+    assert len(lines) == 1 and lines[0].startswith("WARN expect black (1–1.5s) not found (black 1.9"), lines
     assert "under the 0.10s minimum" in lines[0]
 
 
@@ -226,5 +226,5 @@ def test_role_does_not_change_the_segment_hash(tmp_path: Path) -> None:
 def test_unmet_caption_expect_names_the_nearest_finding(tmp_path: Path) -> None:
     p = _blocks(tmp_path, [(3.5, 4, "SWITCH WORKSPACES", "")], extra="check:\n  expect:\n    - {caption: [0s, 1s]}\n")
     got = K.lines(resolve(load_spec(p), tmp_path))
-    assert got[-1] == ("INFO expect caption 0-1s not found (nearest finding caption-rate text[0] 3.5-4.0s "
+    assert got[-1] == ("WARN expect check.expect[0] caption [0s, 1s] (0-1s) not found (nearest finding caption-rate text[0] 3.5-4.0s "
                        "'SWITCH WORKSPACES')"), got

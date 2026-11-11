@@ -257,6 +257,8 @@ class ResolvedExpect:
     start: float
     end: float
     why: str | None = None
+    index: int = -1  # position in `check.expect`
+    expr: str = ""  # the spec's own `a, b` time expressions
 
 
 @dataclass(frozen=True)
@@ -756,10 +758,6 @@ def _resolve_texts(spec: Spec, times: dict[str, float], fps: int) -> list[Resolv
                         emphasis_scale=escale, pos=pos, rotate=rotate,
                     )
                     y = run.box[1]  # `pos` lines: the laid-out top
-                    if piece_motion is not None:
-                        piece_motion = _cap_slam(piece_motion, run, spec.video.size,
-                                                 line.stroke.width if line.stroke is not None else 0.0,
-                                                 band if caption else None)
                 lines.append(
                     ResolvedLine(
                         text=text,
@@ -802,7 +800,7 @@ def _resolve_texts(spec: Spec, times: dict[str, float], fps: int) -> list[Resolv
                 fade_in=fi,
                 fade_out=fo,
                 blur=block.blur,
-                lines=tuple(lines),
+                lines=tuple(_cap_slams(lines, spec.video.size, band if caption else None)),
                 backdrop=block.backdrop,
                 motion_blur=block.motion_blur,
             )
@@ -862,12 +860,65 @@ def _line_motion(line, path: str, times: dict[str, float], fps: int, to: float, 
 SLAM_MARGIN = 0.05  # fraction of the frame the zoomed ink must stay inside (matches inspect's safe margin)
 
 
+def _ink_boxes(run: GlyphRun) -> dict[int, list[float]]:
+    """Design-px ink box of each unit of `run` (the renderer's pivot boxes)."""
+    boxes: dict[int, list[float]] = {}
+    for g in run.glyphs:
+        if g.ink[2] <= g.ink[0]:
+            continue
+        b = boxes.setdefault(g.unit, [g.ink[0], g.ink[1], g.ink[2], g.ink[3]])
+        b[0], b[1], b[2], b[3] = min(b[0], g.ink[0]), min(b[1], g.ink[1]), max(b[2], g.ink[2]), max(b[3], g.ink[3])
+    return boxes
+
+
+# A unit something else must clear: `(x0, y0, x1, y1, shown, grows_to)` — its ink box with its stroke and
+# own entry peak, the frame it appears, and the frame its slam stops growing (-inf: it does not slam).
+Mark = tuple[float, float, float, float, float, float]
+
+
+def _marks(run: GlyphRun, m: Motion | None, stroke: float, at: float, stagger: float) -> dict[int, Mark]:
+    """Every inked unit of a line as a Mark, on the line's own reveal clock."""
+    emph = {g.unit for g in run.glyphs if g.emph}
+    out: dict[int, Mark] = {}
+    for v, (x0, y0, x1, y1) in _ink_boxes(run).items():
+        kind, dur, ov = ((m.emph_kind, m.emph_dur, m.emph_overshoot) if v in emph and m.emph_kind
+                         else (m.kind, m.dur, m.overshoot)) if m is not None else (None, 0.0, 1.0)
+        peak = max(1.0, ov) - 1.0 if kind in ("pop", "scale-in") else 0.0
+        ex, ey = stroke + (x1 - x0) / 2 * peak, stroke + (y1 - y0) / 2 * peak
+        shown = at + v * stagger
+        out[v] = (x0 - ex, y0 - ey, x1 + ex, y1 + ey, shown, shown + dur if kind == "slam" else -math.inf)
+    return out
+
+
+def _cap_slams(lines: list[ResolvedLine], size: str, box: tuple[float, float, float, float] | None) -> list[ResolvedLine]:
+    """Cap every slam of a block (`_cap_slam`) once all its lines are laid out, so each line clears the
+    others whichever enters first."""
+    def sw(ln: ResolvedLine) -> float:
+        return ln.stroke.width if ln.stroke is not None else 0.0
+
+    marks = [_marks(ln.glyphs, ln.motion, sw(ln), ln.at, ln.stagger) if ln.glyphs is not None else {} for ln in lines]
+    out = []
+    for i, ln in enumerate(lines):
+        if ln.motion is None or ln.glyphs is None:
+            out.append(ln)
+            continue
+        others = tuple(mk for j, ms in enumerate(marks) if j != i for mk in ms.values())
+        m = _cap_slam(ln.motion, ln.glyphs, size, sw(ln), box, ln.at, ln.stagger, ln.by, others)
+        out.append(ln if m is ln.motion else replace(ln, motion=m))
+    return out
+
+
 def _cap_slam(m: Motion, run: GlyphRun, size: str, stroke: float,
-              box: tuple[float, float, float, float] | None = None) -> Motion:
+              box: tuple[float, float, float, float] | None = None, at: float = 0.0, stagger: float = 0.0,
+              by: str = "word", others: tuple[Mark, ...] = ()) -> Motion:
     """Lower a slam's starting scale so the zoomed ink (stroke and shake included) stays inside `box`
     (design px; default the frame less SLAM_MARGIN; captions pass their safe band), and keeps one space
     width of clear ink from the words beside it, at their own entry peak (or their resting gap, when the
-    font sets them closer than a space). No slam: `m` unchanged."""
+    font sets them closer than a space). No slam: `m` unchanged.
+
+    A slam of several words, or one whose growth would reach `others` (the units of the block's other
+    lines) while they show, instead grows each word away from what is on screen (#56): see _anchor_slam.
+    A `by: char` slam keeps the centre cascade: the letters ahead are still faint while one lands."""
     from montaj.render.glyphs import DESIGN_W
 
     emph_slam, all_slam = m.emph_kind == "slam", m.kind == "slam"
@@ -876,12 +927,8 @@ def _cap_slam(m: Motion, run: GlyphRun, size: str, stroke: float,
     w, h = (int(x) for x in size.lower().split("x"))
     W, H = float(DESIGN_W), DESIGN_W * h / w
     mx, my = SLAM_MARGIN * W, SLAM_MARGIN * H
-    boxes: dict[int, list[float]] = {}
-    for g in run.glyphs:
-        if g.ink[2] <= g.ink[0]:
-            continue
-        b = boxes.setdefault(g.unit, [g.ink[0], g.ink[1], g.ink[2], g.ink[3]])
-        b[0], b[1], b[2], b[3] = min(b[0], g.ink[0]), min(b[1], g.ink[1]), max(b[2], g.ink[2]), max(b[3], g.ink[3])
+    bounds = box if box is not None else (mx, my, W - mx, H - my)
+    boxes = _ink_boxes(run)
     slamming = {g.unit for g in run.glyphs if all_slam or (emph_slam and g.emph)}
     pad = stroke + m.shake
     space = max((g.advance for g in run.glyphs if g.ink[2] <= g.ink[0]), default=0.25 * run.size)
@@ -890,7 +937,7 @@ def _cap_slam(m: Motion, run: GlyphRun, size: str, stroke: float,
     for u in slamming & boxes.keys():
         x0, y0, x1, y1 = boxes[u]
         cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
-        bx0, by0, bx1, by1 = box if box is not None else (mx, my, W - mx, H - my)
+        bx0, by0, bx1, by1 = bounds
         for centre, lo, hi, a, b in ((cx, x0, x1, bx0, bx1), (cy, y0, y1, by0, by1)):
             edge = min(edge, (centre - a) / (centre - lo + pad), (b - centre) / (hi - centre + pad))
         for v, (n0, n1, n2, n3) in boxes.items():
@@ -903,9 +950,91 @@ def _cap_slam(m: Motion, run: GlyphRun, size: str, stroke: float,
             elif n0 >= x1:
                 gap = min(space, n0 - x1)
                 neigh = min(neigh, (n0 - half - gap - m.shake - cx) / (x1 - cx))
-    cap = max(1.0, min(edge, neigh))
-    cap = round(cap, 3)
+    cap = round(max(1.0, min(edge, neigh)), 3)
+    if by != "char":
+        emph = {g.unit for g in run.glyphs if g.emph}
+        grows = {u: _growth(m, u, u in emph, at, stagger) for u in boxes
+                 if (m.emph_kind if u in emph and m.emph_kind else m.kind) == "slam"}
+        if len(grows) > 1 or _reaches(boxes, grows, cap, others, stroke, space):
+            own = _marks(run, m, stroke, at, stagger)
+            return _anchor_slam(m, run, boxes, grows, bounds, stroke, space, own, others)
     return m if cap >= M.SLAM_FROM else replace(m, slam_from=cap)
+
+
+def _growth(m: Motion, u: int, emph: bool, at: float, stagger: float) -> tuple[float, float]:
+    """Frames over which slamming unit `u` grows (its scale is past rest)."""
+    a = at + u * stagger
+    return a, a + (m.emph_dur if emph and m.emph_kind else m.dur)
+
+
+def _sep(o: Mark, x0: float, y0: float, x1: float, y1: float, stroke: float) -> tuple[float, float]:
+    """Outline-to-outline gap from a unit's ink (`stroke` wide outline) to `o`, across and down (< 0: overlapping)."""
+    return max(o[0] - x1, x0 - o[2]) - stroke, max(o[1] - y1, y0 - o[3]) - stroke
+
+
+def _room(gap: float, space: float) -> float:
+    """Room a unit may grow into across `gap` design px of clear outline, keeping a space (or the gap)."""
+    return max(0.0, gap - min(space, gap)) if gap > 0 else 0.0
+
+
+def _reaches(boxes: dict[int, list[float]], grows: dict[int, tuple[float, float]], start: float,
+             others: tuple[Mark, ...], stroke: float, space: float) -> bool:
+    """Whether a slamming unit grown to `start` about its centre comes within a space of (or further onto)
+    a unit of another line shown while it grows, unless the two are laid out on top of each other."""
+    for u, (_, b) in grows.items():
+        x0, y0, x1, y1 = boxes[u]
+        gx, gy = (x1 - x0) / 2 * (start - 1.0), (y1 - y0) / 2 * (start - 1.0)
+        for o in others:
+            if o[4] >= b:
+                continue
+            rest = max(_sep(o, x0, y0, x1, y1, stroke))  # outlines may touch at rest (lines set tight)
+            if rest >= -space and max(_sep(o, x0 - gx, y0 - gy, x1 + gx, y1 + gy, stroke)) < min(space, rest):
+                return True
+    return False
+
+
+def _anchor_slam(m: Motion, run: GlyphRun, boxes: dict[int, list[float]], grows: dict[int, tuple[float, float]],
+                 bounds: tuple[float, float, float, float], stroke: float, space: float,
+                 own: dict[int, Mark], others: tuple[Mark, ...]) -> Motion:
+    """Per-unit slam (`Motion.slam_units`): each slamming unit grows into the room around it instead of
+    about its centre, so it never covers a unit that is on screen while it grows (#56).
+
+    Room on each side is the clear outline gap (less a space) to the nearest thing shown during the
+    unit's growth — the frame bound, a unit of its line or of another line of the block — halved when
+    that unit is slamming at the same time (it gets the other half). The unit's scale origin splits its
+    growth in proportion to that room, so `ONE SENTENCE.` grows ONE leftward and SENTENCE. rightward; its
+    starting scale is the largest that fits (a unit boxed in on both sides barely zooms)."""
+    lo_x, lo_y, hi_x, hi_y = bounds[0] + stroke, bounds[1] + stroke, bounds[2] - stroke, bounds[3] - stroke
+    units = []
+    for u in range(run.units):
+        if u not in grows:
+            units.append((M.SLAM_FROM, 0.0, 0.0))
+            continue
+        x0, y0, x1, y1 = boxes[u]
+        a, b = grows[u]
+        room = [x0 - lo_x, hi_x - x1, y0 - lo_y, hi_y - y1]  # left, right, top, bottom
+        for o in (*(mk for v, mk in own.items() if v != u), *others):
+            if o[4] >= b:  # appears after `u` has grown
+                continue
+            share = 0.5 if o[5] > a else 1.0  # both growing at once: the gap is shared
+            sx, sy = _sep(o, x0, y0, x1, y1, stroke)
+            if max(sx, sy) < -space:
+                continue  # laid out on top of it: not ours to fix
+            # Beside or above/below: whichever way it is further off (a stroke may make lines touch).
+            if sx >= sy:
+                side = 0 if o[0] + o[2] < x0 + x1 else 1
+                room[side] = min(room[side], share * _room(sx, space))
+            else:
+                side = 2 if o[1] + o[3] < y0 + y1 else 3
+                room[side] = min(room[side], share * _room(sy, space))
+        lft, rgt, top, bot = (max(0.0, r) for r in room)
+        w, h = x1 - x0, y1 - y0
+        start = min(M.SLAM_FROM, 1.0 + (lft + rgt) / w, 1.0 + (top + bot) / h)
+        start = math.floor(start * 1000) / 1000
+        fx = lft / (lft + rgt) if lft + rgt > 0 else 0.5
+        fy = top / (top + bot) if top + bot > 0 else 0.5
+        units.append((start, round((fx - 0.5) * w, 2), round((fy - 0.5) * h, 2)))
+    return replace(m, slam_from=None, slam_units=tuple(units))
 
 
 def _pair(v) -> tuple[float, float] | None:
@@ -1258,5 +1387,6 @@ def _resolved_expects(spec: Spec, times: dict[str, float]) -> list[ResolvedExpec
             continue
         kind = ("black" if item.black is not None else "frozen" if item.frozen is not None
                 else "caption" if item.caption is not None else "luma")
-        out.append(ResolvedExpect(kind, start / fps, end / fps, item.why))
+        span = getattr(item, kind)
+        out.append(ResolvedExpect(kind, start / fps, end / fps, item.why, i, ", ".join(str(t) for t in span)))
     return out
