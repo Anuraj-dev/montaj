@@ -2,26 +2,30 @@
 > Agent-native video harness: YAML spec in, finished video out, zero-token re-render/review · Last checkpoint: 2026-11-11
 
 ## 🚧 In progress / next
-- **#47 benchmark run done, scored 2/5** (row in `docs/BENCHMARK.md`): Auren 20 s 16:9 launch short,
-  `~/Projects/media/montaj-projects/auren-short/out/final.mp4`, `OK check`, but 1.09M input-eq (target 0.3M), 270
-  spec lines, 58k start ctx (not a clean fresh start). Raja: "not really good to the human eye; we don't need
-  standard captions; we need good music with good visuals." Known defect: "SENTENCE." covers "ONE" ~9.05 s (#56).
-- **Next (overnight driver session):** fix #56–#65 (filed 2026-11-10 by a Fable review of that run; each has
-  root cause file:line), then redo the Auren film as a genuinely fresh benchmark run aiming at ≥ 4/5.
-- Open: #47, #49 tracker, #51 (needs the real 18.5 s clip), #56–#65.
-- `main` is ~137 commits ahead of `origin/main`; **not pushed** (Raja hasn't asked).
-- Leave alone: `montaj-wt/launch-film` (`feat/engine-launch-film`), `montaj-wt/export-wa-audio`
-  (`fix/export-whatsapp-audio-copy`): uncommitted, 6b1caaf base, far behind main; expect conflicts.
-- Follow-ups (not filed): #36 matte gaps (in its close comment); `mix.check_links` hint says `track` is required
-  (it isn't); `montaj new --list` length `-` for recipes without a length in line 1; components `$at+…` allows one
-  unit only (`expand.py`); a word heard twice is captioned only at its first appearance (#53).
-- Backlog: wall prints at full res (downsample at build); hold edit re-renders later segments.
+- **Auren v2 (#47 benchmark rerun) done, human score pending Raja**:
+  `~/Projects/media/montaj-projects/auren-short-v2/out/final.mp4` (20 s, 1080p60). `OK check` and `inspect --problems` 0.
+  Spec is 54 lines, down from 270, with 3 images, but input-eq is 1.21M against a 0.3M target. Row and takeaways are in
+  `docs/BENCHMARK.md`. Next: Raja scores it (`montaj -C <proj> review`), then attack tokens through turn count and
+  tool output, not spec size.
+- **#56–#65 fixed and closed** (overnight batch, 2026-11-11). Merge shas are in each issue's close comment. The
+  defaults chosen without Raja are in `docs/decisions.md` (2026-11-11).
+- File as issues (reported by the v2 worker, unfiled): `new --photos <mp4 folder>` prints ERR but creates the
+  project; `music analyze --no-words` gives no segments or drops; no music-level spec field; `sheet --every` writes 4
+  images; the caption-weight WARN asks for 600 but mono has no 600; off-frame uses the PNG canvas, not the visible
+  art. Spec-size levers: camera presets, a voice-clip list, on-beat sfx.
+- Open: #47, #49 tracker, #51 (needs the real 18.5 s clip).
+- Leave alone: `montaj-wt/launch-film` (`feat/engine-launch-film`) and `montaj-wt/export-wa-audio`
+  (`fix/export-whatsapp-audio-copy`). Both are uncommitted, on base 6b1caaf, far behind main; expect conflicts.
+- Follow-ups (not filed): #36 matte gaps (in its close comment); the `mix.check_links` hint says `track` is required
+  (it isn't); `montaj new --list` shows length `-` for recipes without a length in line 1; components `$at+…` allows
+  only one unit (`expand.py`); a word heard twice is captioned only at its first appearance (#53).
+- Backlog: wall prints at full res (downsample at build); a hold edit re-renders the later segments.
 
 ## Status
-- M1–M4.5 and the issue batch pushed to origin/main. `wip/*` branches stay local only.
+- Everything through #56–#65 and the v2 benchmark pushed to origin/main. `wip/*` branches stay local only.
 - M1 engine (Vidyut parity on raw frames). M2: text cards, subtitles, Ken Burns, frame cards, morph, clips,
   golden-film, markers, music gen/analyze, two-pass loudnorm. M3: `review` page, `watch`, `taste`. M4: skill
-  `skills/make-video/SKILL.md` (v4: reads `montaj spec <topic>`, recipes via `montaj new --list`) linked into `~/.claude/skills` and `~/.codex/skills` (link dangles since the repo moved: #61).
+  `skills/make-video/SKILL.md` (v4: reads `montaj spec <topic>`, recipes via `montaj new --list`) linked into `~/.claude/skills` and `~/.codex/skills`. Skill v5 (#62) is 73 lines and supports short specs.
 - M4.5 (waves 8–9, `docs/BENCHMARK.md`):
   - Contract: `validate` rejects unknown `look`/`intro`/`outro`, non-integer `fx.burst`; `subs[].size`/`color`.
   - Music: `montaj music compose music/compose.py` runs an agent-written numpy synth → wav, checks length/peak/LUFS;
