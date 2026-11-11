@@ -4,6 +4,8 @@
 usage: token-report.py [--only ID_PREFIX,...] [GLOB ...]
   default GLOB: ~/.claude/projects/*claude-test*/*.jsonl
   input-equivalent = input + 1.25*cache_write + 0.1*cache_read + 5*output  (relative weights, not prices)
+  ctx0 = turn-0 context: input + cache_write + cache_read of the first API call (system prompt, tools,
+         CLAUDE.md, skill list, first prompt), before any tool output. ctxmax = the largest call.
 """
 import collections, glob, json, os, sys
 
