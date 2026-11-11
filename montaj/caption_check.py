@@ -17,6 +17,7 @@ from pathlib import Path
 
 from montaj.captions import RATE_MAX_CPS, safe_zones, window_cps
 from montaj.render.glyphs import DESIGN_W
+from montaj.qa import unmet_line
 from montaj.spec import is_caption_block, text_role
 from montaj.timeline import ResolvedLine, Timeline
 
@@ -338,5 +339,5 @@ def lines(tl: Timeline, video: Path | str | None = None, work: Path | None = Non
             if e.why:
                 out.append(f"INFO caption {label} ignored as intended: {e.why}")
         else:
-            out.append(f"INFO expect caption {label} not found ({_nearest(e, hits, cs, tl.fps)})")
+            out.append(unmet_line("caption", label, e.index, e.expr, _nearest(e, hits, cs, tl.fps)))
     return out + notes

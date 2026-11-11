@@ -3526,12 +3526,12 @@ def _caption_warnings(spec: Spec) -> list[str]:
         if sub.punctuation is None and sub.text.rstrip().endswith((".", ",", "।")) and not sub.text.rstrip().endswith(".."):
             out.append(f"WARN subs[{i}] ends with a full stop or comma; set punctuation: drop")
     for i, block in enumerate(spec.text):
+        if not is_caption_block(spec, i, block, design_h):  # designed title text may end in a full stop
+            continue
         for j, line in enumerate(block.lines):
             plain = line.text.rstrip()
             if plain.endswith(STOP_ENDS) and not plain.endswith(".."):
                 out.append(f"WARN text[{i}].lines[{j}] ends with a full stop")
-        if not is_caption_block(spec, i, block, design_h):
-            continue
         boxed = (block.backdrop is not None and block.backdrop.type == "solid") or any(ln.box == "chip" for ln in block.lines)
         if boxed:
             out.append(f"WARN caption-box text[{i}] uses a static box; use stroke + shadow")

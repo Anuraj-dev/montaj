@@ -130,7 +130,7 @@ def test_check_expect_caption_silences_a_span(tmp_path: Path) -> None:
     unused = "check:\n  expect:\n    - {caption: [20s, 21s]}\n"
     p2 = _short(tmp_path, "{source: talk.words.json}", extra=unused)
     assert K.lines(resolve(load_spec(p2), tmp_path)) == [
-        "INFO expect caption 20-21s not found (no caption findings; nearest chunk captions[1] 1.3-2.3s 'friend')"]
+        "WARN expect check.expect[0] caption [20s, 21s] (20-21s) not found (no caption findings; nearest chunk captions[1] 1.3-2.3s 'friend')"]
 
 
 def test_contrast_is_measured_against_the_band_and_a_stroke_guarantees_it(tmp_path: Path) -> None:

@@ -6,9 +6,12 @@ one object, `{"status": "OK"|"WARN"|"ERR", "lines": [...]}`, instead of the text
 from __future__ import annotations
 
 import argparse
+import contextlib
+import faulthandler
 import json
 import math
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -846,7 +849,7 @@ def _check_overrides(root: Path) -> tuple[list[Expect], float | None, float | No
     if not spec_file.is_file():
         return [], None, None
     tl = resolve(load_spec(spec_file), root)
-    expects = [Expect(item.kind, (item.start, item.end), item.why) for item in tl.check_expects]
+    expects = [Expect(item.kind, (item.start, item.end), item.why, item.index, item.expr) for item in tl.check_expects]
     loud = None if tl.spec.check is None else tl.spec.check.loudness
     if loud is None:
         return expects, None, None
@@ -943,7 +946,7 @@ def _grep_hit(words, k: int, text: str) -> bool:
 
 
 def _findings(lines: list[str], captions: list) -> list[dict]:
-    """`check --json` findings: every WARN and ERR line and each unmet `expect`, in output order. Caption
+    """`check --json` findings: every WARN and ERR line (an unmet `expect` is a WARN), in output order. Caption
     findings carry their spec path, time span, text, value and limit; the rest only kind, level and message."""
     by_line = {f.line: f.as_dict() for f in captions}
     out = []
@@ -952,8 +955,9 @@ def _findings(lines: list[str], captions: list) -> list[dict]:
         kind = rest.split(" ", 1)[0].rstrip(":")
         if line in by_line:
             out.append(by_line[line])
-        elif level in ("WARN", "ERR") or (level == "INFO" and kind == "expect"):
-            out.append({"kind": kind, "level": level, "path": None, "start": None, "end": None, "text": None,
+        elif level in ("WARN", "ERR"):
+            m = re.match(r"expect (check\.expect\[\d+\])", rest)
+            out.append({"kind": kind, "level": level, "path": m.group(1) if m else None, "start": None, "end": None, "text": None,
                         "value": None, "limit": None, "message": line})
     return out
 
@@ -1390,6 +1394,60 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         return _emit([f"ERR {_argv_cmd(rest)}: exit {exc.code} (montaj --help lists commands)"], as_json)
     root = _root(chdir)
+    with _native_stderr(root, ns.cmd):
+        return _run(ns, root, as_json)
+
+
+@contextlib.contextmanager
+def _native_stderr(root: Path, cmd: str):
+    """Send native-library stderr (libav's `UDTA parsing failed` from the in-process demuxer) to a log for the
+    whole command: `build/<cmd>.log` in a project, else `$XDG_CACHE_HOME/montaj/logs/<cmd>.log`. Python's
+    `sys.stderr` and faulthandler (native crash traces) keep the real terminal."""
+    if (root / "montaj.yaml").is_file():
+        log = root / "build" / f"{cmd}.log"
+    else:
+        cache = Path(os.environ.get("XDG_CACHE_HOME") or Path.home() / ".cache")
+        log = cache / "montaj" / "logs" / f"{cmd}.log"
+    keep = sink = None
+    try:
+        keep = os.dup(2)
+        try:
+            log.parent.mkdir(parents=True, exist_ok=True)
+            sink = os.open(log, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o644)
+        except OSError:
+            sink = os.open(os.devnull, os.O_WRONLY)
+    except OSError:
+        if keep is not None:
+            os.close(keep)
+        yield
+        return
+    real = sys.stderr
+    try:
+        on_fd2 = real.fileno() == 2
+    except (OSError, ValueError, AttributeError):
+        on_fd2 = False  # captured or replaced stderr: leave it alone
+    was_faulting = faulthandler.is_enabled()
+    if on_fd2:
+        sys.stderr = os.fdopen(os.dup(keep), "w", buffering=1, encoding="utf-8", errors="replace")
+        faulthandler.enable(file=sys.stderr)
+    try:
+        sys.stdout.flush()
+        os.dup2(sink, 2)
+        yield
+    finally:
+        os.dup2(keep, 2)
+        os.close(sink)
+        os.close(keep)
+        if on_fd2:
+            if was_faulting:
+                faulthandler.enable(file=real)
+            else:
+                faulthandler.disable()
+            sys.stderr.close()
+            sys.stderr = real
+
+
+def _run(ns: argparse.Namespace, root: Path, as_json: bool) -> int:
     try:
         if _streaming(ns, root):
             return 0
