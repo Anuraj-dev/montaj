@@ -167,7 +167,9 @@ EXAMPLES: dict[str, str] = {
     "camera": "shots:\n  - clip: take\n    camera: [{t: 0s, zoom: 1.0}, {t: 2s, zoom: 1.2, ease: outc}]",
     "cuts": "shots:\n  - {clip: voice, cuts: auto}",
     "transitions": "shots:\n  - {photo: b.jpg, hold: 2s, in: {type: whip, dur: 10f, axis: x}}",
-    "text": "text:\n  - from: 0s\n    to: 3s\n    lines: [{text: Hello, style: serif, in: {type: rise, dur: 12f}}]",
+    "text": ("text:   # one line per title; styles/pos from defaults: {text.lines: ...}\n"
+             "  - {at: 4b, to: 6b, text: \"SWITCH *WORKSPACES*\"}\n"
+             "  - {from: 8b, to: 12b, lines: [{text: Hello, in: {type: rise, dur: 12f}}, {text: there, at: 9b}]}"),
     "captions": "captions: {source: voice, preset: punch, accent: '#ffe600'}",
     "emphasis": "emphasis:\n  - {match: launch, zoom: 1.15, shake: 20}",
     "audio": "audio: {track: song.mp3, fade_out: 2s}",
@@ -182,8 +184,28 @@ EXAMPLES: dict[str, str] = {
 }
 
 
-def render_topic(name: str, parsed: dict[str, list[str]]) -> list[str]:
+SHORT_CAP = 120  # characters of a line in the short form
+
+
+def _first_sentence(text: str) -> str:
+    m = re.search(r"(?<=\.)\s(?=[A-Z`(])", text)
+    return text[: m.start()] if m else text
+
+
+def short_line(line: str) -> str:
+    """A bullet as key, type/default and the first sentence of its meaning; prose as its first sentence."""
+    if line.startswith("- "):
+        parts = line.split(" — ", 2)
+        line = " — ".join([*parts[:2], *(_first_sentence(parts[2]) for _ in parts[2:3])])
+    else:
+        line = _first_sentence(line)
+    return line if len(line) <= SHORT_CAP else line[: SHORT_CAP - 1] + "…"
+
+
+def render_topic(name: str, parsed: dict[str, list[str]], full: bool = True) -> list[str]:
     lines = parsed[name]
+    if not full and _fields(lines):  # a topic of prose alone (ingest, gpu) is already short: print it whole
+        lines = [short_line(ln) for ln in lines]
     ex = EXAMPLES.get(name)
     return lines + (["", "Example:", *("  " + ln for ln in ex.splitlines())] if ex else [])
 
@@ -198,8 +220,12 @@ def listing(parsed: dict[str, list[str]]) -> list[str]:
     return [f"{t.ljust(w)}  {TOPICS.get(t, '')}{f' ({n})' if (n := len(_fields(ls))) else ''}" for t, ls in parsed.items() if ls]
 
 
-def run(topic: str | None, find: str | None) -> list[str]:
-    """Lines for `montaj spec [TOPIC | --search WORD]`, ending in an ERR line when nothing matches."""
+def run(topic: str | None, find: str | None, full: bool = False) -> list[str]:
+    """Lines for `montaj spec [TOPIC [--full] | --search WORD]`, ending in an ERR line when nothing matches.
+
+    A topic prints short by default (each field's key, type, default and first sentence: #62); `--full` and
+    `--search` print whole reference lines.
+    """
     parsed = topics()
     if find is not None:
         hits = search(find, parsed)
@@ -215,4 +241,6 @@ def run(topic: str | None, find: str | None) -> list[str]:
         near = difflib.get_close_matches(key, [t for t, ls in parsed.items() if ls], n=1)
         hint = f"did you mean {near[0]!r}?" if near else "montaj spec lists the topics"
         return [f"ERR spec: unknown topic {topic!r} ({hint})"]
-    return render_topic(key, parsed) + [f"OK spec {key}: {len(_fields(parsed[key]))} fields"]
+    n = len(_fields(parsed[key]))
+    tail = "" if full or not n else "; short form, --full for every detail"
+    return render_topic(key, parsed, full) + [f"OK spec {key}: {n} fields{tail}"]

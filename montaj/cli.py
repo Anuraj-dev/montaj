@@ -198,6 +198,7 @@ def _parser() -> argparse.ArgumentParser:
     sp = sub.add_parser("spec")
     sp.add_argument("topic", nargs="?")
     sp.add_argument("--search", default=None, metavar="WORD")
+    sp.add_argument("--full", action="store_true")  # every reference line whole; default is the short form
 
     wd = sub.add_parser("words")
     wd.add_argument("--grep", default=None, metavar="TEXT")
@@ -1353,7 +1354,7 @@ def _dispatch(ns: argparse.Namespace, root: Path) -> list[str]:
     if ns.cmd == "spec":
         from montaj.specref import run as spec_ref
 
-        return spec_ref(ns.topic, ns.search)
+        return spec_ref(ns.topic, ns.search, ns.full)
     if ns.cmd == "review":
         return review_summary(root)[0]
     if ns.cmd == "taste":

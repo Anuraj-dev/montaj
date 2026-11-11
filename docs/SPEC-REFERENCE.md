@@ -225,7 +225,7 @@ Photo fields (`crop`, `focus`, swirl `center`, wall `at`) are source-image pixel
 - `audio.duck.attack` — duration (`40ms`), default `40ms` — time to reach the depth.
 - `audio.duck.release` — duration, default `200ms` — time to come back.
 - `text` — list, default none — overlay blocks. Each line reveals unit by unit.
-- `text[].text` — string, default none — one-line block, the short form for a title: `- {at: 4b, to: 6b, text: "GO *NOW*"}`. Block fields stay on the block, every other key goes to its one line; `from` defaults to `at`. Takes `defaults: text.lines` and styles like any line. Not with `lines`.
+- `text[].text` — string, default none — a one-line block (a title): `{at: 4b, to: 6b, text: "GO *NOW*"}`. Block fields stay on the block, every other key goes to its one line; `from` defaults to `at`. Takes `defaults: text.lines` and styles like any line. Not with `lines`.
 - `text[].from` — time expression, required (default the line's `at` in a one-line block) — block visible window start.
 - `text[].to` — time expression, required — block visible window end.
 - `text[].fade_in` — duration, default `0s` — block fade in. `0` is instant.
