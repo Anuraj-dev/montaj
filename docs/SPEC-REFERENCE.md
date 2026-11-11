@@ -478,6 +478,7 @@ Reuse (`styles`, `defaults`, `components`, `use`, `include`) is expanded before 
 - `caption-safe` — check WARN — the chunk's ink reaches a platform UI zone (`check.safe`) on the named side. Fix, as printed: `... bottom (in the platform UI zone, bottom 22%: move it up, or set check.safe)`; with two sides the fix is `make it smaller or wrap it`; an authored block with no `role` adds `; designed text: role: title`.
 - `caption-contrast` — check WARN — fill against what is behind it, on the rendered frame. Fix, as printed: `... ratio 1.2 (min 4.5: add a stroke or a backdrop, or change the colour)`. A stroke at least 4% of the size always passes.
 - `caption-face` — check WARN — the chunk covers a detected face. Fix, as printed: `... over a face (move it off the face)`, with `y` / `pos`, or `captions.y`. Needs `uv sync --extra guards`.
+- `text[i].lines[j] ends with a full stop` — validate WARN — a caption block (every line low in the frame, a few words, no `dot`, or `role: caption`) whose line ends in `.`; designed `role: title` text is exempt. A mid-frame caption sets `role: caption` to be linted.
 - `caption-box` — validate WARN — a caption on a static box (`box: chip` or a solid `backdrop`). Fix: stroke + shadow; designed text: `role: title`.
 - `caption-weight` — validate WARN — a caption lighter than weight 600. Fix: `weight: 700` or a display `font`; designed text: `role: title`.
 - `caption-size` — validate WARN — a caption under 5% of the frame height. Fix: a larger `size`; designed text: `role: title`.

@@ -3,6 +3,7 @@ full-stop lint, a stale `check.expect` is a WARN naming its spec path, one mista
 from __future__ import annotations
 
 import os
+import struct
 import subprocess
 import sys
 import textwrap
@@ -11,7 +12,7 @@ from pathlib import Path
 import pytest
 
 from montaj import caption_check as K
-from montaj import cli
+from montaj import cli, qa
 from montaj.spec import SpecError, load_spec, text_warnings
 from montaj.timeline import resolve
 
@@ -19,7 +20,6 @@ from tests.test_i57_caption_findings import LANDSCAPE
 from tests.test_spec import _write
 
 UDTA = "[mov,mp4,m4a,3gp,3g2,mj2 @ 0x1033a340] UDTA parsing failed retrying raw"
-TAKE_A = Path.home() / "Videos" / "auren-launch" / "raw" / "takeA.mp4"
 
 
 # 1. libav stderr -------------------------------------------------------------------------------
@@ -49,11 +49,37 @@ def test_native_stderr_goes_to_the_log_and_python_stderr_stays(tmp_path: Path) -
     assert UDTA in (tmp_path / "build" / "validate.log").read_text()
 
 
+def _udta_clip(path: Path) -> None:
+    """A tiny h264 mp4 whose video trak carries a `udta` with a bare `name` child: the shape of a screen
+    recorder's file, which libav's mov demuxer reports as `UDTA parsing failed retrying raw`."""
+    subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", "testsrc2=size=320x240:rate=30:duration=1",
+                    "-c:v", "libx264", "-pix_fmt", "yuv420p", str(path)], check=True)
+    buf = bytearray(path.read_bytes())
+
+    def box(start: int, end: int, kind: bytes) -> tuple[int, int]:
+        i = start
+        while i < end:
+            size, name = struct.unpack(">I4s", buf[i:i + 8])
+            if name == kind:
+                return i, size
+            i += size
+        raise AssertionError(kind)
+
+    moov, msize = box(0, len(buf), b"moov")
+    trak, tsize = box(moov + 8, moov + msize, b"trak")
+    payload = b"Applications: pw-cat"
+    child = struct.pack(">I4s", 8 + len(payload), b"name") + payload
+    udta = struct.pack(">I4s", 8 + len(child), b"udta") + child
+    buf[trak + tsize:trak + tsize] = udta
+    struct.pack_into(">I", buf, trak, tsize + len(udta))
+    struct.pack_into(">I", buf, moov, msize + len(udta))
+    path.write_bytes(buf)
+
+
 @pytest.mark.gpu
-@pytest.mark.skipif(not TAKE_A.is_file(), reason="needs the Auren take with a udta atom")
 def test_render_on_a_udta_clip_prints_result_lines_only(tmp_path: Path) -> None:
     (tmp_path / "assets").mkdir()
-    os.symlink(TAKE_A, tmp_path / "assets" / "take.mp4")
+    _udta_clip(tmp_path / "assets" / "take.mp4")
     (tmp_path / "montaj.yaml").write_text(
         "video: {size: 640x360, fps: 30, look: clean}\nassets: assets\nshots:\n  - {clip: take, hold: 1s}\n")
     for cmd in (["render", "--preview"], ["check"], ["inspect", "--at", "0.5"]):
@@ -61,6 +87,27 @@ def test_render_on_a_udta_clip_prints_result_lines_only(tmp_path: Path) -> None:
         text = proc.stdout + proc.stderr
         assert "UDTA" not in text and "@ 0x" not in text, (cmd, text)
         assert proc.stdout.strip().splitlines()[-1].split(" ", 1)[0] in {"OK", "WARN"}, (cmd, proc.stdout)
+    assert "UDTA parsing failed" in (tmp_path / "build" / "render.log").read_text()  # the fixture does trigger it
+
+
+def test_a_native_crash_still_shows_on_the_terminal(tmp_path: Path) -> None:
+    code = textwrap.dedent("""
+        import faulthandler, sys
+        from montaj import cli
+        def crash(ns, root, as_json):
+            faulthandler._sigsegv()
+        cli._run = crash
+        sys.exit(cli.main(["validate"]))
+    """)
+    for project in (True, False):
+        d = tmp_path / str(project)
+        d.mkdir()
+        if project:
+            (d / "montaj.yaml").write_text("video: {size: 320x240, fps: 30}\nshots: []\n")
+        env = {**os.environ, "XDG_CACHE_HOME": str(tmp_path / "cache")}
+        proc = subprocess.run([sys.executable, "-c", code], cwd=d, capture_output=True, text=True, check=False, env=env)
+        assert "Segmentation fault" in proc.stderr, (project, proc.stderr)
+    assert (tmp_path / "cache" / "montaj" / "logs").is_dir()  # outside a project the native log goes to the cache
 
 
 # 2. full-stop lint follows the caption decision --------------------------------------------------
@@ -109,3 +156,24 @@ def test_a_bad_style_used_by_three_lines_prints_one_err(tmp_path: Path, capsys: 
     code = cli.main(["-C", str(tmp_path), "validate"])
     out = capsys.readouterr().out.splitlines()
     assert code == 1 and len(out) == 3 and all(ln.startswith("ERR styles.bad.") for ln in out), out
+
+
+def test_every_missed_expect_kind_names_its_path_through_the_real_check(tmp_path: Path) -> None:
+    from montaj.scopes import ShotScope, warnings as scope_warnings
+
+    extra = "check:\n  expect:\n    - {black: [0s, 1s]}\n    - {frozen: [2s, 3s]}\n    - {luma: [4s, 5s]}\n"
+    p = _write(tmp_path, "  - {photo: a, hold: 3s}\n  - {photo: a, hold: 3s}\n", ["a"], video=LANDSCAPE, extra=extra)
+    video = tmp_path / "v.mp4"
+    subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", "testsrc2=size=320x240:rate=30:duration=4",
+                    "-pix_fmt", "yuv420p", str(video)], check=True)
+    expects, _, _ = cli._check_overrides(tmp_path)  # the CLI's own resolution of check.expect
+    lines = qa.check(video, log=tmp_path / "qa.log", expect=expects)
+    tl = resolve(load_spec(p), tmp_path)
+    rows = [ShotScope(i, p1=0.02, p50=0.4, p99=0.9, clip_hi=0.0, clip_lo=0.0, sat_mean=0.3, cast=0.0, tint=0.0)
+            for i in range(len(tl.shots))]
+    lines += scope_warnings(rows, tl, {})
+    stale = [ln for ln in lines if ln.startswith("WARN expect")]
+    assert [ln.split(" ")[2:5] for ln in stale] == [["check.expect[0]", "black", "[0s,"], ["check.expect[1]", "frozen", "[2s,"],
+                                                    ["check.expect[2]", "luma", "[4s,"]], stale
+    found = cli._findings(stale + ["WARN check: 3 warnings"], [])
+    assert [f["path"] for f in found] == ["check.expect[0]", "check.expect[1]", "check.expect[2]"]
