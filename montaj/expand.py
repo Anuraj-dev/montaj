@@ -294,12 +294,16 @@ class _Expander:
         takes `text.lines` defaults and its style exactly as the long form does.
         """
         for k, item in enumerate(data.get("text") or ()):
-            if not (isinstance(item, dict) and isinstance(item.get("text"), str)):
+            if not (isinstance(item, dict) and _one_line(item.get("text"))):
                 continue
             path = f"text[{k}]"
             if "lines" in item or "lower_third" in item:
                 raise _err(self.smap.author(path)[1], "a one-line block (text:) cannot also set lines or lower_third",
                            "use text: for one line, lines: for several")
+            if "at" not in item and "from" not in item:
+                raise _err(self.smap.author(path)[1], "a one-line block (text:) needs at or from",
+                           'say when it shows: {at: 4b, to: 6b, text: "..."}')
+            item["text"] = str(item["text"])  # `text: 2025` is the year, as the quoted long form
             line = {key: v for key, v in item.items() if key not in TEXT_BLOCK_KEYS}
             block = {key: v for key, v in item.items() if key in TEXT_BLOCK_KEYS}
             if "from" not in block and "at" in line:
@@ -365,13 +369,18 @@ def _deep_override(base: dict, over: dict) -> dict:
     return out
 
 
+def _one_line(v: object) -> bool:
+    """`text:` on a block is a one-line title when it is a string or a bare number (`text: 2025`)."""
+    return isinstance(v, (str, int, float)) and not isinstance(v, bool)
+
+
 def _text_shorthand(data: dict) -> bool:
     """A one-line block (`text:` a string) or a line without `at` needs expanding even with no reuse keys."""
     blocks = data.get("text")
     if not isinstance(blocks, list):
         return False
     for b in blocks:
-        if isinstance(b, dict) and (isinstance(b.get("text"), str)
+        if isinstance(b, dict) and (_one_line(b.get("text"))
                                     or any(isinstance(ln, dict) and "at" not in ln for ln in b.get("lines") or ())):
             return True
     return False

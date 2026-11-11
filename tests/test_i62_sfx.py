@@ -73,3 +73,17 @@ def test_never_doubles_a_placed_sound(tmp_path: Path) -> None:
     assert names.count("swish") == 1 and names.count("hit") == 2  # the 4 s cut already has the boom
     assert all(abs(t - 4.0) >= CLOSE_S for t, n in peaks if n == "swish")
     assert len(plan.clips) == len(peaks) + 1  # the boom stays as written
+
+
+def test_sfx_errors_say_the_form_once(tmp_path: Path) -> None:
+    import pytest
+
+    from montaj.spec import SpecError
+
+    for bad in ("  sfx: nope\n", "  sfx: []\n", "  sfx: [text, beats]\n"):
+        d = tmp_path / str(abs(hash(bad)))
+        d.mkdir()
+        with pytest.raises(SpecError) as ei:
+            load_spec(_spec(d, bad))
+        sfx = [e for e in ei.value.errors if e.startswith("audio.sfx")]
+        assert len(sfx) == 1 and "audio.sfx: auto, or a list of auto/text/cuts" in sfx[0], ei.value.errors

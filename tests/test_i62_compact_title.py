@@ -79,3 +79,16 @@ def test_text_with_lines_is_an_error(tmp_path: Path) -> None:
 def test_block_keys_match_text_block_fields() -> None:
     fields = {f.alias or name for name, f in TextBlock.model_fields.items()} - {"lines"}
     assert set(TEXT_BLOCK_KEYS) == fields
+
+
+def test_a_bare_number_title_is_its_text(tmp_path: Path) -> None:
+    num = _spec(tmp_path, "num", STYLE + "text:\n  - {at: 1b, to: 4b, text: 2025}\n")
+    quoted = _spec(tmp_path, "quoted", STYLE + 'text:\n  - {at: 1b, to: 4b, text: "2025"}\n')
+    assert load_spec(num).model_dump() == load_spec(quoted).model_dump()
+
+
+def test_a_title_without_at_or_from_names_them(tmp_path: Path) -> None:
+    p = _spec(tmp_path, "bad", STYLE + "text:\n  - {to: 4b, text: GO}\n")
+    with pytest.raises(SpecError) as ei:
+        load_spec(p)
+    assert any("text[0]" in e and "needs at or from" in e for e in ei.value.errors)
