@@ -655,11 +655,13 @@ def expand_captions(spec: Spec, spec_dir: Path | None, errors: list[str] | None 
     size = _size_for(spec, preset)
     y = float(cap.y) if cap.y is not None else default_y(spec)
     blocks: list[dict] = []
+    owner: list[int] = []  # per block: the `--print` chunk it shows
     book, budget = _book(), _budget(spec, preset)
     for c in chunks:
         ws = list(c.words)
         if preset.serif_emphasis:
             blocks.append(_block(c.start, c.end, _minimal_lines(spec, cap, c, y, size, c.start, True)))
+            owner.append(c.index)
             continue
         # One width per chunk: `fit` shrinks a chunk whose accent (or a lone long word) would paint past the band.
         marks = [_mark(ws, c.emph)] if preset.mode == "chunk" else [_mark(ws, k) for k in range(len(ws))]
@@ -671,6 +673,7 @@ def expand_captions(spec: Spec, spec_dir: Path | None, errors: list[str] | None 
             line = _line_dict(spec, cap, preset, c, _mark(ws, c.emph), c.start, first=True, accent_word=c.emph,
                               bar=None, y=y, size=size, font=font, case=case, max_width=fit_w)
             blocks.append(_block(c.start, c.end, [line]))
+            owner.append(c.index)
         else:  # word: the chunk stays up, the spoken word is marked (and barred) from its own frame
             for k, st in enumerate(c.starts):
                 nxt = c.starts[k + 1] if k + 1 < len(c.starts) else c.end
@@ -684,6 +687,7 @@ def expand_captions(spec: Spec, spec_dir: Path | None, errors: list[str] | None 
                 line = _line_dict(spec, cap, preset, c, _mark(ws, k), st, first=k == 0, accent_word=k, bar=bar,
                                   y=y, size=size, font=font, case=case, max_width=fit_w)
                 blocks.append(_block(st, nxt, [line]))
+                owner.append(c.index)
     parsed = []
     for n, b in enumerate(blocks):
         try:
@@ -694,7 +698,8 @@ def expand_captions(spec: Spec, spec_dir: Path | None, errors: list[str] | None 
         if own:
             raise SpecError(errors[before:])
         return spec
-    update = {"text": [*spec.text, *parsed], "captions": None, "caption_from": len(spec.text)}
+    update = {"text": [*spec.text, *parsed], "captions": None, "caption_from": len(spec.text),
+              "caption_chunks": tuple(owner)}
     update.update(_link_voice(spec, spec_dir))
     return spec.model_copy(update=update)
 

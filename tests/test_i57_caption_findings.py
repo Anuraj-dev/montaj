@@ -152,3 +152,79 @@ def test_unmet_expect_names_the_short_black_it_missed(tmp_path: Path) -> None:
                      lambda: qa.black_spans(video, min_s=0.0))
     assert len(lines) == 1 and lines[0].startswith("INFO expect black 1–1.5s not found (black 1.9"), lines
     assert "under the 0.10s minimum" in lines[0]
+
+
+# --- review round: time order, `captions[N]`, chunker gaps, hash, expect nearest -------------------------
+
+
+def _mixed(tmp: Path, caps: str, rows, authored: str) -> Path:
+    from tests.test_captions import _words
+    _words(tmp, rows)
+    return _write(tmp, "  - {photo: a, hold: 7s}\n", ["a"], extra=f"captions: {caps}\n{authored}")
+
+
+FAST_LOW = ("text:\n  - from: 4s\n    to: 4.5s\n    lines: [{text: SWITCH WORKSPACES, style: sans, weight: 700, "
+            "size: 70, y: 1500, at: 4s}]\n")
+SLOW = [("hello", 0.0, 0.5), ("there", 0.6, 1.2), ("friend", 1.3, 2.0)]
+
+
+def test_authored_and_made_chunks_are_read_and_printed_in_time_order(tmp_path: Path) -> None:
+    """The authored block sits first in `text:` but at 4 s, after the made captions: its window must not
+    run on into them, and findings print in time order."""
+    p = _mixed(tmp_path, "{source: talk.words.json, y: 1800}", SLOW, FAST_LOW)
+    got = K.lines(resolve(load_spec(p), tmp_path))
+    assert any(g.startswith("WARN caption-rate text[0] 4.0-4.5s 'SWITCH WORKSPACES'") for g in got), got
+    starts = [float(g.split(" ")[3].split("-")[0]) for g in got if g.startswith("WARN")]
+    assert starts == sorted(starts) and starts[0] == 0.0, got
+
+
+@pytest.mark.parametrize("preset", ["punch", "karaoke"])
+def test_captions_n_matches_print_numbering(tmp_path: Path, preset: str) -> None:
+    """`yeah` at 1 s and again at 5 s are two chunks, and every later N still matches `--print`."""
+    from montaj import captions as C
+    rows = [("so", 0.0, 0.3), ("yeah", 1.0, 1.3), ("yeah", 5.0, 5.3), ("done", 6.0, 6.4)]
+    p = _mixed(tmp_path, f"{{source: talk.words.json, preset: {preset}}}", rows, "")
+    printed, fps = C.plan(p)
+    tl = resolve(load_spec(p), tmp_path)
+    made = [c for c in K.chunks(tl) if c.path.startswith("captions[")]
+    assert len(made) == len(printed)
+    for c in made:
+        n = int(c.path[len("captions["):-1])
+        assert (c.start, c.text.lower()) == (printed[n].start, " ".join(w.w for w in printed[n].words).lower())
+        assert c.end - c.start < 2 * fps  # no chunk spans the 1 s -> 5 s gap
+
+
+def test_chunker_split_changes_across_a_clearing_pause(tmp_path: Path) -> None:
+    """Behaviour change (#57): the chunker's reading windows stop at a pause that clears the screen. Before,
+    `go` (just ahead of a 2 s pause) was averaged with the fast words after it and joined `now`; read on its
+    own side of the pause, `now now` / `go` is the cheaper split."""
+    from montaj import captions as C
+    from tests.test_captions import _words
+    rows = [("now", 0.0, 0.2), ("now", 0.22, 0.52), ("go", 0.54, 0.69), ("okay", 2.71, 2.86),
+            ("wonderful", 2.88, 3.0), ("tremendously", 3.02, 3.22), ("yes", 3.24, 3.44)]
+    _words(tmp_path, rows)
+    p = _write(tmp_path, "  - {photo: a, hold: 9s}\n", ["a"], extra="captions: {source: talk.words.json}\n")
+    got = [" ".join(w.w for w in c.words) for c in C.plan(p)[0]]
+    assert got == ["now now", "go", "okay", "wonderful", "tremendously", "yes"]  # gapless: "now", "now go", ...
+
+
+def test_role_does_not_change_the_segment_hash(tmp_path: Path) -> None:
+    from montaj.project import segment_hash
+    base = _blocks(tmp_path, [(0, 1, "HI", "")]).read_text()
+
+    def h(text: str) -> str:
+        (tmp_path / "montaj.yaml").write_text(text)
+        tl = resolve(load_spec(tmp_path / "montaj.yaml"), tmp_path)
+        return segment_hash(tl, tl.segments[0], {"a": "x"}, "e1")
+
+    plain = h(base)
+    assert h(base.replace("    lines:", "    role: title\n    lines:")) == plain
+    assert h(base.replace("size: 80,", "size: 80, role: caption,")) == plain
+    assert h(base.replace("HI", "HO")) != plain  # the hash still sees the text
+
+
+def test_unmet_caption_expect_names_the_nearest_finding(tmp_path: Path) -> None:
+    p = _blocks(tmp_path, [(3.5, 4, "SWITCH WORKSPACES", "")], extra="check:\n  expect:\n    - {caption: [0s, 1s]}\n")
+    got = K.lines(resolve(load_spec(p), tmp_path))
+    assert got[-1] == ("INFO expect caption 0-1s not found (nearest finding caption-rate text[0] 3.5-4.0s "
+                       "'SWITCH WORKSPACES')"), got

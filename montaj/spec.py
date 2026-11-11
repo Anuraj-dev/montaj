@@ -979,6 +979,8 @@ class Spec(Frozen):
     check: CheckSpec | None = None
     # Set by `expand_captions`: index of the first `text` block it made. Never dumped, so never hashed.
     caption_from: int | None = Field(default=None, exclude=True)
+    # Set with it: per made block, the `montaj captions --print` chunk it shows (`check` names `captions[N]`).
+    caption_chunks: tuple[int, ...] | None = Field(default=None, exclude=True)
     # Set by `expand_cuts`: the clips it cut, whose words files `captions` / `emphasis` read through the
     # cut layout (#53). Never dumped: what those words become (text blocks, effects) is what is hashed.
     cut_clips: tuple[str, ...] | None = Field(default=None, exclude=True)

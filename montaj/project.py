@@ -250,6 +250,18 @@ def _shot_payload(shot) -> dict:
         raw.pop(name, None)
     for layer in raw.get("layers") or ():
         layer.pop("audio", None)
+    for line in (raw.get("card") or {}).get("text") or ():
+        line.pop("role", None)  # a style's `role` reaches card lines too; it is never drawn
+    return raw
+
+
+def _text_payload(block) -> dict:
+    """Text block JSON for the segment hash. `role` (#57) only tells `check` what the text is; it draws
+    nothing, so setting it re-renders nothing."""
+    raw = block.model_dump(mode="json", by_alias=True)
+    raw.pop("role", None)
+    for line in raw.get("lines") or ():
+        line.pop("role", None)
     return raw
 
 
@@ -332,7 +344,7 @@ def segment_hash(
         payload["lut"] = asset_sha[f"lut:{look.lut}"]
     if text_ids:
         payload["texts"] = {
-            str(i): tl.spec.text[i].model_dump(mode="json", by_alias=True)
+            str(i): _text_payload(tl.spec.text[i])
             for i in sorted(text_ids)
         }
         # gpu-engine lines: the materialised layout (glyph ids, positions, font shas, cell params).

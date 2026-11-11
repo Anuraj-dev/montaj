@@ -12,7 +12,7 @@ as black and frozen spans do; `role: title` on a block or style takes designed t
 from __future__ import annotations
 
 import shutil
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from montaj.captions import RATE_MAX_CPS, safe_zones, window_cps
@@ -75,32 +75,36 @@ def _plain(text: str) -> str:
 
 
 def chunks(tl: Timeline) -> list[Chunk]:
-    """Caption chunks of the resolved timeline, in order."""
+    """Caption chunks of the resolved timeline, in `text:` order (made blocks come after authored ones). Blocks
+    merge into one chunk only when they show the same words back to back (and, when `captions` made them, the
+    same `--print` chunk), so a word repeated seconds later is its own chunk."""
     w, h = tl.size
     design_h = DESIGN_W * h / w
     made = tl.spec.caption_from
+    owners = tl.spec.caption_chunks
     out: list[Chunk] = []
-    last: tuple[str, int] | None = None
-    generated = 0
+    last: tuple[str, str] | None = None  # (text, path) of out[-1] while the next block may extend it
     for i, (res, blk) in enumerate(zip(tl.texts, tl.spec.text)):
         if not res.lines or not is_caption_block(tl.spec, i, blk, design_h):
             last = None
             continue
         text = " ".join(_plain(ln.text) for ln in res.lines)
-        if last is not None and last[0] == text and last[1] == len(out) - 1:
-            prev = out[-1]
-            out[-1] = Chunk(prev.index, prev.start, round(res.to), prev.text, prev.line, prev.ink, prev.path, prev.guessed)
+        if made is not None and i >= made:
+            n = owners[i - made] if owners is not None and i - made < len(owners) else i - made
+            path, guessed = f"captions[{n}]", False
+        else:
+            path, guessed = f"text[{i}]", text_role(blk) is None
+        start = round(res.from_)
+        prev = out[-1] if out else None
+        if (last is not None and prev is not None and last[0] == text and prev.end == start
+                and (last[1] == path or not path.startswith("captions"))):
+            out[-1] = replace(prev, end=round(res.to))
             continue
         boxes = [g.ink for ln in res.lines if ln.glyphs is not None for g in ln.glyphs.glyphs if g.ink[2] > g.ink[0]]
         ink = (min(b[0] for b in boxes), min(b[1] for b in boxes), max(b[2] for b in boxes),
                max(b[3] for b in boxes)) if boxes else None
-        if made is not None and i >= made:
-            path, guessed = f"captions[{generated}]", False
-            generated += 1
-        else:
-            path, guessed = f"text[{i}]", text_role(blk) is None
-        out.append(Chunk(len(out), round(res.from_), round(res.to), text, res.lines[0], ink, path, guessed))
-        last = (text, len(out) - 1)
+        out.append(Chunk(len(out), start, round(res.to), text, res.lines[0], ink, path, guessed))
+        last = (text, path)
     return out
 
 
@@ -119,18 +123,17 @@ def _cps(c: Chunk, fps: int) -> float:
 
 def rate_lines(cs: list[Chunk], fps: int) -> list[Finding]:
     """Reading rate over a window of contiguous chunks (`captions.window_cps`), one WARN per fast window, named
-    by its densest chunk with that chunk's own rate; a window inside one already reported is not repeated."""
+    by its densest chunk with that chunk's own rate; a window inside one already reported is not repeated.
+    Chunks are read in time order: blocks `captions` made follow the authored ones in `text:`."""
+    cs = sorted(cs, key=lambda c: (c.start, c.index))
     spans = [(len(c.text.replace(" ", "")), c.end - c.start) for c in cs]
     breaks = _breaks(cs)
-    out, reported, named = [], -1, set()
+    out, reported = [], -1
     for i in range(len(cs)):
         a, b, cps = window_cps(spans, i, fps, breaks)
         if cps > RATE_MAX_CPS + 1e-9 and a > reported:
             reported = b
-            worst = max(cs[a:b + 1], key=lambda c: _cps(c, fps))
-            if worst.index in named:
-                continue
-            named.add(worst.index)
+            worst = max(cs[a:b + 1], key=lambda c: _cps(c, fps))  # windows never overlap, so never repeats
             if worst.path.startswith("captions"):
                 fix = f"max {RATE_MAX_CPS:.0f}: fast speech here; cut words in the edit, or accept it with check.expect caption"
             else:
@@ -288,6 +291,20 @@ def _label(a: float, b: float) -> str:
     return f"{one(a)}-{one(b)}s"
 
 
+def _nearest(e, hits: list[Finding], cs: list[Chunk], fps: int) -> str:
+    """What an unmet `check.expect` caption span came closest to: the nearest finding, else the nearest chunk."""
+    def gap(c: Chunk) -> float:
+        return max(c.start / fps - e.end, e.start - c.end / fps, 0.0)
+
+    def where(c: Chunk) -> str:
+        return f"{c.path} {_secs(c.start, fps)}-{_secs(c.end, fps)}s '{c.text}'"
+
+    if hits:
+        f = min(hits, key=lambda f: (gap(f.chunk), f.chunk.start))
+        return f"nearest finding {f.kind} {where(f.chunk)}"
+    return f"no caption findings; nearest chunk {where(min(cs, key=lambda c: (gap(c), c.start)))}"
+
+
 def lines(tl: Timeline, video: Path | str | None = None, work: Path | None = None, *,
           log: Path | str | None = None, faces=None, found: list[Finding] | None = None) -> list[str]:
     """WARN lines (and INFO for skipped checks and `check.expect` caption spans); [] when there are no captions.
@@ -301,7 +318,7 @@ def lines(tl: Timeline, video: Path | str | None = None, work: Path | None = Non
     if video is not None and work is not None:
         more, notes = frame_lines(cs, tl, video, work, log=log, faces=faces)
         hits += more
-    hits.sort(key=lambda f: f.chunk.index)
+    hits.sort(key=lambda f: (f.chunk.start, f.chunk.index))
     expects = [e for e in tl.check_expects if e.kind == "caption"]
     used = [False] * len(expects)
     out: list[str] = []
@@ -321,5 +338,5 @@ def lines(tl: Timeline, video: Path | str | None = None, work: Path | None = Non
             if e.why:
                 out.append(f"INFO caption {label} ignored as intended: {e.why}")
         else:
-            out.append(f"INFO expect caption {label} not found")
+            out.append(f"INFO expect caption {label} not found ({_nearest(e, hits, cs, tl.fps)})")
     return out + notes
