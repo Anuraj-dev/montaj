@@ -759,7 +759,7 @@ def _resolve_texts(spec: Spec, times: dict[str, float], fps: int) -> list[Resolv
                     if piece_motion is not None:
                         piece_motion = _cap_slam(piece_motion, run, spec.video.size,
                                                  line.stroke.width if line.stroke is not None else 0.0,
-                                                 band if caption else None)
+                                                 band if caption else None, stagger)
                 lines.append(
                     ResolvedLine(
                         text=text,
@@ -862,12 +862,47 @@ def _line_motion(line, path: str, times: dict[str, float], fps: int, to: float, 
 SLAM_MARGIN = 0.05  # fraction of the frame the zoomed ink must stay inside (matches inspect's safe margin)
 
 
+def _slam_growth(m: Motion, emph: bool, u: float) -> float:
+    """How far past rest a slamming unit is `u` frames after it starts, per unit of `slam_from − 1`
+    (its scale is `1 + (slam_from − 1)·growth`). 0 once landed: the squash only shrinks it."""
+    kind, dur, ov = (m.emph_kind, m.emph_dur, m.emph_overshoot) if emph and m.emph_kind else (m.kind, m.dur, m.overshoot)
+    if kind != "slam" or u < 0 or u >= dur:
+        return 0.0
+    return max(0.0, M.entry(kind, u, dur, ov, 0.0, None, slam_from=2.0).scale - 1.0)
+
+
+def _shake_amp(m: Motion, emph: bool, u: float) -> float:
+    """Largest shake offset (design px) of a unit `u` frames after it starts (unit_pose's decaying amplitude)."""
+    if not emph or m.shake <= 0 or m.shake_dur <= 0:
+        return 0.0
+    s = u - (m.emph_dur if m.emph_kind else m.dur)
+    return m.shake * (1.0 - s / m.shake_dur) if 0 <= s < m.shake_dur else 0.0
+
+
+def _cap_staggered(m: Motion, gap: float, clear: float, half_v: float, half_u: float, ev: bool, eu: bool,
+                   lead: float) -> float:
+    """Largest `slam_from − 1` that keeps `clear` design px between a slamming unit (half width `half_u`)
+    and an earlier slamming unit `lead` frames ahead of it (half width `half_v`), `gap` apart at rest, on
+    every quarter frame of the later unit's entry, the earlier one's shake included."""
+    dur = m.emph_dur if eu and m.emph_kind else m.dur
+    worst = math.inf
+    for q in range(int(math.ceil(dur * 4)) + 1):
+        u = q / 4
+        grow = half_v * _slam_growth(m, ev, u + lead) + half_u * _slam_growth(m, eu, u)
+        if grow > 1e-9:
+            worst = min(worst, max(0.0, gap - clear - _shake_amp(m, ev, u + lead)) / grow)
+    return worst
+
+
 def _cap_slam(m: Motion, run: GlyphRun, size: str, stroke: float,
-              box: tuple[float, float, float, float] | None = None) -> Motion:
+              box: tuple[float, float, float, float] | None = None, stagger: float = 0.0) -> Motion:
     """Lower a slam's starting scale so the zoomed ink (stroke and shake included) stays inside `box`
     (design px; default the frame less SLAM_MARGIN; captions pass their safe band), and keeps one space
     width of clear ink from the words beside it, at their own entry peak (or their resting gap, when the
-    font sets them closer than a space). No slam: `m` unchanged."""
+    font sets them closer than a space). A slamming word keeps that clearance from every slamming word
+    that started before it (`stagger` frames per unit) through both entries, so a staggered `by: word`
+    slam never lands on the word before it (#56); words that start together are not capped against each
+    other. No slam: `m` unchanged."""
     from montaj.render.glyphs import DESIGN_W
 
     emph_slam, all_slam = m.emph_kind == "slam", m.kind == "slam"
@@ -883,6 +918,7 @@ def _cap_slam(m: Motion, run: GlyphRun, size: str, stroke: float,
         b = boxes.setdefault(g.unit, [g.ink[0], g.ink[1], g.ink[2], g.ink[3]])
         b[0], b[1], b[2], b[3] = min(b[0], g.ink[0]), min(b[1], g.ink[1]), max(b[2], g.ink[2]), max(b[3], g.ink[3])
     slamming = {g.unit for g in run.glyphs if all_slam or (emph_slam and g.emph)}
+    emph_units = {g.unit for g in run.glyphs if g.emph}
     pad = stroke + m.shake
     space = max((g.advance for g in run.glyphs if g.ink[2] <= g.ink[0]), default=0.25 * run.size)
     grow = max(1.0, m.overshoot) if m.kind in ("pop", "scale-in") else 1.0  # neighbours' own entry peak
@@ -894,7 +930,14 @@ def _cap_slam(m: Motion, run: GlyphRun, size: str, stroke: float,
         for centre, lo, hi, a, b in ((cx, x0, x1, bx0, bx1), (cy, y0, y1, by0, by1)):
             edge = min(edge, (centre - a) / (centre - lo + pad), (b - centre) / (hi - centre + pad))
         for v, (n0, n1, n2, n3) in boxes.items():
-            if v in slamming or n3 <= y0 or n1 >= y1:
+            if n3 <= y0 or n1 >= y1:
+                continue
+            if v in slamming:
+                if v < u and stagger > 0 and (n2 <= x0 or n0 >= x1):  # already on screen when `u` starts
+                    gap = x0 - n2 if n2 <= x0 else n0 - x1
+                    e = _cap_staggered(m, gap, min(space, gap), (n2 - n0) / 2, (x1 - x0) / 2,
+                                       v in emph_units, u in emph_units, (u - v) * stagger)
+                    neigh = min(neigh, 1.0 + e)
                 continue
             half = (n2 - n0) / 2 * (grow - 1.0)
             if n2 <= x0:

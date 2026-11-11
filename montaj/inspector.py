@@ -68,6 +68,78 @@ def _step(raw: str, fps: int) -> int:
     return int(round(n))
 
 
+OVERLAP_MIN = 5.0  # % of the smaller ink box; less is italic or kerning overhang, not a defect
+
+Rect = tuple[float, float, float, float]
+
+
+def _turn(r: Rect, pivot: tuple[float, float], deg: float) -> Rect:
+    """Bounds of rect `r` turned `deg` degrees about `pivot`."""
+    px, py = pivot
+    a = math.radians(deg)
+    c, s = math.cos(a), math.sin(a)
+    pts = [(px + (x - px) * c - (y - py) * s, py + (x - px) * s + (y - py) * c)
+           for x, y in ((r[0], r[1]), (r[2], r[1]), (r[0], r[3]), (r[2], r[3]))]
+    return min(p[0] for p in pts), min(p[1] for p in pts), max(p[0] for p in pts), max(p[1] for p in pts)
+
+
+def unit_boxes(block, line, raster, t: float, fps: float, k: float, memo: dict) -> list[tuple[str, Rect]]:
+    """`(text, ink box)` per reveal unit painted at `t`, in paint order, design px. A moving gpu unit's box
+    is its posed glyphs' (scale, squash, offset and turn as `motion_xforms` hands them to the painter);
+    other units sit at their settled place, as `line_extent` measures them. Empty when the block is hidden."""
+    from montaj.render.glyphs import _units
+    from montaj.render.text import _ink, _pop, _unit_ks, _vis, motion_xforms
+    from montaj.render.type import GlyphLine
+
+    if _vis(t, block, fps) <= 0.0:
+        return []
+    if not isinstance(raster, GlyphLine):  # chromium raster: one bitmap per unit
+        n = len(raster.units)
+        ks = [1.0 if _pop(line, block, t) > 1e-4 else 0.0] * n if line.reveal == "pop" else _unit_ks(line, n, t, fps)
+        return [(u.text.strip(), r) for u, uk in zip(raster.units, ks) if uk > 1e-4 and (r := _ink(u, k, memo)) is not None]
+    run = raster.run
+    if line.motion is not None:
+        xforms, ks = motion_xforms(line, run, t, fps), None
+    else:
+        xforms = [None] * len(run.glyphs)
+        ks = [1.0 if _pop(line, block, t) > 1e-4 else 0.0] * run.units if line.reveal == "pop" else _unit_ks(line, run.units, t, fps)
+    boxes: dict[int, list[float]] = {}
+    for g, xf in zip(run.glyphs, xforms):
+        if g.ink[2] <= g.ink[0]:
+            continue
+        if xf is None:
+            if ks is not None and g.unit < len(ks) and ks[g.unit] <= 1e-4:
+                continue
+            r = g.ink
+        else:
+            if xf.opacity <= 1e-4:
+                continue
+            cx, cy = (g.ink[0] + g.ink[2]) / 2 + xf.dx, (g.ink[1] + g.ink[3]) / 2 + xf.dy
+            hw, hh = (g.ink[2] - g.ink[0]) / 2 * xf.scale, (g.ink[3] - g.ink[1]) / 2 * xf.scale * xf.sy
+            r = (cx - hw, cy - hh, cx + hw, cy + hh)
+            if xf.rotate:
+                r = _turn(r, (cx, cy), xf.rotate)
+        b = boxes.setdefault(g.unit, list(r))
+        b[:] = min(b[0], r[0]), min(b[1], r[1]), max(b[2], r[2]), max(b[3], r[3])
+    of, _ = _units(run.text, line.by or "word")
+    out = []
+    for u in sorted(boxes):
+        r = tuple(boxes[u])
+        if run.rotate:
+            r = _turn(r, run.pivot, run.rotate)
+        out.append(("".join(c for c, w in zip(run.text, of) if w == u).strip(), r))
+    return out
+
+
+def _covered(a: Rect, b: Rect) -> float:
+    """Share (%) of the smaller of two boxes that the other covers."""
+    w, h = min(a[2], b[2]) - max(a[0], b[0]), min(a[3], b[3]) - max(a[1], b[1])
+    if w <= 0 or h <= 0:
+        return 0.0
+    small = min((a[2] - a[0]) * (a[3] - a[1]), (b[2] - b[0]) * (b[3] - b[1]))
+    return 100.0 * w * h / small if small > 0 else 0.0
+
+
 class Inspector:
     """One resolved timeline plus one Renderer (layout always, pixels only for contrast)."""
 
@@ -115,13 +187,64 @@ class Inspector:
         a, b = _frame_of(tl, float(rng[0].rstrip("s"))), _frame_of(tl, float(rng[1].rstrip("s")))
         return list(range(a, b + 1, _step(every or "10f", tl.fps)))
 
+    def inked(self, plan, subs: list[dict]) -> list[tuple[str, str, list[tuple[str, Rect]]]]:
+        """`(id, text, unit boxes)` per text element on screen in `plan`, in describe's order and ids, design px.
+        `subs` are describe's `sub#` elements (one box each, output px)."""
+        from montaj.render.describe import _cards
+        from montaj.render.text import TextBlock
+
+        lay, t, fps = self.layout, float(plan.f), float(self.tl.fps)
+        starts, cursor = [], 0
+        for block in lay.blocks:
+            starts.append(cursor)
+            cursor += len(block.lines)
+        groups = [(f"text#{bi}", lay.blocks[bi], lay.blocks[bi].lines,
+                   lay.rasters.lines[starts[bi]: starts[bi] + len(lay.blocks[bi].lines)]) for bi in plan.texts]
+        for card in _cards(plan.scene):
+            lines = lay.card_lines.get(card.shot, ())
+            groups.append((f"card#{card.shot}", TextBlock(card.span[0], card.span[1], 0.0, 0.0, 0.0, lines),
+                           lines, lay.card_rasters.get(card.shot, ())))
+        out = []
+        for prefix, block, lines, rasters in groups:
+            for i, (line, raster) in enumerate(zip(lines, rasters)):
+                units = unit_boxes(block, line, raster, t, fps, lay.k, lay.ink)
+                if units:
+                    out.append((f"{prefix}.{i}", line.text, units))
+        for el in subs:
+            out.append((el["id"], el["text"], [(el["text"], tuple(v / lay.k for v in el["box"]))]))
+        return out
+
+    def overlaps(self, plan, subs: list[dict]) -> list[dict]:
+        """Ink over ink at `f`: a word over an earlier word of its line, or any word of an element over a
+        word of an element painted before it. Value: % of the smaller ink box covered (>= OVERLAP_MIN)."""
+        out, f = [], plan.f
+        els = self.inked(plan, subs)
+        for k, (ident, text, units) in enumerate(els):
+            for j, (over, b) in enumerate(units):  # inside the line: later units paint over earlier ones
+                for under, a in units[:j]:
+                    pct = _covered(a, b)
+                    if pct >= OVERLAP_MIN:
+                        out.append({"id": ident, "text": over, "under": under, "frame": f, "issue": "overlap", "value": round(pct)})
+            for _, under_text, under_units in els[:k]:  # between elements: the later one paints on top
+                pct = max((_covered(a, b) for _, a in under_units for _, b in units), default=0.0)
+                if pct >= OVERLAP_MIN:
+                    out.append({"id": ident, "text": text, "under": under_text, "frame": f, "issue": "overlap", "value": round(pct)})
+        return out
+
     def problems(self) -> list[dict]:
-        """Every text element that is off-frame or outside the safe area on some frame, or low-contrast
-        at its most visible frame. One record per (element, issue)."""
-        found: dict[tuple[str, str], dict] = {}
+        """Every text element that is off-frame or outside the safe area on some frame, whose ink covers
+        other ink at its animated pose on some frame (`overlap`, worst frame), or low-contrast at its most
+        visible frame. One record per (element, issue), and per covered text for overlaps."""
+        found: dict[tuple[str, ...], dict] = {}
         peak: dict[str, tuple[float, int]] = {}
         for f in range(self.tl.n_frames):
-            for el in describe(self.tl.plan(f), self.tl, self.layout)["text"]:
+            plan = self.tl.plan(f)
+            els = describe(plan, self.tl, self.layout)["text"]
+            for rec in self.overlaps(plan, [e for e in els if e["id"].startswith("sub#")]):
+                key = (rec["id"], "overlap", rec["under"])
+                if key not in found or rec["value"] > found[key]["value"]:
+                    found[key] = rec
+            for el in els:
                 if el["off_frame_px"] > 0:
                     rec = found.setdefault((el["id"], "off_frame"), {"id": el["id"], "text": el["text"], "frame": f, "issue": "off_frame", "value": 0.0})
                     rec["value"] = max(rec["value"], el["off_frame_px"])
@@ -245,6 +368,9 @@ def lines(payload: dict) -> list[str]:
     if "problems" in payload:
         probs = payload["problems"]
         for p in probs:
+            if p["issue"] == "overlap":
+                out.append(f"PROBLEM {p['id']} f={p['frame']} overlap {p['text']!r} over {p['under']!r} {p['value']}%")
+                continue
             val = "" if p["value"] is None else f" {p['value']}"
             out.append(f"PROBLEM {p['id']} f={p['frame']} {p['issue']}{val} {p['text']!r}")
         out.append(f"{'WARN' if probs else 'OK'} inspect {len(probs)} problems")
