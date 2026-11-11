@@ -23,7 +23,7 @@ from montaj.gpu_policy import GpuPolicy, GpuStrictError, load_policy, resolve_de
 from montaj.grade import Grade
 from montaj.pipeline import _apply_mode
 from montaj.project import clip_is_file
-from montaj.qa import _span_label
+from montaj.qa import _span_label, unmet_line
 from montaj.render.canvas import Canvas
 from montaj.render.color import grade as apply_grade
 from montaj.render.color import to_display, to_linear
@@ -619,7 +619,7 @@ def warnings(stats: list[ShotScope], tl: Timeline, rows: dict[str, dict] | None 
                        f"(montaj match --to {i}; designed? check.expect luma or match: false)")
     for k, e in enumerate(expects):
         if not used[k]:
-            out.append(f"INFO expect luma {_span_label((e.start, e.end))} not found")
+            out.append(unmet_line("luma", _span_label((e.start, e.end)), e.index, e.expr))
     return out
 
 

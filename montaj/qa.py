@@ -3,7 +3,7 @@
 `check` returns short `OK|WARN|INFO ...` lines for the CLI to print; the ffmpeg stderr it
 parses goes to `build/qa.log`. Spans the caller marks as intended are `INFO … ignored as
 intended`, not defects. An `Expect` that matches a detected span adds its `why`; one that
-matches nothing is `INFO expect … not found`.
+matches nothing is `WARN expect check.expect[i] … not found`.
 
 `clip_overruns` is the spec-side half of `montaj check`: a clip shot whose read window
 runs past the source file. The CLI appends those lines to `check`.
@@ -28,6 +28,8 @@ class Expect(NamedTuple):
     kind: str
     span: Span
     why: str | None = None
+    index: int = -1  # position in `check.expect`; -1 when unknown
+    expr: str = ""  # the spec's own `a, b` time expressions
 BLACK_MIN_S = 0.10  # shorter than this is a fade, not a defect
 BLACK_PIX_TH = 0.05  # blackdetect pix_th: true black and the tail of a fade count; a dark ground (e.g. #0b1020, luma ~0.06) does not
 FREEZE_NOISE_DB = -60.0
@@ -151,6 +153,15 @@ def _matches(span: Span, detected: Sequence[Span]) -> bool:
     return False
 
 
+def unmet_line(kind: str, label: str, index: int, expr: str, nearest: str | None = None) -> str:
+    """The WARN for a `check.expect` span that matched nothing: names its spec path and the spec's own time
+    expressions beside the resolved seconds, so the stale entry is easy to find and delete."""
+    path = f"check.expect[{index}] " if index >= 0 else ""
+    given = f"[{expr}] " if expr else ""
+    tail = f" ({nearest})" if nearest else ""
+    return f"WARN expect {path}{kind} {given}({label}) not found{tail}"
+
+
 _MIN_S = {"black": BLACK_MIN_S, "frozen": FREEZE_MIN_S}
 _SHORT_WHY = {"black": "; a fade is black only at its end", "frozen": ""}
 
@@ -186,7 +197,7 @@ def _note_expects(lines: list[str], kind: str, detected: Sequence[Span], expect:
         else:
             if found is None:
                 found = list(short()) if short is not None else []
-            lines.append(f"INFO expect {kind} {label} not found ({_nearest(item.span, kind, detected, found)})")
+            lines.append(unmet_line(kind, label, item.index, item.expr, _nearest(item.span, kind, detected, found)))
 
 
 def video_line(info: MediaInfo, want: VideoSettings | None = None) -> str:
@@ -223,7 +234,7 @@ def check(video: Path | str, intended_freeze: Sequence[Span] = (), *, log: Path 
     `intended_black` drops black spans that sit inside a designed dark window (opening fade
     from a dark ground, a dark blank and its transitions, the outro fade, `check.expect`).
     `expect` is that same declaration plus its `why`: a match names the reason, a miss is
-    `INFO expect … not found`. `loudness_target` / `loudness_tol` override -14 LUFS ± 1.
+    `WARN expect … not found`. `loudness_target` / `loudness_tol` override -14 LUFS ± 1.
     `want` is the codec/depth the file must have (see `video_line`).
     """
     info = probe(video, log=log)

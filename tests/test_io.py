@@ -699,4 +699,4 @@ def test_check_expect_suppresses_warn_and_names_why(tmp_path: Path) -> None:
     lines = qa.check(video, log=log, intended_black=[(0.0, 1.0)], expect=exp)
     assert not any(line.startswith("WARN black") for line in lines)
     assert "INFO black 0–1s ignored as intended: HUD intro" in lines
-    assert any(ln.startswith("INFO expect frozen 5–6s not found (") for ln in lines)
+    assert any(ln.startswith("WARN expect frozen (5–6s) not found (") for ln in lines)
