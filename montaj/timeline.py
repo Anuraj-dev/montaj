@@ -257,6 +257,8 @@ class ResolvedExpect:
     start: float
     end: float
     why: str | None = None
+    index: int = -1  # position in `check.expect`
+    expr: str = ""  # the spec's own `a, b` time expressions
 
 
 @dataclass(frozen=True)
@@ -1253,5 +1255,6 @@ def _resolved_expects(spec: Spec, times: dict[str, float]) -> list[ResolvedExpec
             continue
         kind = ("black" if item.black is not None else "frozen" if item.frozen is not None
                 else "caption" if item.caption is not None else "luma")
-        out.append(ResolvedExpect(kind, start / fps, end / fps, item.why))
+        span = getattr(item, kind)
+        out.append(ResolvedExpect(kind, start / fps, end / fps, item.why, i, ", ".join(str(t) for t in span)))
     return out

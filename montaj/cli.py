@@ -6,6 +6,7 @@ one object, `{"status": "OK"|"WARN"|"ERR", "lines": [...]}`, instead of the text
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import math
 import os
@@ -833,7 +834,7 @@ def _check_overrides(root: Path) -> tuple[list[Expect], float | None, float | No
     if not spec_file.is_file():
         return [], None, None
     tl = resolve(load_spec(spec_file), root)
-    expects = [Expect(item.kind, (item.start, item.end), item.why) for item in tl.check_expects]
+    expects = [Expect(item.kind, (item.start, item.end), item.why, item.index, item.expr) for item in tl.check_expects]
     loud = None if tl.spec.check is None else tl.spec.check.loudness
     if loud is None:
         return expects, None, None
@@ -1373,6 +1374,44 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         return _emit([f"ERR {_argv_cmd(rest)}: exit {exc.code} (montaj --help lists commands)"], as_json)
     root = _root(chdir)
+    with _native_stderr(root, ns.cmd):
+        return _run(ns, root, as_json)
+
+
+@contextlib.contextmanager
+def _native_stderr(root: Path, cmd: str):
+    """Send native-library stderr (libav's `UDTA parsing failed` from the in-process demuxer) to
+    `build/<cmd>.log` for the whole command. Python's own `sys.stderr` keeps the real terminal."""
+    inside = (root / "montaj.yaml").is_file()
+    try:
+        keep = os.dup(2)
+        if inside:
+            (root / "build").mkdir(exist_ok=True)
+        sink = os.open(root / "build" / f"{cmd}.log" if inside else os.devnull, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o644)
+    except OSError:
+        yield
+        return
+    real = sys.stderr
+    try:
+        on_fd2 = real.fileno() == 2
+    except (OSError, ValueError, AttributeError):
+        on_fd2 = False  # captured or replaced stderr: leave it alone
+    if on_fd2:
+        sys.stderr = os.fdopen(os.dup(keep), "w", buffering=1, encoding="utf-8", errors="replace")
+    try:
+        sys.stdout.flush()
+        os.dup2(sink, 2)
+        yield
+    finally:
+        os.dup2(keep, 2)
+        os.close(sink)
+        os.close(keep)
+        if on_fd2:
+            sys.stderr.close()
+            sys.stderr = real
+
+
+def _run(ns: argparse.Namespace, root: Path, as_json: bool) -> int:
     try:
         if _streaming(ns, root):
             return 0
