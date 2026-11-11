@@ -94,9 +94,9 @@ def test_staggered_word_slam_never_covers_the_word_before(tmp_path: Path) -> Non
     assert m.kind == "slam" and ln.stagger > 0 and m.slam_units is not None
     (one, one_x, _), (sentence, sentence_x, _) = m.slam_units
     # ONE keeps the full slam growing leftward, SENTENCE. grows rightward from its left edge as far as
-    # the safe area allows (1.5 would need 642 px between ONE and the safe edge; there are 617).
+    # the safe area allows (1.5 would need 642 px between ONE and the safe edge; there are about 610 once both outlines are cleared).
     assert one == M.SLAM_FROM and one_x > 0
-    assert sentence >= 1.43 and sentence_x < 0
+    assert sentence >= 1.42 and sentence_x < 0
     space = max(g.advance for g in ln.glyphs.glyphs if g.ink[2] <= g.ink[0])
     rest_gap = _worst_gap(ln, replace(m, slam_from=1.0, slam_units=None, shake=0.0), 0.0)
     stroke = ln.stroke.width
@@ -108,13 +108,87 @@ def test_staggered_word_slam_never_covers_the_word_before(tmp_path: Path) -> Non
     assert _worst_gap(ln, replace(m, slam_from=1.731, slam_units=None), stroke) < -50
 
 
-def test_words_that_start_together_keep_the_edge_cap(tmp_path: Path) -> None:
-    """With no stagger every word lands at once and only the frame edge caps the slam, as before #56."""
-    together = _line(tmp_path / "a", SENTENCE.replace("at: 0.5s", "at: 0.5s, in: {type: slam, by: word, stagger: 0s}"))
-    staggered = _line(tmp_path / "b")
-    assert together.stagger == 0
-    assert together.motion.slam_from == pytest.approx(1.731) and together.motion.slam_units is None
-    assert staggered.motion.slam_units is not None
+def _overlaps(root: Path) -> list[dict]:
+    return [p for p in Inspector(root, fast=True).problems() if p["issue"] == "overlap"]
+
+
+def test_words_that_slam_together_never_overlap(tmp_path: Path) -> None:
+    """With no stagger every word grows at once: each takes half the gap to its neighbour (YOUR PC covered
+    49% when only the frame edge capped it)."""
+    p = _proj(tmp_path, SENTENCE.replace("at: 0.5s", "at: 0.5s, in: {type: slam, by: word, stagger: 0s}"))
+    ln = resolve(load_spec(p), p.parent).texts[0].lines[0]
+    assert ln.stagger == 0 and ln.motion.slam_units is not None
+    assert _worst_gap(ln, ln.motion, ln.stroke.width) > 0
+    assert _overlaps(p.parent) == []
+
+
+# Lines of one block that slam near each other: whichever enters first, neither grows over the other (#56 v2
+# anchored a line only against lines before it in the block).
+@pytest.mark.parametrize("lines_", [
+    pytest.param(['{text: TALKS, style: slam, size: 150, pos: [540, 200], at: 0.5s}',
+                  '{text: BACK, style: slam, size: 150, pos: [540, 340], at: 0.5s}'], id="same-at"),
+    pytest.param(['{text: TALKS, style: slam, size: 150, pos: [540, 200], at: 0.7s}',
+                  '{text: BACK, style: slam, size: 150, pos: [540, 340], at: 0.5s}'], id="later-line-first"),
+    pytest.param(['{text: "ONE SENTENCE TALKS BACK TO YOU", style: slam, size: 100, pos: [540, 300], at: 0.5s,'
+                  ' wrap: balance, max_width: 800, line_height: 0.9}'], id="balance-wrap"),
+])
+def test_slamming_lines_of_a_block_never_cover_each_other(tmp_path: Path, lines_: list[str]) -> None:
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    body = "".join(f"      - {ln}\n" for ln in lines_)
+    root = _write(tmp_path, "  - {photo: a, hold: 3s}\n", ["a"],
+                  video="size: 1920x1080\n  fps: 60\n  bpm: 120\n  look: cool-tech",
+                  extra=STYLES + "text:\n  - from: 0s\n    to: 2s\n    lines:\n" + body).parent
+    assert _overlaps(root) == []
+    block = resolve(load_spec(root / "montaj.yaml"), root).texts[0]
+    assert len(block.lines) >= 2 and any(ln.motion.slam_units is not None for ln in block.lines)
+
+
+def test_a_char_slam_keeps_the_centre_cascade(tmp_path: Path) -> None:
+    """`by: char` letters land one after another about their own centres, capped only at the frame edge:
+    the slam start and segment hash are those from before #56."""
+    from PIL import Image
+
+    from montaj.project import segment_hash
+
+    (tmp_path / "assets").mkdir(parents=True)
+    Image.new("RGB", (8, 8), (20, 40, 60)).save(tmp_path / "assets" / "a.jpg")
+    (tmp_path / "montaj.yaml").write_text(
+        "video:\n  size: 1080x1920\n  fps: 30\n  look: warm-film\nassets: assets\nshots:\n"
+        "  - {photo: a, hold: 2s}\n"
+        "text:\n  - from: 0s\n    to: 2s\n    lines:\n"
+        "      - {text: HELLO, font: anton, size: 330, stroke: {width: 7, color: \"#000000\"}, pos: [470, 900], at: 0.2s,"
+        " in: {type: slam, by: char, stagger: 0.07s}}\n")
+    tl = resolve(load_spec(tmp_path / "montaj.yaml"), tmp_path)
+    m = tl.texts[0].lines[0].motion
+    assert m.slam_from == pytest.approx(1.673) and m.slam_units is None
+    assert [segment_hash(tl, s, {"a": "x"}, "e1") for s in tl.segments] == [
+        "b83aa8b392888cf783f7ee95c86b1fca0837a05242cb5a5f82b7c5a13abd33cc"]
+    # The letters' own ink boxes touch at rest: a char run is not checked against itself.
+    assert _overlaps(tmp_path) == []
+
+
+def test_slam_units_enter_the_segment_hash(tmp_path: Path) -> None:
+    from montaj.project import segment_hash
+
+    p = _proj(tmp_path, SENTENCE)
+    tl = resolve(load_spec(p), p.parent)
+    ln = tl.texts[0].lines[0]
+    assert ln.motion.slam_units is not None
+    before = segment_hash(tl, tl.segments[0], {"a": "x"}, "e1")
+    units = tuple((s - 0.1, ox, oy) for s, ox, oy in ln.motion.slam_units)
+    tl.texts[0] = replace(tl.texts[0], lines=(replace(ln, motion=replace(ln.motion, slam_units=units)),))
+    assert segment_hash(tl, tl.segments[0], {"a": "x"}, "e1") != before
+
+
+def test_inspect_ignores_ink_that_overlaps_at_rest(tmp_path: Path) -> None:
+    """Words the font sets into each other (tight tracking, an italic overhang) are designed: only a unit
+    moved onto another, past how much they share at rest, is an overlap."""
+    root = _proj(tmp_path, '{text: "WAVE WAVE", style: slam, pos: [540, 300], at: 0s, tracking: -0.45,'
+                 ' in: {type: pop, by: word}}').parent
+    ln = resolve(load_spec(root / "montaj.yaml"), root).texts[0].lines[0]
+    rest = _posed(ln, ln.motion, 100, 0.0)  # settled
+    assert min(rest[0][2], rest[1][2]) > max(rest[0][0], rest[1][0])  # the words share ink at rest
+    assert _overlaps(root) == []
 
 
 def test_a_single_word_slam_keeps_its_centre(tmp_path: Path) -> None:
@@ -132,7 +206,7 @@ def test_auren_word_slams_keep_their_zoom_without_overlap(tmp_path: Path) -> Non
                   video="size: 1920x1080\n  fps: 60\n  bpm: 120\n  look: cool-tech", extra=f"{STYLES}text:\n{blocks}").parent
     tl = resolve(load_spec(root / "montaj.yaml"), root)
     starts = {b.lines[0].text: [s for s, _, _ in b.lines[0].motion.slam_units] for b in tl.texts}
-    assert all(s >= 1.3 for v in starts.values() for s in v), starts
+    assert all(s >= 1.25 for v in starts.values() for s in v), starts
     assert sum(s >= 1.5 for v in starts.values() for s in v) >= 13, starts
     assert [p for p in Inspector(root, fast=True).problems() if p["issue"] == "overlap"] == []
 

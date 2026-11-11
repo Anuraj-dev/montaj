@@ -83,8 +83,8 @@ def _turn(r: Rect, pivot: tuple[float, float], deg: float) -> Rect:
     return min(p[0] for p in pts), min(p[1] for p in pts), max(p[0] for p in pts), max(p[1] for p in pts)
 
 
-def unit_boxes(block, line, raster, t: float, fps: float, k: float, memo: dict) -> list[tuple[str, Rect]]:
-    """`(text, ink box)` per reveal unit painted at `t`, in paint order, design px. A moving gpu unit's box
+def unit_boxes(block, line, raster, t: float, fps: float, k: float, memo: dict) -> list[tuple[int, str, Rect]]:
+    """`(unit, text, ink box)` per reveal unit painted at `t`, in paint order, design px. A moving gpu unit's box
     is its posed glyphs' (scale, squash, offset and turn as `motion_xforms` hands them to the painter);
     other units sit at their settled place, as `line_extent` measures them. Empty when the block is hidden."""
     from montaj.render.glyphs import _units
@@ -96,7 +96,8 @@ def unit_boxes(block, line, raster, t: float, fps: float, k: float, memo: dict) 
     if not isinstance(raster, GlyphLine):  # chromium raster: one bitmap per unit
         n = len(raster.units)
         ks = [1.0 if _pop(line, block, t) > 1e-4 else 0.0] * n if line.reveal == "pop" else _unit_ks(line, n, t, fps)
-        return [(u.text.strip(), r) for u, uk in zip(raster.units, ks) if uk > 1e-4 and (r := _ink(u, k, memo)) is not None]
+        return [(i, u.text.strip(), r) for i, (u, uk) in enumerate(zip(raster.units, ks))
+                if uk > 1e-4 and (r := _ink(u, k, memo)) is not None]
     run = raster.run
     if line.motion is not None:
         xforms, ks = motion_xforms(line, run, t, fps), None
@@ -127,8 +128,18 @@ def unit_boxes(block, line, raster, t: float, fps: float, k: float, memo: dict) 
         r = tuple(boxes[u])
         if run.rotate:
             r = _turn(r, run.pivot, run.rotate)
-        out.append(("".join(c for c, w in zip(run.text, of) if w == u).strip(), r))
+        out.append((u, "".join(c for c, w in zip(run.text, of) if w == u).strip(), r))
     return out
+
+
+def rest_boxes(run) -> dict[int, Rect]:
+    """Ink box per reveal unit of a gpu line at rest (its layout, no motion), design px."""
+    boxes: dict[int, list[float]] = {}
+    for g in run.glyphs:
+        if g.ink[2] > g.ink[0]:
+            b = boxes.setdefault(g.unit, list(g.ink))
+            b[:] = min(b[0], g.ink[0]), min(b[1], g.ink[1]), max(b[2], g.ink[2]), max(b[3], g.ink[3])
+    return {u: _turn(tuple(b), run.pivot, run.rotate) if run.rotate else tuple(b) for u, b in boxes.items()}
 
 
 def _covered(a: Rect, b: Rect) -> float:
@@ -187,11 +198,14 @@ class Inspector:
         a, b = _frame_of(tl, float(rng[0].rstrip("s"))), _frame_of(tl, float(rng[1].rstrip("s")))
         return list(range(a, b + 1, _step(every or "10f", tl.fps)))
 
-    def inked(self, plan, subs: list[dict]) -> list[tuple[str, str, list[tuple[str, Rect]]]]:
-        """`(id, text, unit boxes)` per text element on screen in `plan`, in describe's order and ids, design px.
-        `subs` are describe's `sub#` elements (one box each, output px)."""
+    def inked(self, plan, subs: list[dict]) -> list[tuple[str, str, list[tuple[int, str, Rect]], dict[int, Rect] | None]]:
+        """`(id, text, unit boxes, rest boxes)` per text element on screen in `plan`, in describe's order and
+        ids, design px. Rest boxes (unit -> box at rest) only for a moving gpu line that is not `by: char`:
+        the only units that can move onto each other. `subs` are describe's `sub#` elements (one box each,
+        output px)."""
         from montaj.render.describe import _cards
         from montaj.render.text import TextBlock
+        from montaj.render.type import GlyphLine
 
         lay, t, fps = self.layout, float(plan.f), float(self.tl.fps)
         starts, cursor = [], 0
@@ -209,24 +223,27 @@ class Inspector:
             for i, (line, raster) in enumerate(zip(lines, rasters)):
                 units = unit_boxes(block, line, raster, t, fps, lay.k, lay.ink)
                 if units:
-                    out.append((f"{prefix}.{i}", line.text, units))
+                    moves = isinstance(raster, GlyphLine) and line.motion is not None and line.by != "char"
+                    out.append((f"{prefix}.{i}", line.text, units, rest_boxes(raster.run) if moves else None))
         for el in subs:
-            out.append((el["id"], el["text"], [(el["text"], tuple(v / lay.k for v in el["box"]))]))
+            out.append((el["id"], el["text"], [(0, el["text"], tuple(v / lay.k for v in el["box"]))], None))
         return out
 
     def overlaps(self, plan, subs: list[dict]) -> list[dict]:
-        """Ink over ink at `f`: a word over an earlier word of its line, or any word of an element over a
-        word of an element painted before it. Value: % of the smaller ink box covered (>= OVERLAP_MIN)."""
+        """Ink over ink at `f`: a word moved over an earlier word of its line (covering it by OVERLAP_MIN
+        more than at rest: a font's own kerned or italic overhang is designed), or any word of an element
+        over a word of an element painted before it (a designed stack is reported too). Value: % of the
+        smaller ink box covered (>= OVERLAP_MIN)."""
         out, f = [], plan.f
         els = self.inked(plan, subs)
-        for k, (ident, text, units) in enumerate(els):
-            for j, (over, b) in enumerate(units):  # inside the line: later units paint over earlier ones
-                for under, a in units[:j]:
+        for k, (ident, text, units, rest) in enumerate(els):
+            for j, (v, over, b) in enumerate(units if rest is not None else ()):  # later units paint over earlier
+                for u, under, a in units[:j]:
                     pct = _covered(a, b)
-                    if pct >= OVERLAP_MIN:
+                    if pct >= OVERLAP_MIN and pct - _covered(rest[u], rest[v]) >= OVERLAP_MIN:
                         out.append({"id": ident, "text": over, "under": under, "frame": f, "issue": "overlap", "value": round(pct)})
-            for _, under_text, under_units in els[:k]:  # between elements: the later one paints on top
-                pct = max((_covered(a, b) for _, a in under_units for _, b in units), default=0.0)
+            for _, under_text, under_units, _ in els[:k]:  # between elements: the later one paints on top
+                pct = max((_covered(a, b) for _, _, a in under_units for _, _, b in units), default=0.0)
                 if pct >= OVERLAP_MIN:
                     out.append({"id": ident, "text": text, "under": under_text, "frame": f, "issue": "overlap", "value": round(pct)})
         return out
