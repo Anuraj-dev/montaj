@@ -87,6 +87,9 @@ def _parser() -> argparse.ArgumentParser:
     ing.add_argument("--list", action="store_true")  # one line per analysed asset; no work
     ing.add_argument("--matte", action="append", default=None, metavar="STEM")  # subject matte only (#36)
 
+    ast = sub.add_parser("assets")  # a few lines per clip from what ingest wrote (#62)
+    ast.add_argument("stem", nargs="?")
+
     rec = sub.add_parser("ingest-rec")
     rec.add_argument("video")
     rec.add_argument("--events", default=None)
@@ -1343,6 +1346,10 @@ def _dispatch(ns: argparse.Namespace, root: Path) -> list[str]:
         return _cmd_cut(ns, root)
     if ns.cmd == "words":
         return _cmd_words(ns, root)
+    if ns.cmd == "assets":
+        from montaj.footage import summary
+
+        return summary(_assets_dir(root, _assets_rel(root / "montaj.yaml")), ns.stem)
     if ns.cmd == "spec":
         from montaj.specref import run as spec_ref
 
