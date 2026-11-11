@@ -224,7 +224,8 @@ Photo fields (`crop`, `focus`, swirl `center`, wall `at`) are source-image pixel
 - `audio.duck.attack` — duration (`40ms`), default `40ms` — time to reach the depth.
 - `audio.duck.release` — duration, default `200ms` — time to come back.
 - `text` — list, default none — overlay blocks. Each line reveals unit by unit.
-- `text[].from` — time expression, required — block visible window start.
+- `text[].text` — string, default none — one-line block, the short form for a title: `- {at: 4b, to: 6b, text: "GO *NOW*"}`. Block fields stay on the block, every other key goes to its one line; `from` defaults to `at`. Takes `defaults: text.lines` and styles like any line. Not with `lines`.
+- `text[].from` — time expression, required (default the line's `at` in a one-line block) — block visible window start.
 - `text[].to` — time expression, required — block visible window end.
 - `text[].fade_in` — duration, default `0s` — block fade in. `0` is instant.
 - `text[].fade_out` — duration, default `0.8s` (`0s` when a line sets `out`) — block fade out; the block blurs by `(1 − a)·blur`.
@@ -247,7 +248,7 @@ Photo fields (`crop`, `focus`, swirl `center`, wall `at`) are source-image pixel
 - `text[].lines[].tracking` — number, default serif `0.01`, caps `0.42`, script/deva `0` — letter-spacing in em.
 - `text[].lines[].line_height` — number, default serif `1.1`, deva `1.5`; script and caps leave it unset.
 - `text[].lines[].y` — number, required unless `pos` is set — design-px top of the line box.
-- `text[].lines[].at` — time expression, required — when this line starts revealing.
+- `text[].lines[].at` — time expression, default the block's `from` — when this line starts revealing.
 - `text[].lines[].by` — `word` or `char`, default `word` — reveal unit.
 - `text[].lines[].stagger` — duration, default `0.16s` word / `0.07s` char — delay between units.
 - `text[].lines[].dur` — duration, default `0.9s` — reveal length of one unit.

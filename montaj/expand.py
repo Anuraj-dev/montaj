@@ -18,6 +18,9 @@ from typing import Any
 import yaml
 
 REUSE_KEYS = ("include", "styles", "defaults", "components", "use")
+# `text[]` fields that belong to the block in a one-line block (`text:` a string); the rest go to its line.
+# Mirrors `spec.TextBlock` minus `lines` (tests/test_i62_compact_title.py keeps them equal).
+TEXT_BLOCK_KEYS = ("from", "to", "fade_in", "fade_out", "blur", "motion_blur", "backdrop", "behind", "role")
 _LISTS = ("shots", "text", "fx", "subs", "overlays")
 _TOKEN = re.compile(r"([^.\[\]]+)|\[(\d+)\]")
 _ARITH = re.compile(r"^\$([A-Za-z_]\w*)\s*([+-])\s*(\d+(?:\.\d+)?)([sfb])$")
@@ -281,6 +284,31 @@ class _Expander:
             return {str(p): v for p, v in raw.items()}
         raise _err(f"{cpath}.params", "need a list or mapping", "params: [word, at] or {at: 0s}")
 
+    # --- one-line text blocks ------------------------------------------------------------
+
+    def compact_text(self, data: dict) -> None:
+        """`- {at: 4b, to: 6b, text: "GO"}` -> a block holding one line (#62).
+
+        Block fields (`TEXT_BLOCK_KEYS`) stay on the block, every other key moves to the line; `from` defaults
+        to the line's `at` (and `at` to `from`, as for any line). Runs before styles and defaults, so the line
+        takes `text.lines` defaults and its style exactly as the long form does.
+        """
+        for k, item in enumerate(data.get("text") or ()):
+            if not (isinstance(item, dict) and isinstance(item.get("text"), str)):
+                continue
+            path = f"text[{k}]"
+            if "lines" in item or "lower_third" in item:
+                raise _err(self.smap.author(path)[1], "a one-line block (text:) cannot also set lines or lower_third",
+                           "use text: for one line, lines: for several")
+            line = {key: v for key, v in item.items() if key not in TEXT_BLOCK_KEYS}
+            block = {key: v for key, v in item.items() if key in TEXT_BLOCK_KEYS}
+            if "from" not in block and "at" in line:
+                block["from"] = line["at"]
+            block["lines"] = [line]
+            item.clear()
+            item.update(block)
+            self.smap.entries[f"{path}.lines[0]"] = self.smap.author(path)
+
     # --- styles and defaults on the tree -------------------------------------------------
 
     def apply(self, data: dict) -> None:
@@ -335,6 +363,29 @@ def _deep_override(base: dict, over: dict) -> dict:
     for k, v in over.items():
         out[k] = _deep_override(out[k], v) if isinstance(v, dict) and isinstance(out.get(k), dict) else copy.deepcopy(v)
     return out
+
+
+def _text_shorthand(data: dict) -> bool:
+    """A one-line block (`text:` a string) or a line without `at` needs expanding even with no reuse keys."""
+    blocks = data.get("text")
+    if not isinstance(blocks, list):
+        return False
+    for b in blocks:
+        if isinstance(b, dict) and (isinstance(b.get("text"), str)
+                                    or any(isinstance(ln, dict) and "at" not in ln for ln in b.get("lines") or ())):
+            return True
+    return False
+
+
+def _line_at_from_block(data: dict, smap: SourceMap) -> None:
+    """A line's `at` defaults to its block's `from` (#62): the long form then carries the same value."""
+    for path, block in _targets(data, "text"):
+        if "from" not in block:
+            continue
+        for i, line in enumerate(block.get("lines") or ()):
+            if isinstance(line, dict) and "at" not in line:
+                line["at"] = block["from"]
+                smap.entries[f"{path}.lines[{i}].at"] = smap.author(f"{path}.from")
 
 
 def _targets(data: Any, key: str) -> list[tuple[str, dict]]:
@@ -423,16 +474,19 @@ def expand_spec(
 ) -> tuple[dict, SourceMap | None]:
     """The plain spec for `data` loaded from `spec_path`, plus the map back to the author's keys.
 
-    A spec with no reuse keys comes back unchanged with no map.
+    A spec with no reuse keys and no one-line text block comes back unchanged with no map.
     """
-    if not any(k in data for k in REUSE_KEYS):
+    if not _text_shorthand(data) and not any(k in data for k in REUSE_KEYS):
         return data, None
     ex = _Expander(spec_path, builtin_styles)
     data = copy.deepcopy(data)
     ex.load(data, text)
     ex.check_style_names()
     ex.use(data)
+    if isinstance(data.get("text"), list):
+        ex.compact_text(data)
     ex.apply(data)
+    _line_at_from_block(data, ex.smap)
     for k in REUSE_KEYS:
         data.pop(k, None)
     return data, ex.smap
