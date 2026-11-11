@@ -125,6 +125,6 @@ audio:
     - {src: "synth:ding", at: win, gain: -12dB}
 check:
   expect:
-    # A fade alone is black only at its last frame (the GG text keeps it bright); outro.hold 0.5s is true black.
+    # A fade dims everything but reaches 0 only on its last frame, too short for check; outro.hold 0.5s is true black.
     - {black: [29.5s, 30s], why: "fade to black"}
   pacing: {max_shot: 4s, min_per10s: 3, hook_text_by: 0.5s}

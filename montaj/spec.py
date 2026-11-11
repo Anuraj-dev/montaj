@@ -2838,6 +2838,7 @@ def validate_spec(
         if n is not None:
             parsed[path] = n
             times[path] = float(n)
+    _check_outro_hold(parsed, errors)
     for path, raw in _unrounded_durs(spec):
         if path.endswith("].pre") and isinstance(raw, str) and raw.strip().startswith("-"):
             n = _dur_frames(raw.strip()[1:], fps, bpm, path, errors)  # start after the event
@@ -3488,6 +3489,17 @@ def text_warnings(spec: Spec) -> list[str]:
                 out.append(f"WARN text[{i}].lines[{j}].stroke.width: {line.stroke.width:g} px is over 20% of "
                            f"size {size:g}; the outline will swallow the letters")
     return out
+
+
+def _check_outro_hold(parsed: dict[str, int], errors: list[str]) -> None:
+    """A hold is black only behind a real fade (`fade_layer` skips dur 0), and at least 1 frame."""
+    hold = parsed.get("video.outro.hold")
+    if hold is None:
+        return
+    if hold < 1:
+        errors.append(_line("video.outro.hold", f"must be at least 1 frame, got {hold}f", "use 1f or longer"))
+    if parsed.get("video.outro.dur", 0) < 1:
+        errors.append(_line("video.outro.hold", "needs a fade: outro.dur is 0", "set outro.dur to 1f or longer"))
 
 
 def _validate_card(

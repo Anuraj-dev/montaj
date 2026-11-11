@@ -81,6 +81,21 @@ def test_outro_hold_validation(tmp_path: Path) -> None:
     assert any("video.intro.hold" in e for e in intro)
     bad = errors(_FILM.replace("hold: 10f}", "hold: soon}"))
     assert any("video.outro.hold" in e for e in bad)
+    for zero in ("0f", "0.01s"):
+        short = errors(_FILM.replace("hold: 10f}", f"hold: {zero}}}"))
+        assert any("video.outro.hold" in e and "at least 1 frame" in e for e in short), short
+    no_fade = errors(_FILM.replace("dur: 15f, hold: 10f", "dur: 0f, hold: 10f"))
+    assert any("video.outro.hold" in e and "needs a fade" in e for e in no_fade), no_fade
+
+
+def test_outro_hold_past_the_film_is_a_resolve_error(tmp_path: Path) -> None:
+    text = _FILM.replace("dur: 15f, hold: 10f", "dur: 15f, hold: 50f")  # 65f on a 60f film
+    spec = load_spec(_write(tmp_path, text))
+    with pytest.raises(SpecError) as ei:
+        resolve(spec, tmp_path)
+    assert any("video.outro.hold" in e and "15f" in e and "50f" in e and "60f" in e for e in ei.value.errors)
+    tl = resolve(load_spec(_write(tmp_path, _FILM.replace("hold: 10f", "hold: 45f"))), tmp_path)
+    assert tl.plan(59).fade_out == (15, 0)  # exactly the film length is fine
 
 
 def test_hold_reaches_the_hash_and_films_without_it_keep_theirs(tmp_path: Path) -> None:
