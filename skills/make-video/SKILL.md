@@ -60,10 +60,10 @@ Python). Every render, check and review after that is a `montaj` command that co
    - Repetition: `styles:`, `defaults:`, `components:` + `use:`; `montaj validate --expand` shows the result.
    `montaj validate` and fix every `ERR` (each names its fix). Done on `OK montaj.yaml …`.
 
-5. **Preview.** `montaj render`, then numbers: `montaj inspect --problems`, `montaj scopes`
-   (`match --to N` evens a scene's grade). Then `montaj sheet` for framing and arc; one `sheet --strip <t>`
-   per new kind of motion or `--transitions`; `--diff` after a re-render. Stop when another round would
-   change nothing a viewer would notice.
+5. **Preview.** `montaj render`, then numbers: `montaj inspect --problems` (text off-frame, overlap, low
+   contrast), `montaj scopes` (`match --to N` evens a scene's grade). Then `montaj sheet` for framing and arc;
+   one `sheet --strip <t>` per new kind of motion or `--transitions`; `--diff` after a re-render. Stop when
+   another round would change nothing a viewer would notice.
 
 6. **Review: zero tokens.** Hand the user `montaj -C <project> review` and `montaj -C <project> watch`.
    Then `montaj review --summary` lists the notes; apply every one. A lasting preference becomes
