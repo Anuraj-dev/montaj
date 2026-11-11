@@ -64,3 +64,24 @@ most visible gap and Chromium is the largest CPU pixel path. Caption taste ships
 **Why:** Raja's call: Opus and Sonnet workers verify their own work with tests and real renders, so per-issue and
 per-milestone reviews cost more than they catch. The driver re-runs each worker's checks before merging; one
 parallel review of the full M5–M11 diff and one fix round close the plan. Supersedes the 2026-10-01 wave routing.
+
+## 2026-11-11 — Issue batch #56–#65: defaults chosen overnight without Raja
+**Why:** an unattended driver run fixed the #47 follow-ups. Each choice below was made on Raja's behalf and is
+cheap to reverse.
+- #56: slam text grows away from visible neighbours (anchored), not a flattened zoom. `by: char` keeps the old
+  behaviour and hashes; simultaneous slams and single-word slams under a visible line change hash (intended).
+  Within-line `inspect` overlap reports only above the rest-pose coverage.
+- #57: text blocks take `role: title|caption`; the caption-rate chunker merges only back-to-back same-owner blocks.
+- #58: `outro.hold` changes the hashes of films that use it; `#rgb` shorthand is scoped to `card.color`.
+- #59: image-sequence layers reject absolute, `~` and `~/` paths; `~user/` is not special-cased.
+- #63: `ingest-rec` always writes an events marker.
+- #64: a clip that pushes the mix over is `INFO` unless loudnorm is off; a composed bed gets −6 dBFS headroom; the
+  `sfx` clip id is reserved.
+- #65: a stale `check.expect` is a `WARN` naming its spec index and expressions; native (libav) stderr goes to
+  `build/<cmd>.log`.
+- #62: `audio.sfx: [cuts]` swishes only real hard cuts: not the jump cuts `cuts:` makes from one clip, not a cut to
+  `blank` or a textless card. `montaj new` never overwrites an existing `music/compose.py`.
+- #62: the BENCHMARK protocol runs `montaj doctor` first, records turn-0 context and requires a fresh session.
+- Phase 2 (Auren v2) waited for #62 so the benchmark measures the new skill; Raja's desktop was not re-recorded.
+- Auren v2: the driver's quality gate (`sheet`, `--strip`, `--transitions`, `inspect --problems`) found nothing to
+  fix, so no note rounds were sent; the worker picked the music (alternatives are listed in its project `music/`).
