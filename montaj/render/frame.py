@@ -107,6 +107,17 @@ _CAPTION_CAP = 8
 _LAYER_IMAGE_CAP = 8
 # Images of `frames:` layers (#59) resident at once: at least this, raised to what trails reach, never the whole sequence.
 _LAYER_FRAME_CAP = 6
+# Bytes the `frames:` LRU may hold beyond its floor; past it, ghosts re-decode (slower, still correct).
+_LAYER_FRAME_BUDGET = 1536 * 2**20
+
+
+def _frames_cap(planned: int, size: tuple[int, int], floor: int, budget: int = _LAYER_FRAME_BUDGET) -> int:
+    """`frames:` images kept resident: what one frame draws (`planned`), bounded by `budget` bytes of
+    (4, h, w) float32 textures of `size`, never below `floor`."""
+    each = 16 * size[0] * size[1]
+    return max(floor, min(planned, budget // max(1, each)))
+
+
 # Sub-frame samples for a `text[].motion_blur` block: at least this many, more when video.motion_blur is higher.
 TEXT_BLUR_SAMPLES = 5
 
@@ -342,7 +353,8 @@ class Renderer:
         # #59: one frame draws each `frames:` image its trails reach (lookback + 1 per layer), for both shots
         # of a transition; below that the LRU would re-decode every image on every frame.
         seq = max((sum(b + 1 for b in frames_lookback(s.spec)) for s in tl.shots if s.spec.layers), default=0)
-        self._layer_frames.cap = max(self._layer_frames.cap, 2 * seq)
+        if seq:
+            self._layer_frames.cap = _frames_cap(2 * seq, self._largest_frame(), self._layer_frames.cap)
         video = tl.spec.video
         beat0 = _parse_beat0(video.beat0, tl.fps, []) if video.beat0 is not None else None
         self._custom = CustomRunner(self._dir, cv.W, cv.H, cv.device, tl.fps, video.bpm, beat0 or 0.0, log=log)
@@ -698,6 +710,18 @@ class Renderer:
         keys = self._camera_keys(self.tl.shots[scene.shot].spec)
         z, fx, fy = camera_at(keys, plan.box, t - scene.t0)
         return kenburns(self.cv, _ClipView(img[None]), fx, fy, z, 0.0, 0.0)
+
+    def _largest_frame(self) -> tuple[int, int]:
+        """The biggest first image of any `frames:` layer (header only); validate pins every image to it."""
+        big = (0, 0)
+        for shot in self.tl.shots:
+            for layer in shot.spec.layers or ():
+                if layer.frames is None:
+                    continue
+                with Image.open(find_frames(self._assets, layer.frames)[0]) as im:
+                    if im.size[0] * im.size[1] > big[0] * big[1]:
+                        big = im.size
+        return big
 
     def _layer_plans(self, index: int) -> tuple[_LayerPlan, ...]:
         hit = self._layer_plans_by_shot.get(index)

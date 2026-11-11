@@ -79,7 +79,7 @@ def find_frames(assets_dir: Path, name: str) -> list[Path]:
     nothing matches.
     """
     assets_dir = Path(assets_dir)
-    if Path(name).is_absolute() or name.startswith("~"):
+    if Path(name).is_absolute() or name == "~" or name.startswith("~/"):  # `~m/` is a folder named ~m
         raise FileNotFoundError(f"'{name}' is an absolute path; frames folders and globs are relative to assets/")
     if _GLOB.search(name):
         found = [p for p in assets_dir.glob(name) if p.is_file()]

@@ -105,6 +105,7 @@ def test_frames_folder_and_glob_in_name_order(tmp_path: Path) -> None:
         ("{frames: seq, fps: 0}", "must be > 0"),
         ("{frames: seq, mask: subject}", "a frames layer has no matte"),
         ("{frames: /abs/seq/*.png}", "relative to assets/"),
+        ("{frames: ~/x/*.png}", "relative to assets/"),
         ("{frames: seq, every: 0.01s}", "0.01s rounds to 0 frames at 30 fps"),
     ],
 )
@@ -311,3 +312,24 @@ def test_recursive_glob_breaks_name_ties_by_path(tmp_path: Path) -> None:
         _frame(0).save(tmp_path / d / "001.png")
     got = find_frames(tmp_path, "**/*.png")
     assert [p.relative_to(tmp_path).as_posix() for p in got] == ["a/001.png", "b/001.png"]
+
+
+def test_a_folder_named_with_a_tilde_is_relative(tmp_path: Path) -> None:
+    _project(tmp_path, "  - {photo: bg, hold: 1f}\n")
+    shutil.copytree(tmp_path / "assets" / "seq", tmp_path / "assets" / "~m")
+    load_spec(_project(tmp_path, "  - {hold: 4f, layers: [{frames: ~m/*.png}]}\n"))  # no SpecError
+
+
+@pytest.mark.parametrize(
+    ("planned", "size", "want"),
+    [
+        (24, (40, 20), 24),        # small images: what a frame draws fits the budget
+        (66, (3840, 2160), 12),    # 4K, deep trails: 1.5 GiB // 132.7 MB
+        (66, (8000, 8000), 6),     # one image over the budget: the floor still holds
+        (4, (3840, 2160), 6),      # never below the floor
+    ],
+)
+def test_frames_cache_cap_is_bounded_by_bytes(planned: int, size: tuple[int, int], want: int) -> None:
+    from montaj.render.frame import _frames_cap
+
+    assert _frames_cap(planned, size, 6) == want
