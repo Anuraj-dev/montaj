@@ -44,3 +44,13 @@ def test_search_prints_whole_lines(capsys) -> None:
 def test_prose_only_topic_prints_whole(capsys) -> None:
     out = _out(capsys, "ingest")
     assert any("montaj assets [STEM]" in ln and "prints all" in ln for ln in out)
+
+
+def test_audio_short_form_shows_the_sfx_list() -> None:
+    line = next(ln for ln in specref.render_topic("audio", specref.topics(), full=False)
+                if ln.startswith("- `audio.sfx`"))
+    assert "[auto, text, cuts]" in line
+
+
+def test_first_sentence_does_not_end_at_eg_or_ie() -> None:
+    assert specref._first_sentence("Pick one, e.g. `a`, or i.e. B. Then more.") == "Pick one, e.g. `a`, or i.e. B."

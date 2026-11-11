@@ -187,8 +187,11 @@ EXAMPLES: dict[str, str] = {
 SHORT_CAP = 120  # characters of a line in the short form
 
 
+_SENTENCE_END = re.compile(r"(?<!\be\.g\.)(?<!\bi\.e\.)(?<=\.)\s(?=[A-Z`(])")  # "e.g." / "i.e." end none
+
+
 def _first_sentence(text: str) -> str:
-    m = re.search(r"(?<=\.)\s(?=[A-Z`(])", text)
+    m = _SENTENCE_END.search(text)
     return text[: m.start()] if m else text
 
 
