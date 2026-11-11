@@ -24,7 +24,7 @@ from PIL import Image
 from montaj.clipmap import camera_at, source_index
 from montaj.encode import probe
 from montaj.matte import find_matte
-from montaj.project import find_photo, matte_source, resolve_clip, shot_clips, shot_mattes
+from montaj.project import find_frames, find_photo, frame_index, frames_lookback, matte_source, resolve_clip, shot_clips, shot_mattes
 from montaj.render.canvas import Canvas
 from montaj.render.clip import ClipSource, window_key
 from montaj.grade import extras as grade_extras
@@ -105,6 +105,19 @@ _CLIP_CAP = 2
 _CAPTION_CAP = 8
 # Layer images (stickers, logos) a segment can composite: a transition's two layer shots, with slack.
 _LAYER_IMAGE_CAP = 8
+# Images of `frames:` layers (#59) resident at once: at least this, raised to what trails reach, never the whole sequence.
+_LAYER_FRAME_CAP = 6
+# Bytes the `frames:` LRU may hold beyond its floor; past it, ghosts re-decode (slower, still correct).
+_LAYER_FRAME_BUDGET = 1536 * 2**20
+
+
+def _frames_cap(planned: int, size: tuple[int, int], floor: int, budget: int = _LAYER_FRAME_BUDGET) -> int:
+    """`frames:` images kept resident: what one frame draws (`planned`), bounded by `budget` bytes of
+    (4, h, w) float32 textures of `size`, never below `floor`."""
+    each = 16 * size[0] * size[1]
+    return max(floor, min(planned, budget // max(1, each)))
+
+
 # Sub-frame samples for a `text[].motion_blur` block: at least this many, more when video.motion_blur is higher.
 TEXT_BLUR_SAMPLES = 5
 
@@ -139,6 +152,8 @@ class _LayerPlan:
     full: bool
     # Keyed `box` (cover): (source w, h, texture px per source px x, y). `src` is then cut per frame to the box's aspect.
     dyn: tuple[float, float, float, float] | None = None
+    # A `frames:` layer's images in order (#59); `stem` is then the folder or glob.
+    seq: tuple[Path, ...] | None = None
 
 
 _IDENTITY = LayerState(1.0, 0.0, 1.0)
@@ -233,6 +248,7 @@ def _cache_caps(overrides: dict[str, int] | None) -> dict[str, int]:
         "clips": _CLIP_CAP,
         "captions": _CAPTION_CAP,
         "layer_images": _LAYER_IMAGE_CAP,
+        "layer_frames": _LAYER_FRAME_CAP,
     }
     if not overrides:
         return caps
@@ -322,17 +338,23 @@ class Renderer:
         self._shot: int | None = None
         self._lut = None
         self._layer_images: _LRU = _LRU(caps["layer_images"])
+        self._layer_frames: _LRU = _LRU(caps["layer_frames"])
         self._layer_plans_by_shot: dict[int, tuple[_LayerPlan, ...]] = {}
         self._matte_files: dict[tuple[str, str], Path] = {}
         # #36: text blocks drawn under the subject, and the rest; split once in `_ensure_rasters`.
         self._behind: tuple[tuple, RasterSet, tuple, RasterSet] | None = None
-        self._owners: dict[str, dict[tuple, set[int]]] = {"photos": {}, "bgs": {}, "cards": {}, "layer_images": {}}
+        self._owners: dict[str, dict[tuple, set[int]]] = {"photos": {}, "bgs": {}, "cards": {}, "layer_images": {}, "layer_frames": {}}
         # A layer shot reads several clips in one frame; keep each one's reader (plus a neighbour's) open.
         # A clip's subject matte (#36) is one more reader beside it, on a plain clip shot too.
         most = max((len(set(shot_clips(s.spec))) + len(shot_mattes(s.spec))
                     for s in tl.shots if s.spec.layers or shot_mattes(s.spec)), default=0)
         if most > 1:
             self._clips.cap = max(self._clips.cap, most + 1)
+        # #59: one frame draws each `frames:` image its trails reach (lookback + 1 per layer), for both shots
+        # of a transition; below that the LRU would re-decode every image on every frame.
+        seq = max((sum(b + 1 for b in frames_lookback(s.spec)) for s in tl.shots if s.spec.layers), default=0)
+        if seq:
+            self._layer_frames.cap = _frames_cap(2 * seq, self._largest_frame(), self._layer_frames.cap)
         video = tl.spec.video
         beat0 = _parse_beat0(video.beat0, tl.fps, []) if video.beat0 is not None else None
         self._custom = CustomRunner(self._dir, cv.W, cv.H, cv.device, tl.fps, video.bpm, beat0 or 0.0, log=log)
@@ -355,6 +377,7 @@ class Renderer:
         self._drop_owned("bgs", self._bgs, needed)
         self._drop_owned("cards", self._cards, needed)
         self._drop_owned("layer_images", self._layer_images, needed)
+        self._drop_owned("layer_frames", self._layer_frames, needed)
 
     def _note(self, kind: str, key: tuple) -> None:
         shot = self._shot
@@ -688,6 +711,18 @@ class Renderer:
         z, fx, fy = camera_at(keys, plan.box, t - scene.t0)
         return kenburns(self.cv, _ClipView(img[None]), fx, fy, z, 0.0, 0.0)
 
+    def _largest_frame(self) -> tuple[int, int]:
+        """The biggest first image of any `frames:` layer (header only); validate pins every image to it."""
+        big = (0, 0)
+        for shot in self.tl.shots:
+            for layer in shot.spec.layers or ():
+                if layer.frames is None:
+                    continue
+                with Image.open(find_frames(self._assets, layer.frames)[0]) as im:
+                    if im.size[0] * im.size[1] > big[0] * big[1]:
+                        big = im.size
+        return big
+
     def _layer_plans(self, index: int) -> tuple[_LayerPlan, ...]:
         hit = self._layer_plans_by_shot.get(index)
         if hit is not None:
@@ -700,6 +735,14 @@ class Renderer:
         plans = []
         for idx, layer in enumerate(shot.spec.layers):
             start = layer.from_ or 0
+            if layer.frames is not None:
+                seq = tuple(find_frames(self._assets, layer.frames))
+                with Image.open(seq[0]) as im:  # header only; validate checks every frame has this size
+                    sw, sh = im.size
+                dest, src = _place(layer, sw, sh, W, H, k)
+                dyn = (float(sw), float(sh), 1.0, 1.0) if is_keyed(layer.box) else None
+                plans.append(_LayerPlan(layer.frames, dest, src, None, float(shot.start + start), False, dyn, seq))
+                continue
             if layer.image is not None:
                 with Image.open(find_photo(self._assets, layer.image)) as im:  # header only
                     sw, sh = im.size
@@ -752,6 +795,21 @@ class Renderer:
         self._note("layer_images", key)
         return hit
 
+    def _layer_frame(self, layer, plan: _LayerPlan, t: float) -> LayerTexture | None:
+        """The image a `frames:` layer shows at film time `t`, or None past the end of a `once` sequence.
+        Images load on demand into a small LRU, so a long sequence is never resident at once."""
+        local = t - plan.t_start + (layer.from_ or 0)
+        i = frame_index(layer, local, len(plan.seq), self.tl.fps)
+        if i is None:
+            return None
+        key = ("frames", str(plan.seq[i]))
+        hit = self._layer_frames.get(key)
+        if hit is None:
+            hit = LayerTexture(load_rgba(plan.seq[i], self.cv.device, self._policy))
+            self._layer_frames[key] = hit
+        self._note("layer_frames", key)
+        return hit
+
     def _layer_clip(self, plan: _LayerPlan, t: float) -> torch.Tensor:
         c = plan.clip
         return self._clip_source(c.stem).frame(
@@ -767,8 +825,10 @@ class Renderer:
             t, plan.t_start, c.clip_in, c.w, c.h, nframes=c.count, device=self.cv.device, crop=c.crop,
         )[:1]
 
-    def _layer_texture(self, layer, plan: _LayerPlan, t: float) -> LayerTexture:
+    def _layer_texture(self, layer, plan: _LayerPlan, t: float) -> LayerTexture | None:
         """The layer's source; `mask: subject` multiplies it (premultiplied) by its matte."""
+        if plan.seq is not None:
+            return self._layer_frame(layer, plan, t)
         if layer.mask is None:
             return LayerTexture(self._layer_clip(plan, t)) if plan.clip is not None else self._layer_image(plan.stem)
         m = self._layer_matte(plan, t)
@@ -911,6 +971,8 @@ class Renderer:
                 self._seam_effect("layer")
                 pad = fxlib.layer_pad(self.cv, fxs, local)
         tex = self._layer_texture(layer, plan, t)
+        if tex is None:  # a `once` sequence that has ended
+            return
         composite(self.cv, out, tex, self._src_at(layer, plan, dest), dest, state, mode, radius, shadow, post=post, post_pad=pad or 0.0)
 
     def _seam_effect(self, what: str) -> None:
