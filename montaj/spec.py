@@ -841,6 +841,13 @@ class AudioDuck(Frozen):
     release: DurationStr = "200ms"
 
 
+def _sfx_form(v: object) -> object:
+    """One message for every wrong `audio.sfx` (pydantic would print one per union arm); `[]` is wrong too."""
+    if v is None or v == "auto" or (isinstance(v, list) and v and all(k in ("auto", "text", "cuts") for k in v)):
+        return v
+    raise ValueError(f"auto, or a list of auto/text/cuts (got {v!r})")
+
+
 class Audio(Frozen):
     # Absent: no music bed. Linked clip audio (`audio: true` shots) still mixes over silence.
     track: str | None = Field(default=None, exclude_if=lambda v: v is None)
@@ -851,7 +858,9 @@ class Audio(Frozen):
     clips: list[AudioClip] = Field(default_factory=list)
     duck: AudioDuck | None = None
     # #41: `auto` adds transition sounds at layout (`emphasis.expand_emphasis`); both are consumed there, so only clips are hashed.
-    sfx: Literal["auto"] | None = Field(default=None, exclude_if=lambda v: v is None)
+    # `auto`, or a list of `auto` / `text` / `cuts` (#62). Consumed by `emphasis.expand_emphasis`.
+    sfx: Annotated[Literal["auto"] | list[Literal["auto", "text", "cuts"]] | None, BeforeValidator(_sfx_form)] = Field(
+        default=None, exclude_if=lambda v: v is None)
     sfx_gain: str | None = Field(default=None, exclude_if=lambda v: v is None)
 
 

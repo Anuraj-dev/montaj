@@ -90,6 +90,9 @@ def _parser() -> argparse.ArgumentParser:
     ing.add_argument("--list", action="store_true")  # one line per analysed asset; no work
     ing.add_argument("--matte", action="append", default=None, metavar="STEM")  # subject matte only (#36)
 
+    ast = sub.add_parser("assets")  # a few lines per clip from what ingest wrote (#62)
+    ast.add_argument("stem", nargs="?")
+
     rec = sub.add_parser("ingest-rec")
     rec.add_argument("video")
     rec.add_argument("--events", default=None)
@@ -198,6 +201,7 @@ def _parser() -> argparse.ArgumentParser:
     sp = sub.add_parser("spec")
     sp.add_argument("topic", nargs="?")
     sp.add_argument("--search", default=None, metavar="WORD")
+    sp.add_argument("--full", action="store_true")  # every reference line whole; default is the short form
 
     wd = sub.add_parser("words")
     wd.add_argument("--grep", default=None, metavar="TEXT")
@@ -371,6 +375,10 @@ def _cmd_new(ns: argparse.Namespace, root: Path) -> list[str]:
     local = src.with_suffix("")  # recipes/<name>/: the recipe's own draw files, beside the spec
     if local.is_dir():
         shutil.copytree(local, dest / local.name, dirs_exist_ok=True, ignore=shutil.ignore_patterns("__pycache__"))
+    compose = src.parent / "music" / f"{src.stem}-compose.py"  # the recipe's song: the agent Reads and Edits it
+    if compose.is_file() and not (dest / "music" / "compose.py").exists():  # never over the user's own song
+        (dest / "music").mkdir(exist_ok=True)
+        shutil.copyfile(compose, dest / "music" / "compose.py")
     if ns.photos is None:
         return _recipe_demo(demo, dest)
     assets = _assets_dir(dest, _assets_rel(src))
@@ -1347,10 +1355,14 @@ def _dispatch(ns: argparse.Namespace, root: Path) -> list[str]:
         return _cmd_cut(ns, root)
     if ns.cmd == "words":
         return _cmd_words(ns, root)
+    if ns.cmd == "assets":
+        from montaj.footage import summary
+
+        return summary(_assets_dir(root, _assets_rel(root / "montaj.yaml")), ns.stem)
     if ns.cmd == "spec":
         from montaj.specref import run as spec_ref
 
-        return spec_ref(ns.topic, ns.search)
+        return spec_ref(ns.topic, ns.search, ns.full)
     if ns.cmd == "review":
         return review_summary(root)[0]
     if ns.cmd == "taste":

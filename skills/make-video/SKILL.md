@@ -5,79 +5,70 @@ description: Make or edit a video with Montaj from a folder of photos, clips or 
 
 # make-video
 
-You direct; Montaj renders. Your whole output is one YAML spec, `<project>/montaj.yaml` (plus any music or
-`custom:` Python you choose to write). Every render, check and review round after that is a `montaj` command
-that costs no tokens. Run every command as `montaj -C <project> <cmd>`. Each prints one result line,
-`OK …`, `WARN …` or `ERR <what>: <fix>`; progress goes to `<project>/build/*.log`.
+You direct; Montaj renders. Your output is one YAML spec, `<project>/montaj.yaml` (plus music or `custom:`
+Python). Every render, check and review after that is a `montaj` command that costs no tokens. Run each as
+`montaj -C <project> <cmd>`; it prints one result line, `OK …`, `WARN …` or `ERR <what>: <fix>`.
 
 ## Budget
 | Command | Cost | Worth it when |
 |---|---|---|
-| `montaj spec <topic>` | ~0.3–3k tokens | before using a feature you haven't used this session |
-| `montaj spec --search <word>` | ~0.2k | you know the word, not the field |
+| `montaj spec <topic>` | ~1–2k tokens | before a feature you haven't used this session; one topic at a time |
+| `montaj spec --search <word>` | ~0.2k | you know the word, not the field (`--full` only for a detail the short form lacks) |
+| `montaj assets [stem]` | a few lines per clip | learning the footage: cuts, speech, events, loudness |
 | `validate`, `check`, `inspect --problems`, `scopes` | one line each | every iteration — numbers, not pictures |
-| `sheet`, `ingest-sheet.jpg`, `--strip`, `--transitions` | ~1.5k per image | composition, framing, motion you can't judge from numbers |
+| `sheet`, `ingest-sheet.jpg`, `--strip`, `--transitions` | ~1.5k per image | framing or motion you can't judge from numbers |
 
-- At most 2 images per iteration. The photos and clips stay on disk; never ask the user to paste them.
+- At most 2 images per iteration. The assets stay on disk; never ask the user to paste them.
+- Learn the footage from `montaj assets`, never from `analysis.json`, `*.events.json` or ffmpeg.
+- Write the spec once with Write and change it with Edit; never generate it from a script.
+- A 20 s short fits in 60 lines. If yours does not, a shorthand is missing: say which in your report.
 - Engine source is out of scope. On an engine bug, report the command and its `ERR` line, then stop.
-- A 30 s film renders in under a minute: run `render` and `check` in the foreground. Long finals and
-  `music gen` take minutes: run them in the background and wait for the notification.
+- `render` and `check` of a short run in the foreground; long finals and `music gen` in the background.
 
 ## Steps
 
-1. **Brief.** `montaj taste` prints the user's standing preferences; they bind. Ask one round of questions,
-   all at once: length, aspect, who it's for, on-screen text, motion style, music (none / their track / a
-   generated song / one you compose). Then write yourself a five-line treatment:
-   - **Hook**: what holds the first second.
-   - **Arc**: how energy moves (open, build, peak, release).
-   - **Type**: one or two text styles and where text sits.
-   - **Colour**: a look plus any per-shot grade intent.
-   - **Sound**: the music, its tempo and where it hits.
-   Done when each question has an answer or a default you stated.
+1. **Brief.** `montaj taste` prints standing preferences; they bind. Ask one round, all at once: length,
+   aspect, audience, on-screen text, motion style, music (none / theirs / generated / composed). Write a
+   five-line treatment: **Hook** (the first second), **Arc** (energy), **Type** (one or two styles),
+   **Colour** (a look), **Sound** (tempo, where it hits).
 
-2. **Project.** `montaj new --list` prints one line per recipe. Pick the one closest to the treatment:
-   `montaj new <project> --recipe <recipe> [--photos <folder>]`. Without `--photos`, a recipe with a demo makes
-   synthetic assets, so it renders as-is. Read `recipes/<recipe>.md` (what to ask, what to change). Look at
-   `build/ingest-sheet.jpg` once; `assets/analysis.json` has faces, subjects, cuts, speech and motion as
-   numbers. Done when you can name each asset's content in a few words.
+2. **Project.** `montaj new --list`, then `montaj new <project> --recipe <recipe> [--photos <folder>]`
+   (no `--photos`: a demo recipe renders as-is). Read `recipes/<recipe>.md`. Look at `build/ingest-sheet.jpg`
+   once and run `montaj assets`. Done when you can name each asset's content in a few words.
 
-3. **Music** (skip for a silent film). `montaj spec audio` has the fields.
-   - Their track: copy it into `music/`, then `montaj music analyze music/<file>.wav --lang <code>` →
-     `music/markers.json` (beats; words with times). Instrumentals take `--no-words`. Default lang is `hi`.
-   - Generate (ACE-Step): write `music/lyrics.txt`, then `montaj music gen --caption "<style>" --lyrics
-     music/lyrics.txt --bpm <n> --duration <len>s --lang <code> --n 2` (background). The user picks by ear.
-   - Compose: write `music/compose.py` (numpy; writes a wav to `sys.argv[1]`), run `montaj music compose
-     music/compose.py`, and read the `OK` line (length, peak, LUFS) since you can't listen.
-     `recipes/music/compose-example.py` is a starting point. Start the first downbeat at 0 s and set the
-     same `video.bpm`.
-   - Gain staging: `music compose` turns the bed down to -6 dBFS peak so voice and SFX sit on top. For an
-     `INFO clip` peak, apply the cut `montaj check` names: a clip's `gain`, or `audio.sfx_gain` for emphasis
-     and `sfx: auto` sounds. Only when it names the track file, re-compose it quieter.
-   Done when the song exists and you know its tempo and first beat.
+3. **Music** (skip for silence). `montaj spec audio`.
+   - Their track: copy into `music/`, `montaj music analyze music/<file>.wav --lang <code>` (`--no-words`
+     for instrumentals) → `music/markers.json`.
+   - Generate: write `music/lyrics.txt`, `montaj music gen --caption "<style>" --lyrics music/lyrics.txt
+     --bpm <n> --duration <len>s --lang <code> --n 2` (background); the user picks by ear.
+   - Compose: `montaj new` already created `music/compose.py` when the recipe has a song: Read it, then Edit
+     it (else start from `recipes/music/compose-example.py`). `montaj music compose music/compose.py`; read
+     the `OK` line (length, peak, LUFS). First downbeat at 0 s; the same `video.bpm`.
+   - Gain: for an `INFO clip` peak, apply the cut `montaj check` names (a clip's `gain`, or `audio.sfx_gain`).
 
-4. **Spec.** Start from the recipe and depart from it freely: the treatment decides, not the recipe. Before
-   using a feature, read its topic (`montaj spec` lists 24; `captions`, `layers`, `keys`, `grade`, `emphasis`,
-   `cuts`, `custom`, …). Things that are easy to miss:
-   - Cuts land on the beat grid (`4b`) or on markers (`until: chorus`; a word is `"word:12"`).
-   - Talking footage: `cuts:` cuts on the transcript; `captions:` word-times it; `emphasis:` hits words.
-   - Anything not in a field: `custom:` (shot), `effects[].custom` or `in.src` (transition) run your own
-     `draw(ctx)` on the GPU. `montaj custom test <file.py>` checks it in seconds.
+4. **Spec.** The treatment decides, not the recipe. Read one `montaj spec <topic>` at a time (short form;
+   `montaj spec` lists them). Shorthands that keep a short short:
+   - Titles: one line each, `- {at: 4b, to: 6b, text: "SWITCH *WORKSPACES*"}`; style and position come
+     from `styles:`/`defaults:`. In a `lines:` block a line's `at` defaults to the block's `from`.
+   - Sound: `audio.sfx: [text, cuts]` puts a hit on each slam and a swish on each hard cut (not a jump cut
+     within a take, nor the cut to a blank or textless card), never doubling a sound you placed; `auto` adds
+     transition whooshes, the `drop` riser and the `reveal: type` tick.
+   - A PNG sequence is one layer: `{frames: "m*.png", every: 6f}`, not a layer per image.
+   - Endings: `video.outro: {type: fade, dur: 30f, hold: 15f}` ends on true black; `card: {color: "#000"}`
+     is a textless card.
+   - Cuts on the beat grid (`4b`) or markers (`until: chorus`); talking footage: `cuts:`, `captions:`,
+     `emphasis:`; anything else: `custom:` (`montaj custom test <file.py>`).
    - Repetition: `styles:`, `defaults:`, `components:` + `use:`; `montaj validate --expand` shows the result.
    `montaj validate` and fix every `ERR` (each names its fix). Done on `OK montaj.yaml …`.
 
-5. **Preview.** `montaj render`, then numbers first: `montaj inspect --problems` (text off-frame, overlap, low
-   contrast), `montaj scopes` (exposure, clipping, cast, skin); `montaj match --to N` evens out a scene's
-   grade. Then `montaj sheet` and look at `build/sheet.jpg` for framing and the arc. For motion, one
-   `sheet --strip <t>` per new kind of motion (not per shot) or `sheet --transitions`; after a re-render
-   `--diff` shows only what changed. Only changed segments re-render. Iterate until the sheet shows the
-   treatment; stop when another round would change nothing the viewer would notice.
+5. **Preview.** `montaj render`, then numbers: `montaj inspect --problems` (text off-frame, overlap, low
+   contrast), `montaj scopes` (`match --to N` evens a scene's grade). Then `montaj sheet` for framing and arc;
+   one `sheet --strip <t>` per new kind of motion or `--transitions`; `--diff` after a re-render. Stop when
+   another round would change nothing a viewer would notice.
 
-6. **Review: zero tokens.** Hand the user two commands for their own terminal:
-   `montaj -C <project> review` (play, approve/reject shots, comment at the playhead) and
-   `montaj -C <project> watch` (re-renders on every save). When they come back, `montaj review --summary`
-   prints one line per noted shot; apply every note. A note that states a lasting preference becomes
+6. **Review: zero tokens.** Hand the user `montaj -C <project> review` and `montaj -C <project> watch`.
+   Then `montaj review --summary` lists the notes; apply every one. A lasting preference becomes
    `montaj taste add "<preference>"`.
 
-7. **Final.** `montaj render --final`, then `montaj check`: done on `OK check`. Each `WARN` names a defect to
-   fix in the spec; `INFO` is informational. For phone sharing, `montaj export --target whatsapp`. Report the
-   output paths.
+7. **Final.** `montaj render --final`, then `montaj check`: done on `OK check`. Fix each `WARN` in the spec.
+   For phones, `montaj export --target whatsapp`. Report the output paths.

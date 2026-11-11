@@ -217,7 +217,7 @@ Photo fields (`crop`, `focus`, swirl `center`, wall `at`) are source-image pixel
 - `audio.clips[].out` — duration, default end of source — end inside the source; must be after `in`.
 - `audio.clips[].gain` — dB string, default `0dB` — level, e.g. `-10dB`; within ±120 dB.
 - `audio.clips[].pan` — number in `[-1, 1]`, default `0` — constant-power pan, `-1` left.
-- `audio.sfx` — `auto`, default none — adds sound design from the layout: `whoosh` on `whip` / `push` / `zoom` transitions (peak on the cut for whip, mid-window for push/zoom), `riser` peaking at marker `drop` if defined, `tick` at each `reveal: type` line. Each sound starts early by its own peak lead so the peak lands on the event. Expands to ordinary `audio.clips` (id `sfx`).
+- `audio.sfx` — `auto` or a list of `[auto, text, cuts]`, default none — adds sound design from the layout: `whoosh` on `whip` / `push` / `zoom` transitions (peak on the cut for whip, mid-window for push/zoom), `riser` peaking at marker `drop` if defined, `tick` at each `reveal: type` line. Each sound starts early by its own peak lead so the peak lands on the event. Expands to ordinary `audio.clips` (id `sfx`). A list picks kinds: `[auto, text, cuts]` — `text` puts a `hit` on each `in: slam` line's impact (`at` + its in-dur), `cuts` a `swish` on each hard cut (a shot after the first with no `in`; not a jump cut to a later range of the same clip, nor a cut to `blank` or a textless `card`); both skip a frame that already has a sound peaking within 80 ms (your clips' loudest moment inside their `in`/`out`, emphasis, `auto`; voices under `duck` do not count). A project `sfx/hit.*` / `sfx/swish.*` replaces the synth.
 - `audio.sfx_gain` — dB string, default `-8dB` — gain of every `emphasis` and `sfx: auto` sound.
 - `audio.duck` — mapping, default none — dips the music (not other clips) while the named clips speak: RMS over 120 ms above -45 dB, eased by attack and release.
 - `audio.duck.under` — list of clip ids (or linked shot ids), required — which clips trigger the duck.
@@ -225,7 +225,8 @@ Photo fields (`crop`, `focus`, swirl `center`, wall `at`) are source-image pixel
 - `audio.duck.attack` — duration (`40ms`), default `40ms` — time to reach the depth.
 - `audio.duck.release` — duration, default `200ms` — time to come back.
 - `text` — list, default none — overlay blocks. Each line reveals unit by unit.
-- `text[].from` — time expression, required — block visible window start.
+- `text[].text` — string, default none — a one-line block (a title): `{at: 4b, to: 6b, text: "GO *NOW*"}`. Block fields stay on the block, every other key goes to its one line; `from` defaults to `at`. Takes `defaults: text.lines` and styles like any line. Not with `lines`.
+- `text[].from` — time expression, required (default the line's `at` in a one-line block) — block visible window start.
 - `text[].to` — time expression, required — block visible window end.
 - `text[].fade_in` — duration, default `0s` — block fade in. `0` is instant.
 - `text[].fade_out` — duration, default `0.8s` (`0s` when a line sets `out`) — block fade out; the block blurs by `(1 − a)·blur`.
@@ -248,7 +249,7 @@ Photo fields (`crop`, `focus`, swirl `center`, wall `at`) are source-image pixel
 - `text[].lines[].tracking` — number, default serif `0.01`, caps `0.42`, script/deva `0` — letter-spacing in em.
 - `text[].lines[].line_height` — number, default serif `1.1`, deva `1.5`; script and caps leave it unset.
 - `text[].lines[].y` — number, required unless `pos` is set — design-px top of the line box.
-- `text[].lines[].at` — time expression, required — when this line starts revealing.
+- `text[].lines[].at` — time expression, default the block's `from` — when this line starts revealing.
 - `text[].lines[].by` — `word` or `char`, default `word` — reveal unit.
 - `text[].lines[].stagger` — duration, default `0.16s` word / `0.07s` char — delay between units.
 - `text[].lines[].dur` — duration, default `0.9s` — reveal length of one unit.
@@ -454,6 +455,8 @@ Reuse (`styles`, `defaults`, `components`, `use`, `include`) is expanded before 
 
 ## Asset analysis
 `montaj ingest [--photos DIR]` normalises photos, then analyses every photo and clip in `assets/` on the GPU into `assets/analysis.json` (keyed by file name, cached by file bytes: unchanged files run no model; the GPU lock is held only while something needs work). Photos: `faces: [{box: [x0, y0, x1, y1], eyes: [[x, y], [x, y]], score}]` largest first, `subject: [x, y]`, `sharpness` (Laplacian variance), `brightness` (0..1), `colors` (hex, most-covered first). Clips: `duration`, `fps`, `cuts: [t]`, `speech` / `silence: [{s, e}]` (audio energy, not a voice model), `motion` (mean frame difference per second, 0..1), `scenes: [{s, e, faces, subject}]` (one mid-scene frame each). `words` is reserved for transcripts. Pixels are source pixels. `--fast` skips analysis; `--list` prints one line per asset, and one per subfolder of images (`mascot frames 39 512x512 alpha`, a `frames:` layer source). Only flat files in `assets/` are analysed; subfolders are ignored. Faces: RetinaFace MobileNet-0.25 (MIT), weights downloaded once to `~/.cache/montaj/models/` (`MONTAJ_MODELS` overrides).
+
+`montaj assets [STEM]` is how to learn the footage (never read `analysis.json`, the event logs or ffprobe): per clip one line `takeA 120.8s 1920x1080 60fps cuts 44.5 | loud -24dBFS peak -2dBFS@12.4s`, then `speech 1.4-2.1 "okay fresh start…" | …` (first words from `<stem>.words.json`) and `events 3.55 ask text="Open Spotify…" | …` (each `kind` and field you can pass to `at_event`; repeats folded). Without STEM it caps speech at 6 and events at 12 per clip; with STEM it prints all.
 
 `montaj ingest --matte STEM` (repeatable) computes a person matte for each clip or photo on the GPU into `assets/mattes/<sha16>.subject-v1.mp4|png` (grey; keyed by the source's bytes, so a changed file needs a new matte; unchanged ones are reused). Model: torchvision DeepLabV3-ResNet101 (COCO/VOC person class, BSD), weights downloaded once to `~/.cache/montaj/models/`; edges are refined against the frame with a guided filter and steadied in time. A CPU device is an error under `[gpu] strict`. Warns when the mean frame-to-frame matte change is large.
 
