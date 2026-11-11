@@ -20,7 +20,7 @@ import yaml
 from montaj.audio import analyze as analyze_audio
 from montaj.audio import compose as compose_audio
 from montaj.audio import music as music_gen
-from montaj.audio.mix import check_lines, has_links
+from montaj.audio.mix import _find_src, check_lines, has_links
 from montaj.audio.music import parse_duration
 from montaj.capture import run as run_capture
 from montaj.doctor import doctor
@@ -1186,20 +1186,34 @@ BED_HEADROOM_DB = -6.0  # a composed bed's peak: room for voice and SFX on top (
 def _is_bed(root: Path, out: Path) -> bool:
     """`out` is (or will be) the spec's music bed: no spec yet, no `audio.track`, or it is the track.
 
-    It is not when the spec's track is another file, or an `audio.clips` src names it (extension
-    optional). Raw YAML, not `load_spec`: the spec often names a track that does not exist yet.
+    It is not when the spec's track is another file, or an `audio.clips` src names it, found the way
+    `mix._clip_src` finds it: `synth:<name>` in `sfx/`, else the spec dir, then the assets dir, with
+    the extension optional. Raw YAML, not `load_spec`: the spec often names a track that does not
+    exist yet.
     """
     try:
         raw = yaml.safe_load((root / "montaj.yaml").read_text())
     except (OSError, yaml.YAMLError):
         return True
-    audio = raw.get("audio") if isinstance(raw, dict) and isinstance(raw.get("audio"), dict) else {}
+    raw = raw if isinstance(raw, dict) else {}
+    audio = raw.get("audio") if isinstance(raw.get("audio"), dict) else {}
     track = audio.get("track")
     if isinstance(track, str) and track:
         return (root / track).resolve() == out
+    assets = raw.get("assets") if isinstance(raw.get("assets"), str) else "assets"
     clips = audio.get("clips") if isinstance(audio.get("clips"), list) else []
-    srcs = {(root / c["src"]).resolve() for c in clips if isinstance(c, dict) and isinstance(c.get("src"), str)}
-    return not ({out, out.with_suffix("")} & srcs)
+    for c in clips:
+        src = c.get("src") if isinstance(c, dict) else None
+        if not isinstance(src, str):
+            continue
+        dirs = [root / "sfx"] if src.startswith("synth:") else [root, root / assets]
+        name = src.removeprefix("synth:")
+        found = next((f for d in dirs if (f := _find_src(d, name)) is not None), None)
+        # An existing file is the clip `_clip_src` would pick; before compose writes it, any candidate.
+        bases = [found.resolve()] if found is not None else [(d / name).resolve() for d in dirs]
+        if {out, out.with_suffix("")} & set(bases):  # `src` may leave off the extension
+            return False
+    return True
 
 
 def _cmd_music_compose(ns: argparse.Namespace, root: Path) -> list[str]:

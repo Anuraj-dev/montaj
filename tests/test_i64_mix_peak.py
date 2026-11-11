@@ -215,3 +215,73 @@ def test_compose_headroom_applies_to_the_bed_only(
     lines = _compose(project, capsys, out)
     assert (" peak -6.0dBFS " in lines[-1]) == scaled and (" peak -1.0dBFS " in lines[-1]) != scaled, lines
     assert any(line.startswith("INFO music compose") for line in lines) == scaled
+
+
+# --- re-review of 1359cd0 ---------------------------------------------------------------------
+
+
+def test_sfx_gain_names_its_default_when_the_sounds_sit_at_it(tmp_path: Path) -> None:
+    from montaj.emphasis import SFX_ID
+
+    default_db = float(DEFAULT_SFX_GAIN.removesuffix("dB"))
+    plan = MixPlan(float_wav(tmp_path / "m.wav", tone(1.0, 0.2)),
+                   clips=(Placed(SFX_ID, float_wav(tmp_path / "a.wav", tone(1.0, 1.5)), 0, 0.0, None, 0.0,
+                                 default_db, 0.0),
+                          Placed("music", float_wav(tmp_path / "b.wav", tone(1.0, 0.3)), 0, 0.0, None, 0.0, 0.0, 0.0)))
+    who, cut = FIX.search(peak_line(mix.mix_audio(plan)[1])).groups()
+    assert who == f"audio.sfx_gain (default {DEFAULT_SFX_GAIN})"
+    quiet = dataclasses.replace(plan.clips[0], gain_db=default_db - float(cut))
+    assert not mix.mix_audio(dataclasses.replace(plan, clips=(quiet, plan.clips[1])))[1].clipped
+
+
+def test_an_audio_layer_is_never_the_clip_cut_and_does_not_move_the_hash(tmp_path: Path) -> None:
+    src = float_wav(tmp_path / "c.wav", tone(1.0, 0.1))
+    layer = mix.Linked("pad", src, 30, 0, 0, SR, 0.0, None, None, 0.0, fixed=True)
+    b = Placed("b", src, 0, 0.0, None, 0.0, 0.0, 0.0)
+    xl, xb = tone(1.0, 0.6), tone(1.0, 0.3)
+    bed = tone(1.0, 0.2)
+    full = bed + xl + xb  # the layer alone is the cheapest cut, but no spec field sets its gain
+    plan = MixPlan(None, clips=(b,), links=(layer,))
+    kind, name, n, cut = mix._peak_fix(full, [(layer, 0, xl), (b, 0, xb)], plan, [("id", "pad"), ("id", "b")])
+    assert (kind, name, n) == ("id", "b", 1)
+    assert float(np.max(np.abs(bed + xl + xb * np.float32(10 ** (-cut / 20))))) <= mix.PEAK_CEILING
+    unfixed = dataclasses.replace(plan, links=(dataclasses.replace(layer, fixed=False),))
+    assert mix.plan_hash(unfixed) == mix.plan_hash(plan)  # existing films keep their cached mix
+
+
+def test_unnamed_clips_of_the_same_file_name_in_two_dirs_are_two_sources(tmp_path: Path) -> None:
+    one = float_wav(tmp_path / "x" / "t.wav", tone(1.0, 0.6))
+    two = float_wav(tmp_path / "y" / "t.wav", tone(1.0, 0.1))
+    plan = MixPlan(float_wav(tmp_path / "m.wav", tone(1.0, 0.5)),
+                   clips=(Placed(None, one, 0, 0.0, None, 0.0, 0.0, 0.0),
+                          Placed(None, two, 0, 0.0, None, 0.0, 0.0, 0.0)))
+    stats = mix.mix_audio(plan)[1]
+    assert [n for n, _ in stats.peak_parts] == ["t.wav", "music (track)", "t.wav"]  # shown by name, keyed by path
+    who, cut = FIX.search(peak_line(stats)).groups()
+    assert who == "gain on the t.wav clip"  # one placement, not "every"
+    quiet = dataclasses.replace(plan.clips[0], gain_db=-float(cut))
+    assert not mix.mix_audio(dataclasses.replace(plan, clips=(quiet, plan.clips[1])))[1].clipped
+
+
+def test_a_user_clip_cannot_take_the_sfx_id(tmp_path: Path) -> None:
+    from montaj.spec import SpecError
+
+    (tmp_path / "sfx").mkdir()
+    spec = SPEC.format(hit="0dB").replace('- {src: "synth:hit"', '- {id: sfx, src: "synth:hit"')
+    (tmp_path / "montaj.yaml").write_text(spec)
+    with pytest.raises(SpecError) as e:
+        load_spec(tmp_path / "montaj.yaml")
+    assert any(line.startswith("audio.clips[0].id: 'sfx' is reserved") for line in e.value.errors), e.value.errors
+
+
+@pytest.mark.parametrize(("spec", "out", "bed"), [
+    ("audio:\n  clips:\n    - {src: boom, at: 1s}\n", "assets/boom.wav", False),  # found in the assets dir
+    ("assets: media\naudio:\n  clips:\n    - {src: boom, at: 1s}\n", "media/boom.wav", False),
+    ("audio:\n  clips:\n    - {src: 'synth:boom', at: 1s}\n", "sfx/boom.wav", False),  # a project sfx/ synth
+    ("audio:\n  clips:\n    - {src: 'synth:boom', at: 1s}\n", "music/song.wav", True),
+])
+def test_is_bed_finds_clip_srcs_where_the_mixer_does(tmp_path: Path, spec: str, out: str, bed: bool) -> None:
+    from montaj.cli import _is_bed
+
+    (tmp_path / "montaj.yaml").write_text(spec)
+    assert _is_bed(tmp_path, (tmp_path / out).resolve()) is bed

@@ -29,7 +29,7 @@ from pathlib import Path
 import numpy as np
 
 from montaj.encode import FFMPEG, FFPROBE, EncodeError
-from montaj.emphasis import SFX_ID
+from montaj.emphasis import DEFAULT_SFX_GAIN, SFX_ID
 from montaj.spec import _DUR, _assets_dir, _dur_frames, _line, _parse_time
 
 SR = 48000
@@ -97,6 +97,7 @@ class Linked:
     lag: float = 0.0
     xin: int = 0  # half-width (samples) of the crossfade with the linked shot before; 0: a plain fade-in
     xout: int = 0  # the same, with the linked shot after
+    fixed: bool = False  # an audio layer: no spec field sets its gain, so a check line never asks to cut it
 
 
 @dataclass(frozen=True)
@@ -476,7 +477,7 @@ def _links(spec, spec_dir: Path | None, shots, fps: int, bpm: float | None) -> l
             xin = half if not layer.from_ and i > 0 and heard_out[i - 1] and a > 0 else 0
             xout = half if b == last and i + 1 < n and heard_in[i + 1] else 0
             out.append(Linked(layer.id, str(path), fps, start, a, b, float(clip_in or 0.0), None, None, 0.0,
-                              lag, xin, xout))
+                              lag, xin, xout, fixed=True))
         if not linked[i]:
             continue
         path, lag = source(sh.clip)
@@ -1007,16 +1008,19 @@ def _key(c: Placed | Linked) -> tuple[str, str]:
     """`(kind, name)` of the spec knob that sets a placement's level, as a check line names it.
 
     `sfx`: emphasis / `sfx: auto` sounds, all set by `audio.sfx_gain`; `id`: every clip (or linked
-    shot) with that id; `src`: unnamed clips of that file (`synth:hit` as is).
+    shot) with that id; `src`: unnamed clips of that file, keyed on its full path (`synth:hit` as is).
     """
     if c.id == SFX_ID:
         return ("sfx", "")
     if c.id:
         return ("id", c.id)
-    return ("src", c.src if c.src.startswith("synth:") else Path(c.src).name)
+    return ("src", c.src)
 
 
 def _shown(key: tuple[str, str]) -> str:
+    """The key as a check line prints it: an unnamed clip by its file name, not its path."""
+    if key[0] == "src" and not key[1].startswith("synth:"):
+        return Path(key[1]).name
     return {"track": TRACK, "sfx": "audio.sfx_gain"}.get(key[0], key[1])
 
 
@@ -1049,24 +1053,31 @@ def _peak_fix(full: np.ndarray, placed: list, plan: MixPlan, order: list[tuple[s
     """`(kind, name, placements, dB)`: a cut that keeps `full` under the ceiling everywhere.
 
     Duck sources are never cut (a quieter voice moves the duck). The cheapest clip knob among the
-    sources pushing the peak (`order`) wins, since the spec sets it; else the track (no spec field
-    sets its level: re-compose or turn the file down); else every non-duck source together
-    (`name` lists the spared duck ids). If even that cannot clear it, every source by the overshoot.
+    sources pushing the peak (`order`) wins, since the spec sets it (audio layers have no gain
+    field, so they are skipped; an `sfx` cut names `default` while the sounds sit at the default
+    `audio.sfx_gain`); else the track (no spec field sets its level: re-compose or turn the file
+    down); else every non-duck source together (`name` lists the spared duck ids). If even that
+    cannot clear it, every source by the overshoot.
     """
     ducked = set(plan.duck.under) if plan.duck is not None else set()
     is_duck = [c.id in ducked for c, _, _ in placed]
     clip_best: tuple = ()
+    default_db = float(DEFAULT_SFX_GAIN.removesuffix("dB"))
     for key in [k for k in order if k[0] != "track"]:
         part = np.zeros_like(full)
-        n = 0
+        mine = [c for (c, s, x), duck in zip(placed, is_duck) if _key(c) == key and not duck]
+        if not mine or any(getattr(c, "fixed", False) for c in mine):
+            continue
         for (c, s, x), duck in zip(placed, is_duck):
             if _key(c) == key and not duck:
                 part[s : s + len(x)] += x
-                n += 1
-        if not n or (h := _max_scale(full - part, part)) is None:
+        if (h := _max_scale(full - part, part)) is None:
             continue
         if not clip_best or _cut_db(h) < clip_best[3]:
-            clip_best = (*key, n, _cut_db(h))
+            name = _shown(key)
+            if key[0] == "sfx":
+                name = "default" if all(abs(c.gain_db - default_db) < 1e-6 for c in mine) else ""
+            clip_best = (key[0], name, len(mine), _cut_db(h))
     if clip_best:
         return clip_best
     duck_part = np.zeros_like(full)
@@ -1165,6 +1176,7 @@ def plan_hash(plan: MixPlan) -> str:
     if not plan.links:
         del body["links"]  # a plan without linked shots keeps the wav it had before links existed
     for link in body.get("links", ()):
+        del link["fixed"]  # a label for check lines; the samples do not depend on it
         if not link["xin"] and not link["xout"]:
             del link["xin"], link["xout"]  # an uncrossfaded link keeps the wav it had before crossfades
     payload = json.dumps({"rev": MIX_REV, "plan": body, "shas": shas}, sort_keys=True)
@@ -1192,7 +1204,8 @@ def render_mix(plan: MixPlan, build_dir: Path, *, log: Path | None = None) -> tu
 def _fix_text(fix: list | tuple) -> str:
     kind, name, n, cut = fix
     if kind == "sfx":
-        return f"lower audio.sfx_gain by {cut:.1f} dB"
+        default = f" (default {DEFAULT_SFX_GAIN})" if name == "default" else ""
+        return f"lower audio.sfx_gain{default} by {cut:.1f} dB"
     if kind in ("id", "src"):
         what = f"clip {name}" if kind == "id" else f"{name} clip"
         return f"lower gain on {'every ' if n > 1 else 'the '}{what} by {cut:.1f} dB"
