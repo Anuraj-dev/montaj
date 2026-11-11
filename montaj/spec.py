@@ -199,6 +199,9 @@ def _line(path: str, problem: str, hint: str) -> str:
 class IntroOutro(Frozen):
     type: str
     dur: DurationStr
+    # #58: frames of black after a `fade` outro, inside the film. Absent stays out of model_dump
+    # so films without it keep their segment hash.
+    hold: DurationStr | None = Field(default=None, exclude_if=lambda v: v is None)
 
 
 class LutLook(Frozen):
@@ -671,10 +674,20 @@ class Layer(Frozen):
 
 
 class CardSpec(Frozen):
-    """One shot's picture: a solid colour with text lines on it."""
+    """One shot's picture: a solid colour with text lines on it, or just the colour (#58)."""
 
     color: str
-    text: list[TextLine]
+    text: list[TextLine] = []
+
+    @model_validator(mode="before")
+    @classmethod
+    def _short_hex(cls, data: Any) -> Any:
+        """`#000` reads as `#000000`; six-digit colours pass unchanged, so hashes stay put."""
+        if isinstance(data, dict):
+            c = data.get("color")
+            if isinstance(c, str) and re.fullmatch(r"#[0-9a-fA-F]{3}", c):
+                data = {**data, "color": "#" + "".join(ch * 2 for ch in c[1:])}
+        return data
 
 
 class Shot(Frozen):
@@ -1280,6 +1293,8 @@ def _duration_fields(spec: Spec) -> list[tuple[str, str]]:
         out.append(("video.intro.dur", spec.video.intro.dur))
     if spec.video.outro:
         out.append(("video.outro.dur", spec.video.outro.dur))
+        if spec.video.outro.hold is not None:
+            out.append(("video.outro.hold", spec.video.outro.hold))
     for i, fx in enumerate(spec.fx):
         if fx.dur is not None:
             out.append((f"fx[{i}].dur", fx.dur))
@@ -2487,6 +2502,10 @@ def _check_finish(spec: Spec, errors: list[str], spec_dir: Path | None = None) -
         errors.append(
             _line("video.outro.type", f"unknown {outro.type!r}", f"use {_choices(OUTRO_TYPES)}")
         )
+    if outro is not None and outro.hold is not None and outro.type != "fade":
+        errors.append(_line("video.outro.hold", "only a fade outro holds black", "use type: fade"))
+    if intro is not None and intro.hold is not None:
+        errors.append(_line("video.intro.hold", "only video.outro takes hold", "remove hold"))
 
 
 def _probe_clip(spec: Spec, spec_dir: Path | None, stem: str) -> tuple[int, int, float] | None:
@@ -2876,6 +2895,7 @@ def validate_spec(
         if n is not None:
             parsed[path] = n
             times[path] = float(n)
+    _check_outro_hold(parsed, errors)
     for path, raw in _unrounded_durs(spec):
         if path.endswith("].pre") and isinstance(raw, str) and raw.strip().startswith("-"):
             n = _dur_frames(raw.strip()[1:], fps, bpm, path, errors)  # start after the event
@@ -3542,14 +3562,23 @@ def text_warnings(spec: Spec) -> list[str]:
     return out
 
 
+def _check_outro_hold(parsed: dict[str, int], errors: list[str]) -> None:
+    """A hold is black only behind a real fade (`fade_layer` skips dur 0), and at least 1 frame."""
+    hold = parsed.get("video.outro.hold")
+    if hold is None:
+        return
+    if hold < 1:
+        errors.append(_line("video.outro.hold", f"must be at least 1 frame, got {hold}f", "use 1f or longer"))
+    if parsed.get("video.outro.dur", 0) < 1:
+        errors.append(_line("video.outro.hold", "needs a fade: outro.dur is 0", "set outro.dur to 1f or longer"))
+
+
 def _validate_card(
     card: CardSpec, index: int, fps: int, bpm: float | None, errors: list[str]
 ) -> None:
     path = f"shots[{index}].card"
     if not isinstance(card.color, str) or not _HEX.match(card.color):
         errors.append(_line(f"{path}.color", f"expected #rrggbb, got {card.color!r}", "use #112233"))
-    if not card.text:
-        errors.append(_line(f"{path}.text", "need at least one line", "add a line"))
     for j, line in enumerate(card.text):
         p = f"{path}.text[{j}]"
         _check_text_line(p, line, errors)
