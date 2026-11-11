@@ -151,7 +151,31 @@ def _matches(span: Span, detected: Sequence[Span]) -> bool:
     return False
 
 
-def _note_expects(lines: list[str], kind: str, detected: Sequence[Span], expect: Sequence[Expect]) -> None:
+_MIN_S = {"black": BLACK_MIN_S, "frozen": FREEZE_MIN_S}
+_SHORT_WHY = {"black": "; a fade is black only at its end", "frozen": ""}
+
+
+def _nearest(span: Span, kind: str, detected: Sequence[Span], short: Sequence[Span]) -> str:
+    """What an unmet expectation came closest to: a detected span elsewhere, or one under the detector's
+    minimum (found by `short`, a pass with no minimum)."""
+    def gap(s: Span) -> float:
+        return max(s[0] - span[1], span[0] - s[1], 0.0)
+
+    cands = [(gap(s), s, False) for s in detected] + [
+        (gap(s), s, True) for s in short if s[1] - s[0] < _MIN_S[kind] and not _matches(s, detected)]
+    if not cands:
+        return f"no {kind} frames anywhere"
+    _, (a, b), under = min(cands)
+    if under:
+        return f"{kind} {a:.2f}-{b:.2f}s is under the {_MIN_S[kind]:.2f}s minimum{_SHORT_WHY[kind]}"
+    return f"nearest {kind} {a:.2f}-{b:.2f}s"
+
+
+def _note_expects(lines: list[str], kind: str, detected: Sequence[Span], expect: Sequence[Expect],
+                  short=None) -> None:
+    """`short` (no-argument callable -> spans, run only on a miss) finds spans shorter than the minimum, so a
+    miss can say what was there instead."""
+    found: list[Span] | None = None
     for item in expect:
         if item.kind != kind:
             continue
@@ -160,7 +184,9 @@ def _note_expects(lines: list[str], kind: str, detected: Sequence[Span], expect:
             if item.why:
                 lines.append(f"INFO {kind} {label} ignored as intended: {item.why}")
         else:
-            lines.append(f"INFO expect {kind} {label} not found")
+            if found is None:
+                found = list(short()) if short is not None else []
+            lines.append(f"INFO expect {kind} {label} not found ({_nearest(item.span, kind, detected, found)})")
 
 
 def video_line(info: MediaInfo, want: VideoSettings | None = None) -> str:
@@ -218,7 +244,7 @@ def check(video: Path | str, intended_freeze: Sequence[Span] = (), *, log: Path 
         lines += [f"WARN black {start:.2f}-{end:.2f}s" for start, end in left]
     if ignored_black:
         lines.append(f"INFO black {ignored_black} span(s) ignored as intended")
-    _note_expects(lines, "black", detected_black, expect)
+    _note_expects(lines, "black", detected_black, expect, lambda: black_spans(video, log=log, min_s=0.0))
     ignored = 0
     detected_frozen = frozen_spans(video, log=log)
     for span in detected_frozen:
@@ -229,7 +255,7 @@ def check(video: Path | str, intended_freeze: Sequence[Span] = (), *, log: Path 
         lines += [f"WARN frozen {start:.1f}-{end:.1f}s" for start, end in left]
     if ignored:
         lines.append(f"INFO frozen {ignored} span(s) ignored as intended")
-    _note_expects(lines, "frozen", detected_frozen, expect)
+    _note_expects(lines, "frozen", detected_frozen, expect, lambda: frozen_spans(video, log=log, min_s=0.1))
     if not info.has_audio:
         lines.append("INFO no audio")
         return lines

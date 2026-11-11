@@ -929,7 +929,24 @@ def _grep_hit(words, k: int, text: str) -> bool:
     return [_norm(w.w) for w in words[k:k + len(want)]] == want
 
 
-def _cmd_check(ns: argparse.Namespace, root: Path, numbers: dict | None = None) -> list[str]:
+def _findings(lines: list[str], captions: list) -> list[dict]:
+    """`check --json` findings: every WARN and ERR line and each unmet `expect`, in output order. Caption
+    findings carry their spec path, time span, text, value and limit; the rest only kind, level and message."""
+    by_line = {f.line: f.as_dict() for f in captions}
+    out = []
+    for line in lines[:-1]:  # the last line is the summary
+        level, _, rest = line.partition(" ")
+        kind = rest.split(" ", 1)[0].rstrip(":")
+        if line in by_line:
+            out.append(by_line[line])
+        elif level in ("WARN", "ERR") or (level == "INFO" and kind == "expect"):
+            out.append({"kind": kind, "level": level, "path": None, "start": None, "end": None, "text": None,
+                        "value": None, "limit": None, "message": line})
+    return out
+
+
+def _cmd_check(ns: argparse.Namespace, root: Path, numbers: dict | None = None,
+               findings: list | None = None) -> list[str]:
     expects, loud_i, loud_tol = _check_overrides(root)
     black = union([*_intended_black(root), *(item.span for item in expects if item.kind == "black")])
     freeze = union([*_intended_freeze(root), *(item.span for item in expects if item.kind == "frozen")])
@@ -953,6 +970,7 @@ def _cmd_check(ns: argparse.Namespace, root: Path, numbers: dict | None = None) 
                                 log=root / "build" / "qa.log")
     lines += _audio_mix_lines(root)
     lines.extend(_clip_overruns(root))
+    caps: list = []
     if spec is not None:
         tl = resolve(spec, root)
         lines += _join_lines(tl, root, _video(root, ns.video))
@@ -963,7 +981,7 @@ def _cmd_check(ns: argparse.Namespace, root: Path, numbers: dict | None = None) 
         lines += pacing.lines(nums, spec.check.pacing if spec.check else None,
                               fps=tl.fps, bpm=tl.spec.video.bpm)
         lines += caption_check.lines(tl, _video(root, ns.video), root / "build" / "captions-check",
-                                     log=root / "build" / "qa.log")
+                                     log=root / "build" / "qa.log", found=caps)
         lines += scopes.check_lines(root, spec)
     errs = sum(line.startswith("ERR") for line in lines)
     warns = sum(line.startswith("WARN") for line in lines)
@@ -971,6 +989,8 @@ def _cmd_check(ns: argparse.Namespace, root: Path, numbers: dict | None = None) 
         lines.append(f"ERR check: {errs} guard(s) unavailable (see the ERR lines above; uv sync --extra guards adds the optional ones)")
     else:
         lines.append(f"WARN check: {warns} warnings" if warns else "OK check")
+    if findings is not None:
+        findings += _findings(lines, caps)
     return lines
 
 
@@ -1321,8 +1341,10 @@ def main(argv: list[str] | None = None) -> int:
             return 0 if _status(lines) != "ERR" else 1
         if as_json and ns.cmd == "check":
             numbers: dict = {}
-            lines = _cmd_check(ns, root, numbers)
-            print(json.dumps({"status": _status(lines), "lines": lines, "pacing": numbers}, ensure_ascii=False))
+            found: list = []
+            lines = _cmd_check(ns, root, numbers, found)
+            print(json.dumps({"status": _status(lines), "lines": lines, "findings": found, "pacing": numbers},
+                             ensure_ascii=False))
             return 0 if _status(lines) != "ERR" else 1
         if as_json and ns.cmd == "scopes":
             shots: dict = {}

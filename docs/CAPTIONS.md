@@ -102,11 +102,15 @@ text and its segment hash, and `validate` warns instead).
   at most 8 words, no `dot`):
   `WARN text[i].lines[j] ends with a full stop`, `WARN caption-box text[i] ...` (chip or solid backdrop),
   `WARN caption-weight text[i] ...` (under 600), `WARN caption-size text[i] ...` (under 5% of the frame height).
-- `check` (measured), per caption chunk (numbers match `montaj captions --print`):
-  `WARN caption-contrast chunk=N ratio=X` (under 4.5; a stroke of at least 4% of the size counts as the backdrop),
-  `WARN caption-safe chunk=N <side>` (zones above; set `check.safe: {top, bottom, left, right}` as fractions),
-  `WARN caption-face chunk=N` (needs `uv sync --extra guards`), `WARN caption-rate chunk=N Ncps` (a 5/6 s window
-  over 20 cps, named by its first chunk; one line per window).
+- `check` (measured), per caption chunk, in time order. Each line names where to fix it: `text[i]` (the block's
+  index in `text:`) or `captions[N]` (chunk N of `montaj captions --print`), then the time, the text, the value and
+  the fix, e.g. `WARN caption-rate text[4] 3.5-4.0s 'SWITCH WORKSPACES' 32cps (max 20: hold longer or cut words)`:
+  `caption-contrast ... ratio X` (under 4.5; a stroke of at least 4% of the size counts as the backdrop),
+  `caption-safe ... <side>` (zones above; set `check.safe: {top, bottom, left, right}` as fractions),
+  `caption-face ... over a face` (needs `uv sync --extra guards`), `caption-rate ... Ncps` (a 5/6 s window of
+  contiguous chunks over 20 cps, never across a pause that clears the screen; named by its densest chunk with that
+  chunk's own rate; one line per window). `role: title` on a block or style takes designed text out of every
+  caption lint; `montaj spec messages` explains each kind.
   Authored text blocks without per-glyph layout have no ink box, so only the rate is measured for them.
 - A designed exception goes under `check.expect: [{caption: [a, b], why: ...}]`; findings inside the span become
   `INFO caption a-bs ignored as intended: why`.
