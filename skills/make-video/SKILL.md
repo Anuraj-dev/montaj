@@ -65,7 +65,7 @@ that costs no tokens. Run every command as `montaj -C <project> <cmd>`. Each pri
    - Repetition: `styles:`, `defaults:`, `components:` + `use:`; `montaj validate --expand` shows the result.
    `montaj validate` and fix every `ERR` (each names its fix). Done on `OK montaj.yaml …`.
 
-5. **Preview.** `montaj render`, then numbers first: `montaj inspect --problems` (text off-frame, low
+5. **Preview.** `montaj render`, then numbers first: `montaj inspect --problems` (text off-frame, overlap, low
    contrast), `montaj scopes` (exposure, clipping, cast, skin); `montaj match --to N` evens out a scene's
    grade. Then `montaj sheet` and look at `build/sheet.jpg` for framing and the arc. For motion, one
    `sheet --strip <t>` per new kind of motion (not per shot) or `sheet --transitions`; after a re-render
