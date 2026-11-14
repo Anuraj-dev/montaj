@@ -150,3 +150,7 @@ There is no CONTRIBUTING file yet. Start with [AGENTS.md](AGENTS.md) for the dev
 - Renderer code reads only the frame plan, the shots it names and asset files. Module-level mutable state breaks the segment cache.
 
 Before a PR, run `uv run pytest -q -m "not gpu"`. On a CUDA machine, also run `uv run pytest -q`.
+
+## License
+
+MIT. See [LICENSE](LICENSE).
