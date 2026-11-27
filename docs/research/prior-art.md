@@ -17,7 +17,7 @@
 
 ## Known traps
 - Headless Chromium renders on CPU (SwiftShader) regardless of GPU flags — measured, no speedup. Don't retry.
-- ACE-Step venv `bin/python` symlink is dangling → run uv CPython 3.12 with its site-packages (`music/py.sh`).
+- ACE-Step venv `bin/python` symlink went dangling (its base CPython was deleted); repaired 2026-11-27 to point at uv CPython 3.12. If `doctor` warns `ace-venv-python` again, repoint the symlink and `pyvenv.cfg` `home`, don't reinstall. `ace_python` + `ace_site_packages` runs ACE-Step either way.
 - 8 GB VRAM: ACE-Step needs `offload_to_cpu` + `offload_dit_to_cpu`, else the LM phase OOMs. Don't render at the same time.
 - ACE-Step location: `design-test/voice-bot/tools/ACE-Step-1.5` (19 GB) — reference via config, don't move.
 - `[gpu] strict = true` makes every CPU pixel fallback an `ERR gpu-strict` (ffmpeg decode, Chromium text, PIL photo/print shadow, libx264). Page raster in `capture` is the one named CPU exception. A cached segment is not rechecked.

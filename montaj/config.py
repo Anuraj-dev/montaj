@@ -5,9 +5,10 @@ montaj's own venv does not have, and montaj must not import them (torch here, ct
 So montaj reads this file and runs both models as subprocesses. The file belongs to the machine:
 montaj reads it, never writes it.
 
-`ace_python` + `ace_site_packages` is the dangling-venv trick from
-`claude-test/bday-video/music/py.sh` lines 3-4: ACE-Step's `.venv/bin/python` symlink is dead, so a
-working CPython 3.12 runs with that venv's `site-packages` on `PYTHONPATH`.
+`ace_python` + `ace_site_packages` came from `claude-test/bday-video/music/py.sh` lines 3-4, when
+ACE-Step's `.venv/bin/python` symlink was dead: a working CPython 3.12 runs with that venv's
+`site-packages` on `PYTHONPATH`. The symlink was repaired on 2026-11-27, and the pair works either
+way; `montaj doctor` reports the symlink as `ace-venv-python`.
 """
 from __future__ import annotations
 

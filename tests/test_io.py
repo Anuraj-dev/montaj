@@ -700,3 +700,20 @@ def test_check_expect_suppresses_warn_and_names_why(tmp_path: Path) -> None:
     assert not any(line.startswith("WARN black") for line in lines)
     assert "INFO black 0–1s ignored as intended: HUD intro" in lines
     assert any(ln.startswith("WARN expect frozen (5–6s) not found (") for ln in lines)
+
+
+def test_doctor_ace_venv_python_reports_a_dangling_symlink_and_its_repair(tmp_path: Path) -> None:
+    ace = tmp_path / "ace"
+    assert doctor.ace_venv_python_lines(str(ace)) == []  # no venv python: no line
+
+    python = ace / ".venv" / "bin" / "python"
+    python.parent.mkdir(parents=True)
+    python.symlink_to(tmp_path / "gone" / "python3.12")
+    lines = doctor.ace_venv_python_lines(str(ace))
+    assert len(lines) == 1 and lines[0].startswith(f"WARN ace-venv-python: {python} is dangling"), lines
+
+    real = tmp_path / "python3.12"
+    real.write_text("")
+    python.unlink()
+    python.symlink_to(real)
+    assert doctor.ace_venv_python_lines(str(ace)) == [f"OK ace-venv-python: {python} -> {real}"]
