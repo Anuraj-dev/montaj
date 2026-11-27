@@ -23,7 +23,7 @@ WHISPER_IMPORT_TIMEOUT = 20  # a plain import; the model load is the slow part a
 # docs/research/prior-art.md "Known traps" — keep in sync with that file.
 TRAPS: tuple[str, ...] = (
     "TRAP chromium-cpu: headless Chromium renders on CPU (SwiftShader) whatever GPU flags say - don't retry",
-    "TRAP ace-step-python: ACE-Step venv bin/python symlink is dangling; run uv CPython 3.12 with its site-packages",
+    "TRAP ace-step-python: if ace-venv-python warns dangling, repoint .venv/bin/python at uv CPython 3.12 and fix pyvenv.cfg home - don't reinstall; ace_python + ace_site_packages runs either way",
     "TRAP ace-step-vram: 8 GB VRAM - ACE-Step needs offload_to_cpu + offload_dit_to_cpu, and no render at the same time",
     "TRAP ace-step-path: ACE-Step lives at ~/.local/share/montaj/ACE-Step-1.5 (18 GB) - reference via config, don't move",
     "TRAP gpu-lock: music gen/analyze and render share the one GPU - montaj locks ~/.cache/montaj/gpu.lock, don't run them side by side",
@@ -306,6 +306,20 @@ def text_engine_line() -> str:
     return f"OK text-engine: {styles}; gpu opt-in per line (engine: gpu), harfbuzz {uharfbuzz.version_string()}, fonttools {fontTools.version}"
 
 
+def ace_venv_python_lines(ace_step_dir: str) -> list[str]:
+    """ACE-Step's own `.venv/bin/python`: OK when it resolves, WARN when the symlink is dangling.
+
+    No line when there is no venv python at all. Its base CPython has gone missing before
+    (2026-11-27), which made ACE-Step look broken though `ace_python` ran it fine.
+    """
+    python = Path(ace_step_dir) / ".venv" / "bin" / "python"
+    if not python.is_symlink() and not python.exists():
+        return []
+    if not python.exists():
+        return [f"WARN ace-venv-python: {python} is dangling (-> {os.readlink(python)}); ace_python still runs ACE-Step"]
+    return [f"OK ace-venv-python: {python} -> {python.resolve()}"]
+
+
 def _exists_line(name: str, path: str) -> str:
     return f"OK {name}: {path}" if Path(path).exists() else f"FAIL {name}: {path} does not exist"
 
@@ -340,6 +354,8 @@ def config_lines(config: Config | None = None) -> list[str]:
     for key in ("ace_step_dir", "ace_python", "ace_site_packages", "whisper_python"):
         value = getattr(cfg, key)
         lines.append(f"FAIL {key}: missing" if not value else _exists_line(key, value))
+    if cfg.ace_step_dir:
+        lines.extend(ace_venv_python_lines(cfg.ace_step_dir))
     lines.append(
         faster_whisper_line(cfg.whisper_python) if cfg.whisper_python
         else "FAIL faster_whisper: whisper_python missing"
